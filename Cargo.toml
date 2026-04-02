@@ -1,0 +1,26 @@
+[package]
+name = "tzap"
+version = "0.1.0"
+edition = "2024"
+description = "A fast T gate optimizer for large Clifford+T circuits using phase folding"
+license = "Apache-2.0"
+authors = ["Aws Albarghouthi"]
+repository = "https://github.com/qqq-wisc/tzap"
+homepage = "https://github.com/qqq-wisc/tzap"
+keywords = ["quantum", "circuit", "optimization", "qasm", "clifford"]
+categories = ["science", "command-line-utilities"]
+readme = "README.md"
+
+[dependencies]
+indicatif = "0.17"
+rayon = "1"
+rsgridsynth = "0.2"
+rustc-hash = "2"
+
+[[bench]]
+name = "zobrist_rng"
+harness = false
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"
