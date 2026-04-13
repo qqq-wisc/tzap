@@ -55,6 +55,7 @@ tzap supports a subset of OpenQASM 2.0:
 - Unrecognized lines will produce an error
 
 ## Building
+Install [Rust](https://github.com/qqq-wisc/tzap.git) then
 
 ```
 cargo build --release
