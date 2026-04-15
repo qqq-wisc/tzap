@@ -3,8 +3,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
+import re
 
-# Raw data
+# --- data -------------------------------------------------------------------
 data = [
     ("gf2^4_mult",   3,      4),
     ("gf2^5_mult",   3,      5),
@@ -16,131 +17,131 @@ data = [
     ("gf2^16_mult", 20,    297),
     ("gf2^32_mult",  5,  13093),
     ("gf2^64_mult", 10, 920557),
-    ("gf2^128_mult",56,   None),  # None = timeout
+    ("gf2^128_mult",56,   None),
 ]
-
-# Sort by exponent in name (2^4, 2^5, ..., 2^128)
-import re
 data.sort(key=lambda r: int(re.search(r'\^(\d+)', r[0]).group(1)))
 
-circuits  = [r[0] for r in data]
-tzap_ms   = [r[1] for r in data]
-quizx_ms  = [r[2] for r in data]
+circuits = [r[0] for r in data]
+tzap_ms  = [r[1] for r in data]
+quizx_ms = [r[2] for r in data]
 
 TIMEOUT_PLACEHOLDER = 1_500_000
 
-# --- palette (light theme) --------------------------------------------------
-TZAP_COL    = "#1971C2"   # deep blue
-QUIZX_COL   = "#E03131"   # deep red
-TIMEOUT_COL = "#F08C00"   # amber
-BG          = "#FFFFFF"
-PANEL_BG    = "#F8F9FA"
-GRID_COL    = "#DEE2E6"
-TEXT_COL    = "#212529"
-LABEL_COL   = "#495057"
-
-fig, ax = plt.subplots(figsize=(11, 6.5))
-fig.patch.set_facecolor(BG)
-ax.set_facecolor(PANEL_BG)
-
-n = len(circuits)
-y = np.arange(n)
-bar_h = 0.36
-
-# --- quizx bars -------------------------------------------------------------
-quizx_vals = [v if v is not None else TIMEOUT_PLACEHOLDER for v in quizx_ms]
-is_timeout = [v is None for v in quizx_ms]
-
-bars_quizx = ax.barh(y + bar_h / 2, quizx_vals, bar_h,
-                     color=QUIZX_COL, alpha=0.80, zorder=3, label="quizx",
-                     linewidth=0)
-
 def fmt_time(ms):
+    if ms is None:
+        return "timeout"
     if ms >= 1000:
         s = ms / 1000
-        return f"{s:.1f}s" if s < 100 else f"{s:.0f}s"
+        return f"{s:.0f} s" if s >= 10 else f"{s:.1f} s"
     return f"{ms} ms"
 
 def fmt_speedup(tzap, quizx):
     if quizx is None:
         return None
-    ratio = quizx / tzap
-    if ratio >= 10:
-        return f"{ratio:.0f}×"
-    return f"{ratio:.1f}×"
+    r = quizx / tzap
+    return f"{r:.0f}×" if r >= 10 else f"{r:.1f}×"
 
-for bar, tmo in zip(bars_quizx, is_timeout):
+# --- style ------------------------------------------------------------------
+plt.rcParams.update({
+    "font.family":       "sans-serif",
+    "font.size":         9,
+    "axes.linewidth":    0.7,
+    "xtick.major.width": 0.7,
+    "xtick.minor.width": 0.4,
+})
+
+DARK  = "#1a1a1a"
+MID   = "#888888"
+LIGHT = "#cccccc"
+WHITE = "#ffffff"
+GRID  = "#e8e8e8"
+
+fig, ax = plt.subplots(figsize=(7.5, 4.0))
+fig.patch.set_facecolor(WHITE)
+ax.set_facecolor(WHITE)
+
+n     = len(circuits)
+y     = np.arange(n)
+bar_h = 0.34
+
+is_timeout = [v is None for v in quizx_ms]
+quizx_draw = [v if v is not None else TIMEOUT_PLACEHOLDER for v in quizx_ms]
+
+# quizx bars
+bars_q = ax.barh(y + bar_h / 2, quizx_draw, bar_h,
+                 color=LIGHT, edgecolor=MID, linewidth=0.5, zorder=3)
+for bar, tmo in zip(bars_q, is_timeout):
     if tmo:
-        bar.set_color(TIMEOUT_COL)
-        bar.set_alpha(0.65)
         bar.set_hatch("////")
-        bar.set_edgecolor("#CCA300")
-        ax.text(TIMEOUT_PLACEHOLDER * 1.05,
-                bar.get_y() + bar.get_height() / 2,
-                "timeout", va="center", ha="left", fontsize=8.5,
-                color=TIMEOUT_COL, fontweight="bold")
 
-# --- tzap bars --------------------------------------------------------------
-bars_tzap = ax.barh(y - bar_h / 2, tzap_ms, bar_h,
-                    color=TZAP_COL, alpha=0.85, zorder=3, label="tzap",
-                    linewidth=0)
+# tzap bars
+bars_t = ax.barh(y - bar_h / 2, tzap_ms, bar_h,
+                 color=DARK, linewidth=0, zorder=3)
 
-# --- value labels -----------------------------------------------------------
-for bar, val in zip(bars_tzap, tzap_ms):
-    ax.text(val * 1.08, bar.get_y() + bar.get_height() / 2,
-            fmt_time(val), va="center", ha="left", fontsize=8,
-            color=TZAP_COL, fontweight="semibold")
-
-for bar, val, tmo in zip(bars_quizx, quizx_ms, is_timeout):
-    if not tmo:
-        ax.text(val * 1.08, bar.get_y() + bar.get_height() / 2,
-                fmt_time(val), va="center", ha="left", fontsize=8,
-                color=QUIZX_COL, fontweight="semibold")
-
-# --- speedup labels on quizx bars (or at right edge for timeout) ------------
-for bar, tzap, quizx, tmo in zip(bars_quizx, tzap_ms, quizx_ms, is_timeout):
-    label = fmt_speedup(tzap, quizx)
-    if label is None:
-        continue
-    bar_cx = (bar.get_x() + bar.get_width()) / 2 if not tmo else TIMEOUT_PLACEHOLDER / 2
-    bar_cy = bar.get_y() + bar.get_height() / 2
-    ax.text(bar_cx, bar_cy, label,
-            va="center", ha="center", fontsize=7.5, fontweight="bold",
-            color="white", alpha=0.92)
-
-# --- axes -------------------------------------------------------------------
+# --- axes (set before annotating so transforms are stable) ------------------
 ax.set_xscale("log")
-ax.set_xlim(1, 9_000_000)
-
-ax.set_yticks(y)
-ax.set_yticklabels(circuits, fontsize=10.5, color=TEXT_COL, fontfamily="monospace")
-
-ax.set_xlabel("Time (ms, log scale)", color=LABEL_COL, fontsize=10)
-ax.tick_params(colors=LABEL_COL, which="both", labelsize=9)
-ax.tick_params(axis="x", which="minor", length=3)
-
-for spine in ["top", "right", "left"]:
-    ax.spines[spine].set_visible(False)
-ax.spines["bottom"].set_color(GRID_COL)
-
-ax.xaxis.grid(True, which="both", color=GRID_COL, linewidth=0.8, zorder=0)
-ax.set_axisbelow(True)
+ax.set_xlim(1, 4e7)          # extra right margin for labels
 ax.invert_yaxis()
 
+ax.set_yticks(y)
+ax.set_yticklabels(circuits, fontsize=8.5, fontfamily="monospace", color=DARK)
+ax.set_xlabel("Time (ms, log scale)", fontsize=9, color=DARK)
+ax.tick_params(axis="x", colors=DARK, which="both", labelsize=8)
+ax.tick_params(axis="y", length=0)
+
+for sp in ["top", "right", "left"]:
+    ax.spines[sp].set_visible(False)
+ax.spines["bottom"].set_color(DARK)
+
+ax.xaxis.grid(True, which="major", color=GRID, linewidth=0.7, zorder=0)
+ax.xaxis.grid(True, which="minor", color=GRID, linewidth=0.35, zorder=0)
+ax.set_axisbelow(True)
+
+# --- value labels (just outside each bar) -----------------------------------
+for bar, val in zip(bars_t, tzap_ms):
+    ax.text(val * 1.15, bar.get_y() + bar.get_height() / 2,
+            fmt_time(val), va="center", ha="left", fontsize=7, color=DARK)
+
+for bar, val, tmo in zip(bars_q, quizx_ms, is_timeout):
+    x = (TIMEOUT_PLACEHOLDER if tmo else val) * 1.15
+    ax.text(x, bar.get_y() + bar.get_height() / 2,
+            fmt_time(val), va="center", ha="left", fontsize=7,
+            color=MID, style="italic" if tmo else "normal")
+
+# --- speedup column: right-aligned at a fixed x position -------------------
+X_SPEEDUP = 1.2e7   # fixed x for speedup column (in data coords)
+ax.axvline(X_SPEEDUP * 0.72, color=GRID, linewidth=0.6, zorder=0)   # subtle separator
+
+for i, (tzap, quizx) in enumerate(zip(tzap_ms, quizx_ms)):
+    label = fmt_speedup(tzap, quizx)
+    if label is None:
+        label = "—"
+    ax.text(X_SPEEDUP, i, label,
+            va="center", ha="center", fontsize=7.5,
+            fontweight="bold", color=DARK)
+
+# column header
+ax.text(X_SPEEDUP, -0.85, "speedup",
+        va="center", ha="center", fontsize=7.5, color=MID,
+        style="italic")
+
 # --- legend -----------------------------------------------------------------
-timeout_patch = mpatches.Patch(facecolor=TIMEOUT_COL, hatch="////",
-                                edgecolor="#CCA300", alpha=0.65,
+timeout_patch = mpatches.Patch(facecolor=LIGHT, hatch="////",
+                                edgecolor=MID, linewidth=0.5,
                                 label="quizx (timeout)")
-tzap_patch  = mpatches.Patch(color=TZAP_COL,  alpha=0.85, label="tzap")
-quizx_patch = mpatches.Patch(color=QUIZX_COL, alpha=0.80, label="quizx")
+tzap_patch  = mpatches.Patch(facecolor=DARK,  linewidth=0,    label="tzap")
+quizx_patch = mpatches.Patch(facecolor=LIGHT, edgecolor=MID,
+                              linewidth=0.5,                   label="quizx")
 ax.legend(handles=[tzap_patch, quizx_patch, timeout_patch],
-          facecolor=BG, edgecolor=GRID_COL, labelcolor=TEXT_COL,
-          fontsize=9.5, loc="upper right", framealpha=1)
+          facecolor=WHITE, edgecolor=GRID, labelcolor=DARK,
+          fontsize=8, loc="upper right", framealpha=1,
+          handlelength=1.2, handleheight=0.9,
+          bbox_to_anchor=(0.62, 1.0))
 
-ax.set_title("T-gate reduction: tzap vs quizx — runtime",
-             color=TEXT_COL, fontsize=13, pad=14, fontweight="bold")
+ax.set_title("tzap vs. quizx: runtime on GF(2$^k$) multiplier circuits",
+             fontsize=10, color=DARK, pad=10)
 
-plt.tight_layout()
-plt.savefig("scripts/comparison.png", dpi=160, bbox_inches="tight",
-            facecolor=fig.get_facecolor())
+plt.tight_layout(pad=0.6)
+plt.savefig("scripts/comparison.png", dpi=200, bbox_inches="tight",
+            facecolor=WHITE)
 print("Saved to scripts/comparison.png")
