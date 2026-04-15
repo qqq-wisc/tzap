@@ -8,12 +8,7 @@ import re
 # --- data -------------------------------------------------------------------
 data = [
     ("gf2^4_mult",   3,      4),
-    ("gf2^5_mult",   3,      5),
-    ("gf2^6_mult",   7,     11),
-    ("gf2^7_mult",   3,     10),
     ("gf2^8_mult",   3,     16),
-    ("gf2^9_mult",   3,     21),
-    ("gf2^10_mult",  8,     54),
     ("gf2^16_mult", 20,    297),
     ("gf2^32_mult",  5,  13093),
     ("gf2^64_mult", 10, 920557),
@@ -56,7 +51,7 @@ LIGHT = "#cccccc"
 WHITE = "#ffffff"
 GRID  = "#e8e8e8"
 
-fig, ax = plt.subplots(figsize=(7.5, 4.0))
+fig, ax = plt.subplots(figsize=(7.5, 2.8))
 fig.patch.set_facecolor(WHITE)
 ax.set_facecolor(WHITE)
 
