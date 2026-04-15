@@ -74,7 +74,7 @@ mod tests {
     fn decomposes_rz_into_clifford_t() {
         let mut c = Circuit::new(1);
         c.apply(Gate::rz(PI / 5.0, 0));
-        let dec = DecomposeRz::default().run(&c);
+        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
         assert!(!dec.gates.is_empty());
         for g in &dec.gates {
@@ -99,7 +99,7 @@ mod tests {
         c.apply(Gate::rz(PI / 3.0, 0));
         c.apply(Gate::cnot { control: 0, target: 1 });
         c.apply(Gate::rz(PI / 7.0, 1));
-        let dec = DecomposeRz::default().run(&c);
+        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
     }
 
@@ -108,5 +108,22 @@ mod tests {
         let c = Circuit::new(1);
         let dec = DecomposeRz::default().run(&c);
         assert_eq!(dec.gates.len(), 0);
+    }
+
+    #[test]
+    fn default_epsilon_is_1e_10() {
+        assert_eq!(DecomposeRz::default().epsilon, 1e-10);
+    }
+
+    #[test]
+    fn coarser_epsilon_produces_fewer_or_equal_t_gates() {
+        let mut c = Circuit::new(1);
+        c.apply(Gate::rz(PI / 5.0, 0));
+        let fine = DecomposeRz { epsilon: 1e-4 }.run(&c);
+        let coarse = DecomposeRz { epsilon: 1e-2 }.run(&c);
+        let t_fine = fine.gates.iter().filter(|g| matches!(g, Gate::t(_))).count();
+        let t_coarse = coarse.gates.iter().filter(|g| matches!(g, Gate::t(_))).count();
+        assert!(t_coarse <= t_fine,
+            "coarser epsilon should not require more T gates ({t_coarse} > {t_fine})");
     }
 }

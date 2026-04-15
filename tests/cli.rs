@@ -288,6 +288,139 @@ t q[1];
     assert!(gates.len() >= 3, "should not merge T on CNOT target: {gates:?}");
 }
 
+fn rz_qasm(theta_expr: &str) -> String {
+    format!(
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\nrz({theta_expr}) q[0];\n"
+    )
+}
+
+#[test]
+fn decompose_rz_with_epsilon_produces_cliffordt() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rz.qasm");
+    let output = dir.path().join("out.qasm");
+    fs::write(&input, rz_qasm("pi/5")).unwrap();
+
+    let out = tzap_run(&[
+        input.to_str().unwrap(),
+        "-o", output.to_str().unwrap(),
+        "--decompose-rz",
+        "--epsilon", "1e-3",
+    ]);
+    assert!(out.status.success(), "tzap failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let content = fs::read_to_string(&output).unwrap();
+    let gates = gate_lines_from(&content);
+    assert!(!gates.iter().any(|g| g.starts_with("rz(")),
+        "no rz gates should remain, got: {gates:?}");
+    assert!(!gates.is_empty(), "output should have gates after decomposition");
+}
+
+#[test]
+fn epsilon_accepts_scientific_notation_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rz.qasm");
+    fs::write(&input, rz_qasm("pi/5")).unwrap();
+
+    for eps in &["1e-3", "1E-3", "1.5e-2", "0.001"] {
+        let out = tzap_run(&[
+            input.to_str().unwrap(),
+            "--decompose-rz",
+            "--epsilon", eps,
+        ]);
+        assert!(out.status.success(),
+            "--epsilon {eps} should be accepted, stderr: {}",
+            String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn invalid_epsilon_exits_with_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rz.qasm");
+    fs::write(&input, rz_qasm("pi/5")).unwrap();
+
+    let out = tzap_run(&[
+        input.to_str().unwrap(),
+        "--decompose-rz",
+        "--epsilon", "not-a-number",
+    ]);
+    assert!(!out.status.success(), "invalid epsilon should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--epsilon"), "error should mention --epsilon, got: {stderr}");
+}
+
+#[test]
+fn epsilon_without_decompose_rz_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rz.qasm");
+    let output = dir.path().join("out.qasm");
+    fs::write(&input, rz_qasm("pi/5")).unwrap();
+
+    let out = tzap_run(&[
+        input.to_str().unwrap(),
+        "-o", output.to_str().unwrap(),
+        "--epsilon", "1e-3",
+    ]);
+    assert!(out.status.success(), "tzap failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let content = fs::read_to_string(&output).unwrap();
+    let gates = gate_lines_from(&content);
+    assert!(gates.iter().any(|g| g.starts_with("rz(")),
+        "rz gate should be preserved without --decompose-rz, got: {gates:?}");
+}
+
+#[test]
+fn coarser_epsilon_produces_fewer_t_gates_than_finer() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rz.qasm");
+    fs::write(&input, rz_qasm("pi/5")).unwrap();
+
+    let out_fine = dir.path().join("fine.qasm");
+    let out_coarse = dir.path().join("coarse.qasm");
+
+    let r1 = tzap_run(&[
+        input.to_str().unwrap(), "-o", out_fine.to_str().unwrap(),
+        "--decompose-rz", "--epsilon", "1e-4",
+    ]);
+    let r2 = tzap_run(&[
+        input.to_str().unwrap(), "-o", out_coarse.to_str().unwrap(),
+        "--decompose-rz", "--epsilon", "1e-2",
+    ]);
+    assert!(r1.status.success());
+    assert!(r2.status.success());
+
+    let t_fine = gate_lines_from(&fs::read_to_string(&out_fine).unwrap())
+        .iter().filter(|g| g.starts_with("t ") || g.starts_with("tdg ")).count();
+    let t_coarse = gate_lines_from(&fs::read_to_string(&out_coarse).unwrap())
+        .iter().filter(|g| g.starts_with("t ") || g.starts_with("tdg ")).count();
+
+    assert!(t_coarse <= t_fine,
+        "coarser epsilon should need <= T gates: coarse={t_coarse}, fine={t_fine}");
+}
+
+#[test]
+fn to_cliffordt_with_epsilon_produces_cliffordt() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rz.qasm");
+    let output = dir.path().join("out.qasm");
+    fs::write(&input, rz_qasm("pi/5")).unwrap();
+
+    let out = tzap_run(&[
+        input.to_str().unwrap(),
+        "-o", output.to_str().unwrap(),
+        "--to-cliffordt",
+        "--epsilon", "1e-3",
+    ]);
+    assert!(out.status.success(), "tzap failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let content = fs::read_to_string(&output).unwrap();
+    let gates = gate_lines_from(&content);
+    assert!(!gates.iter().any(|g| g.starts_with("rz(")),
+        "no rz gates should remain, got: {gates:?}");
+    assert!(!gates.is_empty());
+}
+
 fn gate_lines_from(stdout: &str) -> Vec<String> {
     stdout.lines()
         .filter(|l| !l.starts_with("OPENQASM") && !l.starts_with("include") && !l.starts_with("qreg"))
@@ -571,7 +704,3 @@ tdg q[2];
     let c2 = fs::read_to_string(&pass2).unwrap();
     assert_eq!(c1, c2, "output should be idempotent with z/sdg gates");
 }
-
-
-
-

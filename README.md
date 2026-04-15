@@ -11,7 +11,7 @@ It takes OpenQASM 2.0 circuits as input, optimizes them, and outputs optimized O
 **Gate handling:**
 
 - **Toffoli (`ccx`)** gates are automatically decomposed into Clifford+T before optimization.
-- **Rz** gates are left as-is by default. Pass `--decompose-rz` to decompose them into Clifford+T via [gridsynth](https://crates.io/crates/rsgridsynth).
+- **Rz** gates are left as-is by default. Pass `--decompose-rz` to decompose them into Clifford+T via [gridsynth](https://crates.io/crates/rsgridsynth). `--to-cliffordt` also decomposes Rz gates. Use `--epsilon <eps>` with either flag to control the approximation precision (default: `1e-10`; accepts scientific notation).
 
 ## Usage
 
@@ -21,7 +21,8 @@ CLI usage or API usage (see [API.md](API.md)).
 tzap input.qasm                           # optimize, print stats only
 tzap input.qasm -o output.qasm            # write optimized circuit to file
 tzap input.qasm -o output.qasm --cancel   # enable gate cancellation pass
-tzap input.qasm -o output.qasm --decompose-rz  # decompose Rz via gridsynth
+tzap input.qasm -o output.qasm --decompose-rz              # decompose Rz via gridsynth (epsilon=1e-10)
+tzap input.qasm -o output.qasm --decompose-rz --epsilon 1e-6  # coarser approximation
 ```
 
 Output is only written when `-o` is given.

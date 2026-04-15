@@ -70,6 +70,7 @@ fn run_streaming(
     no_global: bool,
     expr: bool,
     decompose_rz: bool,
+    rz_epsilon: f64,
 ) {
     let file = fs::File::open(input_path).unwrap_or_else(|e| {
         eprintln!("Error reading {input_path}: {e}");
@@ -100,7 +101,7 @@ fn run_streaming(
     let cancel_pass = CancelPairs;
     let global = PhaseFoldGlobal;
     let global_expr = PhaseFoldGlobalExpr;
-    let rz_decompose = DecomposeRz::default();
+    let rz_decompose = DecomposeRz { epsilon: rz_epsilon };
     let cancel_pass2 = CancelPairs;
     let global2 = PhaseFoldGlobal;
 
@@ -192,6 +193,7 @@ fn main() {
     let mut no_global = false;
     let mut expr = false;
     let mut decompose_rz = false;
+    let mut rz_epsilon: f64 = 1e-10;
     let mut to_cliffordt = false;
     let mut parallel = None;
     let mut streaming = false;
@@ -217,6 +219,7 @@ fn main() {
                 println!("  \x1b[1;33mOPTIONS\x1b[0m");
                 println!("    \x1b[1m-o\x1b[0m <file>        Write output to <file>");
                 println!("    \x1b[1m--decompose-rz\x1b[0m   Decompose Rz gates into Clifford+T (gridsynth)");
+                println!("    \x1b[1m--epsilon\x1b[0m <eps>  Approximation epsilon for --decompose-rz / --to-cliffordt (default: 1e-10)");
                 println!("    \x1b[1m--to-cliffordt\x1b[0m   Decompose ccx + Rz to Clifford+T, no optimization");
                 println!("    \x1b[1m--cancel\x1b[0m         Enable the gate cancellation pass");
                 println!("    \x1b[1m--expr\x1b[0m           Use expr-based phase folding (exact parity)");
@@ -233,6 +236,12 @@ fn main() {
             "--no-global" => no_global = true,
             "--expr" => expr = true,
             "--decompose-rz" => decompose_rz = true,
+            "--epsilon" => {
+                i += 1;
+                rz_epsilon = args.get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| { eprintln!("--epsilon requires a number (e.g. 1e-10)"); process::exit(1); });
+            }
             "--to-cliffordt" => to_cliffordt = true,
             "--parallel" => parallel = Some(true),
             "--no-parallel" => parallel = Some(false),
@@ -273,7 +282,7 @@ fn main() {
     eprintln!("  Parsing {input_path} ({:.1} MB)", file_size as f64 / (1024.0 * 1024.0));
 
     if streaming {
-        run_streaming(input_path, output_path, batch_size, cancel, no_global, expr, decompose_rz);
+        run_streaming(input_path, output_path, batch_size, cancel, no_global, expr, decompose_rz, rz_epsilon);
         return;
     }
 
@@ -318,7 +327,7 @@ fn main() {
             circuit
         };
         let circuit = if circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
-            let rz = DecomposeRz::default();
+            let rz = DecomposeRz { epsilon: rz_epsilon };
             let pb = make_progress_bar(circuit.gates.len() as u64, rz.name());
             let c = rz.run_with_progress(&circuit, &pb);
             pb.finish_and_clear();
@@ -358,7 +367,7 @@ fn main() {
     let cancel_pass = CancelPairs;
     let global = PhaseFoldGlobal;
     let global_expr = PhaseFoldGlobalExpr;
-    let rz_decompose = DecomposeRz::default();
+    let rz_decompose = DecomposeRz { epsilon: rz_epsilon };
 
     // Run toffoli decomposition eagerly so we can use post-decomp counts as baseline.
     let circuit = if circuit.has_toffoli {
