@@ -53,7 +53,7 @@ The chart below shows runtimes on a standard suite of GF(2^k) multiplier circuit
 
 ![tzap vs quizx runtime](scripts/comparison.png)
 
-tzap matches the T-gate reduction of [quizx](https://github.com/zxcalc/quizx) (the Rust port of PyZX) on every circuit, while running **orders of magnitude faster** — up to **92,000× faster** on the largest circuits. quizx times out entirely on the k=128 circuit where tzap finishes in 56 ms.
+tzap matches the T-gate reduction of [quizx](https://github.com/zxcalc/quizx) (the Rust port of PyZX) on every circuit, while running **orders of magnitude faster** — up to **92,000× faster** on the largest circuits. quizx times out (2hrs) entirely on the k=128 circuit where tzap finishes in 56 ms.
 
 ## Limitations
 
