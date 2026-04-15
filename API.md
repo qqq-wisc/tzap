@@ -57,9 +57,10 @@ use tzap::pass::Pass;
 | Pass | Import | Description |
 |------|--------|-------------|
 | `DecomposeToffoli` | `tzap::decompose` | Breaks Toffoli gates into CNOT+T/Tdg |
+| `DecomposeRz` | `tzap::decompose_rz` | Decomposes Rz gates into Clifford+T via gridsynth |
 | `CancelPairs` | `tzap::cancel` | Removes adjacent self-inverse gate pairs (HH, XX, etc.) |
 | `PhaseFoldGlobal` | `tzap::phase_fold_global` | Merges T/Rz gates across the circuit via symbolic parity tracking |
-| `PhaseFoldLocal` | `tzap::phase_fold_local` | Merges nearby Rz gates verified by unitary equivalence |
+| `PhaseFoldGlobalExpr` | `tzap::phase_fold_global_expr` | Like `PhaseFoldGlobal` but uses exact symbolic expressions instead of hashes |
 
 ### Running passes
 
@@ -90,16 +91,13 @@ println!("{} gates, {} T", result.circuit.gates.len(), result.circuit.gates.iter
     .filter(|g| matches!(g, Gate::t(_) | Gate::tdg(_))).count());
 ```
 
-### Repeat
+### DecomposeRz epsilon
 
-Run a pass sequence multiple times:
+Control the approximation precision with the `epsilon` field (default `1e-10`):
 
 ```rust
-use tzap::pass::Repeat;
+use tzap::decompose_rz::DecomposeRz;
 
-let repeat = Repeat {
-    passes: &[&CancelPairs, &PhaseFoldGlobal],
-    times: 3,
-};
-let optimized = repeat.run(&circuit);
+let pass = DecomposeRz { epsilon: 1e-6 };
+let cliffordt = pass.run(&circuit);
 ```

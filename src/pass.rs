@@ -38,23 +38,3 @@ pub fn count_rz(c: &Circuit) -> usize {
     c.gates.iter().filter(|g| matches!(g, Gate::rz(..))).count()
 }
 
-/// Runs a sequence of passes N times.
-pub struct Repeat<'a> {
-    pub passes: &'a [&'a dyn Pass],
-    pub times: usize,
-}
-
-impl Pass for Repeat<'_> {
-    fn name(&self) -> &str {
-        "repeat"
-    }
-
-    fn run_with_progress(&self, circuit: &Circuit, _pb: &ProgressBar) -> Circuit {
-        let mut c = circuit.clone();
-        for i in 0..self.times {
-            eprintln!("  round {}/{}", i + 1, self.times);
-            c = run_passes(&c, self.passes).circuit;
-        }
-        c
-    }
-}

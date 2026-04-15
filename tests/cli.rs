@@ -243,7 +243,7 @@ tdg q[0];
 }
 
 #[test]
-fn phase_fold_local_through_cnot() {
+fn phase_fold_through_cnot_control() {
     // T q0; CNOT q0,q1; T q0 should merge to CNOT + S
     let (gates, _) = run_qasm("\
 OPENQASM 2.0;
@@ -259,7 +259,7 @@ t q[0];
 }
 
 #[test]
-fn phase_fold_local_cancel_through_cnot() {
+fn phase_fold_cancel_through_cnot_control() {
     // S q0; CNOT q0,q1; Sdg q0 — should cancel rotations
     let (gates, _) = run_qasm("\
 OPENQASM 2.0;
@@ -274,7 +274,7 @@ sdg q[0];
 }
 
 #[test]
-fn phase_fold_local_blocked_on_target() {
+fn phase_fold_blocked_on_cnot_target() {
     // T q[1]; CNOT q[0],q[1]; T q[1] — q1 is target, can't merge
     let (gates, _) = run_qasm("\
 OPENQASM 2.0;
