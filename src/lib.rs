@@ -9,4 +9,5 @@ pub mod phase_fold_global_expr;
 
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
 mod unitary;
