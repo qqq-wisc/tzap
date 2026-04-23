@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 
 # ── locate tzap ──────────────────────────────────────────────────────────────
 
@@ -27,6 +28,8 @@ REPO_ROOT   = os.path.dirname(SCRIPT_DIR)
 TZAP = os.path.join(REPO_ROOT, "target", "release", "tzap")
 if not os.path.isfile(TZAP):
     TZAP = os.path.join(REPO_ROOT, "target", "debug", "tzap")
+if not os.path.isfile(TZAP):
+    TZAP = shutil.which("tzap") or TZAP
 
 # ── runner: tzap ─────────────────────────────────────────────────────────────
 
@@ -192,7 +195,7 @@ def run_feynman(qasm_path: str, timeout: float = 60.0) -> dict:
     try:
         t0 = time.perf_counter()
         r = subprocess.run(
-            [FEYNMAN, "-toCliffordT", "-O2", qasm_path],
+            [FEYNMAN, "-purecircuit", "-toCliffordT", "-O2", qasm_path],
             capture_output=True, text=True, timeout=timeout,
         )
         elapsed = time.perf_counter() - t0
@@ -233,9 +236,11 @@ def main():
                              "default: tzap,quizx,feynman,voqc)")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="Per-tool timeout in seconds (default: 60)")
-    parser.add_argument("--csv", default="compare_results.csv",
-                        help="CSV output path (default: compare_results.csv)")
+    parser.add_argument("--csv", default=None,
+                        help="CSV output path (default: compare_results_<YYYYMMDD_HHMMSS>.csv)")
     args = parser.parse_args()
+    if args.csv is None:
+        args.csv = f"compare_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     all_runners = {
         "tzap":    ("tzap",    run_tzap),
