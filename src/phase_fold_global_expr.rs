@@ -466,7 +466,11 @@ mod tests {
         c.apply(Gate::t(1));
         let hash_out = phase_fold_global(&c, &ProgressBar::hidden());
         let expr_out = run(&c);
-        assert_eq!(hash_out.gates.len(), expr_out.gates.len());
-        assert!(circuits_equiv(&hash_out, &expr_out, TOL));
+        // Hash version folds across X (complementary-parity lookup); expr version
+        // does not. Both must be semantically equivalent to the input; the hash
+        // output may be strictly smaller.
+        assert!(hash_out.gates.len() <= expr_out.gates.len());
+        assert!(circuits_equiv(&c, &hash_out, TOL));
+        assert!(circuits_equiv(&c, &expr_out, TOL));
     }
 }

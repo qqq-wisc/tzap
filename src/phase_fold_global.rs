@@ -25,6 +25,9 @@ struct LivePhase {
     qubit: usize,
     current_idx: usize,
     float_part: f64,
+    /// True when `current_idx` sits on the complement of the group's canonical parity.
+    /// On emission, the accumulated rotation is negated to compensate.
+    current_sign: bool,
 }
 
 pub struct PhaseFoldGlobal;
@@ -72,15 +75,22 @@ pub fn phase_fold_global(circuit: &Circuit, pb: &ProgressBar) -> Circuit {
 
     // Finalize: emit surviving groups or skip if angle cancelled to zero.
     for lp in &live {
-        if lp.float_part == 0.0 {
+        let (int_part, float_part) = if lp.current_sign {
+            // Last seen location is on ¬canonical — negate to compensate.
+            (8u8.wrapping_sub(lp.int_part) & 7, -lp.float_part)
+        } else {
+            (lp.int_part, lp.float_part)
+        };
+
+        if float_part == 0.0 {
             // Pure integer group — no float math.
-            if lp.int_part == 0 {
+            if int_part == 0 {
                 skip[lp.current_idx] = true;
             } else {
-                emit_at[lp.current_idx] = Some((lp.qubit, lp.int_part, 0.0));
+                emit_at[lp.current_idx] = Some((lp.qubit, int_part, 0.0));
             }
         } else {
-            let total = (lp.int_part as f64) * (PI / 4.0) + lp.float_part;
+            let total = (int_part as f64) * (PI / 4.0) + float_part;
             if angle_is_zero(total) {
                 skip[lp.current_idx] = true;
             } else {
@@ -116,11 +126,23 @@ fn record_int(
 ) {
     let parity = qubits[q];
 
+    // Direct match.
     if let Some(&gi) = parity_to_group.get(&parity) {
         skip[live[gi].current_idx] = true;
         live[gi].int_part = (live[gi].int_part + k) & 7;
         live[gi].current_idx = idx;
         live[gi].qubit = q;
+        live[gi].current_sign = false;
+        return;
+    }
+
+    // Complement match: RZ(θ) on ¬p ≡ RZ(−θ) on p up to global phase.
+    if let Some(&gi) = parity_to_group.get(&!parity) {
+        skip[live[gi].current_idx] = true;
+        live[gi].int_part = live[gi].int_part.wrapping_sub(k) & 7;
+        live[gi].current_idx = idx;
+        live[gi].qubit = q;
+        live[gi].current_sign = true;
         return;
     }
 
@@ -130,6 +152,7 @@ fn record_int(
         float_part: 0.0,
         current_idx: idx,
         qubit: q,
+        current_sign: false,
     });
     parity_to_group.insert(parity, gi);
 }
@@ -150,6 +173,16 @@ fn record_float(
         live[gi].float_part += theta;
         live[gi].current_idx = idx;
         live[gi].qubit = q;
+        live[gi].current_sign = false;
+        return;
+    }
+
+    if let Some(&gi) = parity_to_group.get(&!parity) {
+        skip[live[gi].current_idx] = true;
+        live[gi].float_part -= theta;
+        live[gi].current_idx = idx;
+        live[gi].qubit = q;
+        live[gi].current_sign = true;
         return;
     }
 
@@ -159,6 +192,7 @@ fn record_float(
         float_part: theta,
         current_idx: idx,
         qubit: q,
+        current_sign: false,
     });
     parity_to_group.insert(parity, gi);
 }
@@ -792,7 +826,162 @@ mod tests {
         c.apply(Gate::x(0));
         c.apply(Gate::t(0));
         let opt = phase_fold_global(&c, &ProgressBar::hidden());
-        assert_eq!(count_phase_gates(&opt), 2);
+        // T·X·T = e^{iπ/4}·X, so both Ts fold into global phase.
+        assert_eq!(count_phase_gates(&opt), 0);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn t_x_tdg_folds_across_x() {
+        let mut c = Circuit::new(1);
+        c.apply(Gate::t(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::tdg(0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        // T; X; Tdg ≡ Sdg·X up to global phase — one phase gate survives.
+        assert_eq!(count_phase_gates(&opt), 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn rz_folds_across_x() {
+        let mut c = Circuit::new(1);
+        c.apply(Gate::rz(0.3, 0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::rz(0.7, 0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_phase_gates(&opt), 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn rz_cancels_across_x() {
+        // RZ(θ); X; RZ(θ) = RZ(θ)·RZ(−θ)·X = X up to global phase.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::rz(0.42, 0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::rz(0.42, 0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_phase_gates(&opt), 0);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn triple_t_with_two_xs_folds_to_single_t() {
+        // T·X·T·X·T = T up to global phase (T·X·T folds to e^{iπ/4}·X,
+        // leaving X·X·T ≡ T up to global phase).
+        let mut c = Circuit::new(1);
+        c.apply(Gate::t(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::t(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::t(0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_phase_gates(&opt), 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn x_then_t_then_x_then_t_cancels_to_identity() {
+        // X·T·X·T = X·(X·T) up to sign = identity up to global phase.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::x(0));
+        c.apply(Gate::t(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::t(0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        // Both Ts fold to global phase; Xs stay because this pass doesn't cancel them.
+        assert_eq!(count_phase_gates(&opt), 0);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn mixed_int_and_float_across_x() {
+        // T on p, then rz(non-π/4) on ¬p — verifies int+float mixing on one group.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::t(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::rz(0.5, 0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_phase_gates(&opt), 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn z_x_z_x_cancels_to_identity() {
+        // Z·X·Z·X = −I up to global phase — all phase gates fold away.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::z(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::z(0));
+        c.apply(Gate::x(0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_phase_gates(&opt), 0);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn cnot_target_x_sandwich_folds() {
+        // T(0); CNOT(0,1); X(1); CNOT(0,1); T(0) — the CNOT·X(target)·CNOT
+        // sandwich simplifies to X(1), so the two Ts fold across it as if on
+        // the same parity.
+        let mut c = Circuit::new(2);
+        c.apply(Gate::t(0));
+        c.apply(Gate::cnot { control: 0, target: 1 });
+        c.apply(Gate::x(1));
+        c.apply(Gate::cnot { control: 0, target: 1 });
+        c.apply(Gate::t(0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_t_gates(&opt), 0);
+        assert_eq!(count_phase_gates(&opt), 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn cnot_propagates_negation_from_control() {
+        // X on control before CNOT negates the target's parity (!a ^ b = !(a^b)).
+        // T(1); CNOT(0,1); X(0); CNOT(0,1); T(1) — second T on q1 sees
+        // complement of first T's parity.
+        let mut c = Circuit::new(2);
+        c.apply(Gate::t(1));
+        c.apply(Gate::cnot { control: 0, target: 1 });
+        c.apply(Gate::x(0));
+        c.apply(Gate::cnot { control: 0, target: 1 });
+        c.apply(Gate::t(1));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        // Both Ts live on parities that are complements of each other,
+        // so they fold (to a single phase gate on q1 — T + (−T) = 0, then X flips
+        // the relationship, so the concrete count depends on the emitted rotation).
+        assert!(count_t_gates(&opt) <= 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn complement_then_direct_hit() {
+        // Exercises the path where the group is first reached via the
+        // complement branch, then later via the direct branch.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::t(0));       // group[p0] int=1, sign=F
+        c.apply(Gate::x(0));       // qubits[0] = !p0
+        c.apply(Gate::t(0));       // complement hit → int=0, sign=T
+        c.apply(Gate::x(0));       // qubits[0] = p0
+        c.apply(Gate::tdg(0));     // direct hit on p0 → int=(0-1)&7=7, sign=F
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_phase_gates(&opt), 1);
+        assert!(circuits_equiv(&c, &opt, 1e-10));
+    }
+
+    #[test]
+    fn h_still_blocks_complement_fold() {
+        // H refreshes to a random hash; neither it nor its complement
+        // should collide with any prior group. T on each side must survive.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::t(0));
+        c.apply(Gate::h(0));
+        c.apply(Gate::x(0));
+        c.apply(Gate::t(0));
+        let opt = phase_fold_global(&c, &ProgressBar::hidden());
+        assert_eq!(count_t_gates(&opt), 2);
         assert!(circuits_equiv(&c, &opt, 1e-10));
     }
 
@@ -1267,13 +1456,14 @@ mod tests {
     }
 
     #[test]
-    fn z_x_prevents_merge() {
+    fn z_x_z_folds_across_x() {
         let mut c = Circuit::new(1);
         c.apply(Gate::z(0));
         c.apply(Gate::x(0));
         c.apply(Gate::z(0));
         let opt = phase_fold_global(&c, &ProgressBar::hidden());
-        assert_eq!(count_phase_gates(&opt), 2);
+        // Z·X·Z = −X — both Zs fold into global phase.
+        assert_eq!(count_phase_gates(&opt), 0);
         assert!(circuits_equiv(&c, &opt, 1e-10));
     }
 
