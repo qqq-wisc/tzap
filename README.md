@@ -51,7 +51,7 @@ $ tzap qasm/barenco_tof_5.qasm
 
 The chart below shows runtimes on a standard suite of GF(2^k) multiplier circuits of increasing size, from 112 T-gates (k=4) up to ~115K T-gates (k=128). These are a common benchmark family in the T-gate optimization literature.
 
-![tzap vs quizx runtime](scripts/comparison.png)
+![tzap vs quizx runtime](assets/comparison.png)
 
 tzap matches the T-gate reduction of [quizx](https://github.com/zxcalc/quizx) (the Rust port of PyZX) on every circuit, while running **orders of magnitude faster** — up to **92,000× faster** on the largest circuits. quizx times out (2hrs) entirely on the k=128 circuit where tzap finishes in 56 ms.
 
