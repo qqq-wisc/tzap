@@ -71,7 +71,6 @@ hidden progress bar, so custom passes only need to supply `name` and
 | `DecomposeRz` | `tzap::decompose_rz` | Decomposes Rz gates into Clifford+T via gridsynth |
 | `CancelPairs` | `tzap::cancel` | Removes adjacent self-inverse gate pairs (HH, XX, etc.) |
 | `PhaseFoldGlobal` | `tzap::phase_fold_global` | Merges T/Rz gates across the circuit via symbolic parity tracking |
-| `PhaseFoldGlobalExpr` | `tzap::phase_fold_global_expr` | Like `PhaseFoldGlobal` but uses exact symbolic expressions instead of hashes |
 
 ### Running passes
 
