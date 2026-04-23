@@ -30,7 +30,8 @@ circuit.apply(Gate::t(0));
 
 ### QASM I/O
 
-Parse from and convert to OpenQASM 2.0:
+Parse from and convert to OpenQASM 2.0. `from_qasm` returns
+`Result<Circuit, String>`:
 
 ```rust
 let circuit = Circuit::from_qasm("
@@ -39,18 +40,28 @@ let circuit = Circuit::from_qasm("
     qreg q[2];
     h q[0];
     cx q[0],q[1];
-");
+").expect("invalid QASM");
 
 let qasm_string = circuit.to_qasm();
 ```
 
 ## Passes
 
-Every pass implements the `Pass` trait and returns a new circuit:
+Every pass implements the `Pass` trait:
 
 ```rust
 use tzap::pass::Pass;
+
+pub trait Pass: Sync {
+    fn name(&self) -> &str;
+    fn run(&self, circuit: &Circuit) -> Circuit;
+    fn run_with_progress(&self, circuit: &Circuit, pb: &ProgressBar) -> Circuit;
+}
 ```
+
+`run` has a default implementation that calls `run_with_progress` with a
+hidden progress bar, so custom passes only need to supply `name` and
+`run_with_progress`.
 
 ### Available passes
 
@@ -78,7 +89,7 @@ Run a pipeline:
 use tzap::decompose::DecomposeToffoli;
 use tzap::cancel::CancelPairs;
 use tzap::phase_fold_global::PhaseFoldGlobal;
-use tzap::pass::run_passes;
+use tzap::pass::{Pass, PassResult, run_passes, count_t};
 
 let passes: Vec<&dyn Pass> = vec![
     &DecomposeToffoli,
@@ -86,10 +97,24 @@ let passes: Vec<&dyn Pass> = vec![
     &PhaseFoldGlobal,
 ];
 
-let result = run_passes(&circuit, &passes);
-println!("{} gates, {} T", result.circuit.gates.len(), result.circuit.gates.iter()
-    .filter(|g| matches!(g, Gate::t(_) | Gate::tdg(_))).count());
+let result: PassResult = run_passes(&circuit, &passes);
+println!("{} gates, {} T", result.circuit.gates.len(), count_t(&result.circuit));
 ```
+
+`run_passes` returns a `PassResult`:
+
+```rust
+pub struct PassResult {
+    pub circuit: Circuit,
+    pub t_after_first: usize,       // T-count after only the first pass
+    pub gates_after_first: usize,   // gate count after only the first pass
+}
+```
+
+The `t_after_first` / `gates_after_first` fields are useful for
+attributing reductions to the leading decomposition pass when reporting
+end-to-end numbers. Helpers `count_t` and `count_rz` are also exposed
+from `tzap::pass`.
 
 ### DecomposeRz epsilon
 
