@@ -67,5 +67,5 @@ tzap supports a subset of OpenQASM 2.0:
 Install [Rust](https://github.com/qqq-wisc/tzap.git) then
 
 ```
-cargo build --release
+cargo install --path .
 ```
