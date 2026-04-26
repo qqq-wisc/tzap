@@ -8,12 +8,14 @@ use rustc_hash::FxHashMap;
 use crate::circuit::{Circuit, Gate};
 use crate::pass::Pass;
 
-/// Zobrist hash representing a qubit's parity (XOR of variable set).
+/// Random tag representing a qubit's parity (XOR of variable set).
 /// NOT is bitwise complement (!h), XOR is bitwise xor (a ^ b).
-type ParityHash = u64;
+type ParityHash = u128;
 
-fn fresh_zobrist() -> ParityHash {
-    RandomState::new().build_hasher().finish()
+fn fresh_parity() -> ParityHash {
+    let hi = RandomState::new().build_hasher().finish() as u128;
+    let lo = RandomState::new().build_hasher().finish() as u128;
+    (hi << 64) | lo
 }
 
 /// Accumulated phase for a parity group.
@@ -41,7 +43,7 @@ impl Pass for PhaseFoldGlobal {
 
 pub fn phase_fold_global(circuit: &Circuit, pb: &ProgressBar) -> Circuit {
     let n = circuit.num_qubits;
-    let fresh = || fresh_zobrist();
+    let fresh = || fresh_parity();
     let mut qubits: Vec<ParityHash> = (0..n).map(|_| fresh()).collect();
 
     let mut live: Vec<LivePhase> = Vec::new();
