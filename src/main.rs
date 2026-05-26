@@ -10,6 +10,7 @@ use tzap::circuit::{Circuit, Gate};
 use tzap::decompose::DecomposeToffoli;
 use tzap::decompose_rz::DecomposeRz;
 use tzap::cancel::CancelPairs;
+use tzap::fuse_decompose_rz::FuseDecomposeRz;
 use tzap::pass::{Pass, count_t};
 use tzap::phase_fold_rand::PhaseFoldRand;
 use tzap::phase_fold_global_expr::PhaseFoldGlobalExpr;
@@ -193,6 +194,7 @@ fn main() {
     let mut no_global = false;
     let mut expr = false;
     let mut decompose_rz = false;
+    let mut fuse_decompose_rz = false;
     let mut rz_epsilon: f64 = 1e-10;
     let mut to_cliffordt = false;
     let mut parallel = None;
@@ -219,6 +221,7 @@ fn main() {
                 println!("  \x1b[1;33mOPTIONS\x1b[0m");
                 println!("    \x1b[1m-o\x1b[0m <file>        Write output to <file>");
                 println!("    \x1b[1m--decompose-rz\x1b[0m   Decompose Rz gates into Clifford+T (gridsynth)");
+                println!("    \x1b[1m--fuse-decompose-rz\x1b[0m  Fuse Clifford+RZ via phase folding BEFORE gridsynth, then decompose + fold (fewer T gates than --decompose-rz on circuits with adjacent same-parity RZ)");
                 println!("    \x1b[1m--epsilon\x1b[0m <eps>  Approximation epsilon for --decompose-rz / --to-cliffordt (default: 1e-10)");
                 println!("    \x1b[1m--to-cliffordt\x1b[0m   Decompose ccx + Rz to Clifford+T, no optimization");
                 println!("    \x1b[1m--no-cancel\x1b[0m      Skip the gate cancellation pass");
@@ -236,6 +239,7 @@ fn main() {
             "--no-global" => no_global = true,
             "--expr" => expr = true,
             "--decompose-rz" => decompose_rz = true,
+            "--fuse-decompose-rz" => { fuse_decompose_rz = true; decompose_rz = true; }
             "--epsilon" => {
                 i += 1;
                 rz_epsilon = args.get(i)
@@ -307,7 +311,7 @@ fn main() {
         parse_time.as_secs_f64()
     );
 
-    if to_cliffordt {
+    if to_cliffordt && !fuse_decompose_rz {
         let num_par_chunks = std::thread::available_parallelism()
             .map(|n| n.get() * 4)
             .unwrap_or(8);
@@ -383,8 +387,20 @@ fn main() {
         circuit
     };
 
-    // Decompose Rz gates early so cancel/global passes can optimize the result.
-    let circuit = if decompose_rz && circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
+    // Decompose Rz gates. --fuse-decompose-rz takes precedence and runs the
+    // fuse-first composite pass; otherwise the existing per-gate decomposition
+    // runs early so cancel/global passes can optimize the resulting T-sequence.
+    let circuit = if fuse_decompose_rz && circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
+        let fuse_rz = FuseDecomposeRz { epsilon: rz_epsilon };
+        let pb = make_progress_bar(circuit.gates.len() as u64, fuse_rz.name());
+        let pass_start = std::time::Instant::now();
+        let c = fuse_rz.run_with_progress(&circuit, &pb);
+        let elapsed = pass_start.elapsed();
+        pb.finish_and_clear();
+        let t = count_t(&c);
+        eprintln!("  {}\n\t└─ {} gates · {} T · {:.3}s", fuse_rz.name(), fmt_num(c.gates.len()), fmt_num(t), elapsed.as_secs_f64());
+        c
+    } else if decompose_rz && circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
         let pb = make_progress_bar(circuit.gates.len() as u64, rz_decompose.name());
         let pass_start = std::time::Instant::now();
         let c = rz_decompose.run_with_progress(&circuit, &pb);
