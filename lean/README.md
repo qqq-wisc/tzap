@@ -4,9 +4,23 @@
 
 Every executable optimizer pass is a `Pass`. Its `run` function takes an indexed `Circuit.Checked n m`, which fixes the register sizes and carries the operand-distinctness invariant needed by the proofs. The verified executable core composes the selected passes and fixpoint loop; `runConfigured_correct` proves its result equivalent to its input. Checked serialization reparses generated OpenQASM before it is written, and `runConfigured_checkedOutput_correct` connects accepted input, optimization, and successful output emission.
 
+## Installation
+
+Install [Lean through `elan`](https://lean-lang.org/install/), then clone and build the project:
+
 ```sh
+git clone https://github.com/qqq-wisc/tzap.git
+cd tzap/lean
 lake exe cache get
 lake build
+```
+
+## Running
+
+Optimize an OpenQASM 2.0 circuit and write the result to a file:
+
+```sh
+lake exe tzap-lean input.qasm optimized.qasm
 ```
 
 ## The obligation
