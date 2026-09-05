@@ -183,7 +183,7 @@ theorem mem_claimedBy {w : Nat} {xs : List Tagged} {g : Gate} (h : g ∈ claimed
   rcases List.mem_filterMap.1 h with ⟨⟨y, t⟩, hy, hyg⟩
   by_cases ht : t = some w
   · subst ht
-    simp only [if_true, Option.some.injEq, decide_true] at hyg
+    simp only [if_true, Option.some.injEq] at hyg
     exact hyg ▸ hy
   · simp [ht] at hyg
 

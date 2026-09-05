@@ -52,7 +52,7 @@ def id2 : Bool → Bool → ℂ := fun out inp => if out = inp then 1 else 0
           · have : r = ⟨q, h⟩ := Fin.ext hr
             rw [this]; exact hq
           · exact hall r hr
-        simp [hq, heq]
+        simp [heq]
       · have : out ≠ inp := fun hc => hq (by rw [hc])
         simp [hq, this]
     · rw [if_neg hall]
@@ -124,7 +124,7 @@ theorem embed1_mul (n : Nat) (M M' : Bool → Bool → ℂ) (q : Qubit) :
         Finset.sum_ite_eq' Finset.univ, Finset.sum_ite_eq' Finset.univ]
       simp only [Finset.mem_univ, if_pos]
       rw [if_pos hoff]
-      simp [mul2, Fintype.sum_bool, hvf, hvt, add_comm]
+      simp [mul2, hvf, hvt, add_comm]
     · rw [if_neg hoff]
       refine Finset.sum_eq_zero fun k _ => ?_
       by_cases hk : ∀ r : Fin n, (r : Nat) ≠ q → out r = k r
@@ -196,7 +196,7 @@ theorem Basis.set_get_self {n : Nat} (b : Basis n) (q : Qubit) : b.set q (b.get 
 
 @[simp] theorem mul2_diag2 (a b c d : ℂ) : mul2 (diag2 a b) (diag2 c d) = diag2 (a * c) (b * d) := by
   funext out inp
-  cases out <;> cases inp <;> simp [mul2, diag2, Fintype.sum_bool]
+  cases out <;> cases inp <;> simp [mul2, diag2]
 
 @[simp] theorem diag2_one_one : diag2 1 1 = id2 := by
   funext out inp
@@ -204,7 +204,7 @@ theorem Basis.set_get_self {n : Nat} (b : Basis n) (q : Qubit) : b.set q (b.get 
 
 @[simp] theorem mul2_x2 : mul2 x2 x2 = id2 := by
   funext out inp
-  cases out <;> cases inp <;> simp [mul2, x2, id2, Fintype.sum_bool]
+  cases out <;> cases inp <;> simp [mul2, x2, id2]
 
 theorem ofReal_sqrt_two_mul_self :
     ((Real.sqrt 2 : ℝ) : ℂ) * ((Real.sqrt 2 : ℝ) : ℂ) = 2 := by
@@ -243,8 +243,8 @@ The `Wf` hypothesis rules out `cnot q q` and `ccx` with a repeated operand. -/
 theorem gateUnitary_mul_self (n : Nat) (g : Gate) (hwf : g.Wf) (hs : g.isSelfInverse = true) :
     gateUnitary n g * gateUnitary n g = 1 := by
   cases g with
-  | h q => simpa [gateUnitary, embed1_mul] using embed1_id2 n q
-  | x q => simpa [gateUnitary, embed1_mul] using embed1_id2 n q
+  | h q => simp [gateUnitary, embed1_mul]
+  | x q => simp [gateUnitary, embed1_mul]
   | z q =>
       have : mul2 (diag2 1 (ep 1)) (diag2 1 (ep 1)) = id2 := by
         rw [mul2_diag2, ← ep_add]
@@ -350,7 +350,7 @@ theorem isDiagonal_phaseMatrix {n : Nat} (f : Basis n → ℂ) : IsDiagonal (pha
   intro out inp h; simp [phaseMatrix, h]
 
 theorem isDiagonal_one {n : Nat} : IsDiagonal (1 : Density n) := by
-  intro out inp h; simp [Matrix.one_apply, h]
+  intro out inp h; simp [h]
 
 theorem isDiagonal_embed1_diag2 {n : Nat} (a b : ℂ) (q : Qubit) :
     IsDiagonal (embed1 n (diag2 a b) q) := by
@@ -447,7 +447,7 @@ theorem embed1_x2_eq_perm (n : Nat) (q : Qubit) :
       simp [this]
   · rw [embed1_eq_one _ hq]
     funext out inp
-    simp [permMatrix, Basis.set_out_of_range _ _ _ hq, Matrix.one_apply, eq_comm]
+    simp [permMatrix, Basis.set_out_of_range _ _ _ hq, Matrix.one_apply]
 
 /-! ## Concrete phase values -/
 

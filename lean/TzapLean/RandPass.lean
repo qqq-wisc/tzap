@@ -193,7 +193,7 @@ def compWhen (p q : RandPass) (cond : Circuit → Circuit → Bool) : RandPass w
         calc (q.dist (p.run c s)).toOuterMeasure _
             ≤ (q.dist (p.run c s)).toOuterMeasure Set.univ :=
               (q.dist (p.run c s)).toOuterMeasure_mono (by intro x _; exact Set.mem_univ x)
-          _ = 1 := by rw [PMF.toOuterMeasure_apply]; simpa using (q.dist (p.run c s)).tsum_coe
+          _ = 1 := by rw [PMF.toOuterMeasure_apply]; simp
     calc ((p.dist c).bind fun s =>
             (q.dist (p.run c s)).map
               (fun s₂ => (⟨s, s₂⟩ : Σ s : p.Seed c, q.Seed (p.run c s)))).toOuterMeasure F

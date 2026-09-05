@@ -65,7 +65,7 @@ theorem localIdx_eq_none_iff {S : List Qubit} {q : Qubit} :
 
 theorem getD_mem {S : List Qubit} {i : Nat} (h : i < S.length) : S.getD i 0 ∈ S := by
   rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h]
-  simpa using List.getElem_mem h
+  simp
 
 /-- The window's own wires are found at their own index. -/
 theorem localIdx_getD_self {S : List Qubit} (hnd : S.Nodup) :
@@ -104,7 +104,7 @@ theorem restrict_extendB {S : List Qubit} (hnd : S.Nodup) (hrange : ∀ q ∈ S,
     rw [hidx] at hj
     exact absurd hj (by simp)
 
-theorem extendB_restrict {S : List Qubit} (hrange : ∀ q ∈ S, q < n) {b b' : Basis n}
+theorem extendB_restrict {S : List Qubit} (_hrange : ∀ q ∈ S, q < n) {b b' : Basis n}
     (h : OffS S b' b) : extendB S (restrict S b) b' = b := by
   funext r
   simp only [extendB]
@@ -210,8 +210,8 @@ theorem pad_mul {S : List Qubit} (hnd : S.Nodup) (hrange : ∀ q ∈ S, q < n)
     · have h2 : ¬ OffS S m inp := by
         intro hc
         exact hoff (fun r hr => (h1 r hr).trans (hc r hr))
-      simp only [pad, if_neg h2, mul_zero]
-    · simp only [pad, if_neg h1, zero_mul]
+      simp only [if_neg h2, mul_zero]
+    · simp only [if_neg h1, zero_mul]
 
 /-! ## Restriction meets the gate matrices -/
 
@@ -325,7 +325,7 @@ theorem phaseMatrix_pad {S : List Qubit} {f : Basis n → ℂ} {g : Basis S.leng
     exact hoff (by rw [hc]; intro r _; rfl)
 
 /-- A controlled-`X` on window wires localizes. -/
-theorem permMatrix_pad {S : List Qubit} (hnd : S.Nodup) (hrange : ∀ q ∈ S, q < n)
+theorem permMatrix_pad {S : List Qubit} (hnd : S.Nodup) (_hrange : ∀ q ∈ S, q < n)
     {ctrls : List Qubit} {tgt : Qubit} {i : Nat} (hctrls : ∀ q ∈ ctrls, q ∈ S)
     (htgt : localIdx S tgt = some i) (htgtn : tgt < n) :
     permMatrix (fun b : Basis n => b.set tgt (b.get tgt != ctrls.all (fun q => b.get q)))

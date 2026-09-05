@@ -170,7 +170,7 @@ theorem visited_append_sub {n : Nat} (as bs cs : List Gate) (st : AState)
 /-- A rotation gate does not move the analysis. -/
 theorem step_of_rotAngle {st : AState} {g : Gate} {θ : ℚ} {q : Qubit}
     (h : rotAngle g = some (θ, q)) : st.step g = st := by
-  cases g <;> simp [rotAngle] at h ⊢ <;> rfl <;> rfl
+  cases g <;> simp [rotAngle] at h ⊢ <;> rfl
 
 /-! ## Rotations, re-emitted -/
 
@@ -225,7 +225,7 @@ theorem emitRotation_eq_diagRun {q : Qubit} {a : ℚ} {j : Nat}
   have hj : ((((4 * BlockState.angleMod a).num % 8 + 8) % 8).toNat) = j := by
     simpa [classifyQuarterPi, hden] using hcl
   have h8 : j < 8 := classifyQuarterPi_lt hcl
-  simp only [emitRotation, beq_iff_eq, if_neg h0, hden, if_pos rfl, hj]
+  simp only [emitRotation, beq_iff_eq, if_neg h0, hden, hj]
   interval_cases j <;> rfl
 
 theorem emitRotation_eq_rz {q : Qubit} {a : ℚ}
@@ -309,7 +309,7 @@ theorem emitAll_correct {n m : Nat} (gs : List Gate) : Equivalent n m (emitAll g
         | some p =>
             obtain ⟨a, q⟩ := p
             simpa [hrot] using equivalent_emitRotation (n := n) (m := m) hrot
-        | none => simp [hrot]; exact fun _ => rfl
+        | none => simp; exact fun _ => rfl
       show Equivalent n m ((match rotAngle g with
           | some (a, q) => emitRotation q a
           | none => [g]) ++ emitAll gs) (g :: gs)

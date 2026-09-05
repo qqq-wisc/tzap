@@ -90,10 +90,8 @@ theorem gateUnitary_of_gatesEqual (n : Nat) {g g' : Gate} (h : gatesEqual g g' =
       | exact gateUnitary_of_gatesEqual_cz n h
       | exact gateUnitary_of_gatesEqual_ccz n h
       | (simp only [gatesEqual, Bool.and_eq_true, beq_iff_eq] at h
-         first
-           | (obtain ⟨⟨rfl, rfl⟩, rfl⟩ := h; rfl)
-           | (obtain ⟨rfl, rfl⟩ := h; rfl)
-           | (subst h; rfl))
+         obtain ⟨⟨rfl, rfl⟩, rfl⟩ := h
+         rfl)
 
 /-! ## Sweep 1: adjacent self-inverse pairs -/
 
@@ -484,13 +482,12 @@ theorem unitary_diagRun (n : Nat) (q : Qubit) :
   intro k hk
   interval_cases k
   all_goals
-    simp only [diagRun, unitary_nil, unitary_cons, gateUnitary, Matrix.one_mul, embed1_mul,
+    simp only [diagRun, unitary_nil, unitary_cons, gateUnitary, embed1_mul,
       mul2_diag2, one_mul, Nat.cast_ofNat, Nat.cast_one, Nat.cast_zero]
   all_goals try rw [← ep_add]
   all_goals try norm_num
   all_goals try rw [show ((3 : ℚ)/2) = -(1/2) + 2 by norm_num, ep_add_two]
   all_goals try rw [show ((7 : ℚ)/4) = -(1/4) + 2 by norm_num, ep_add_two]
-  all_goals try norm_num
 
 /-- **The one-wire rewrite principle.** Two gate lists confined to a single wire are
 equivalent as soon as their matrices agree up to phase on that wire — and if the wire is
@@ -697,7 +694,7 @@ theorem Equivalent.hh {n m : Nat} (q : Qubit) :
 theorem Equivalent.hxh {n m : Nat} (q : Qubit) :
     Equivalent n m [Gate.h q, Gate.x q, Gate.h q] [Gate.z q] := by
   refine Equivalent.of_onWire (q := q) (by intro g hg; fin_cases hg <;> rfl)
-    (by intro g hg; fin_cases hg <;> rfl) 1 (by simp) fun _ => ?_
+    (by intro g hg; fin_cases hg; rfl) 1 (by simp) fun _ => ?_
   simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary, one_smul, embed1_mul,
     mul2_hxh]
 
@@ -705,7 +702,7 @@ theorem Equivalent.hxh {n m : Nat} (q : Qubit) :
 theorem Equivalent.hzh {n m : Nat} (q : Qubit) :
     Equivalent n m [Gate.h q, Gate.z q, Gate.h q] [Gate.x q] := by
   refine Equivalent.of_onWire (q := q) (by intro g hg; fin_cases hg <;> rfl)
-    (by intro g hg; fin_cases hg <;> rfl) 1 (by simp) fun _ => ?_
+    (by intro g hg; fin_cases hg; rfl) 1 (by simp) fun _ => ?_
   simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary, one_smul, embed1_mul,
     mul2_hzh]
 
@@ -914,7 +911,7 @@ private theorem hwindow {n m : Nat} {q : Qubit} (before after rest : List Gate) 
 where the opening `h` was, `B` where the run's first gate was, and `C` where the closing `h`
 was. -/
 private theorem out_gather {n m : Nat} {q : Qubit} (before after rest A B C : List Gate)
-    (hA : ∀ g ∈ A, OnWire q g) (hB : ∀ g ∈ B, OnWire q g) (hC : ∀ g ∈ C, OnWire q g)
+    (hA : ∀ g ∈ A, OnWire q g) (hB : ∀ g ∈ B, OnWire q g) (_hC : ∀ g ∈ C, OnWire q g)
     (hb : ∀ g ∈ before, g.support q = false) (ha : ∀ g ∈ after, g.support q = false) :
     Equivalent n m (A ++ before ++ (B ++ after ++ (C ++ rest)))
       ((before ++ after) ++ ((A ++ B ++ C) ++ rest)) := by
@@ -1312,7 +1309,7 @@ theorem gateUnitary_comm_commutesPastCnot {n : Nat} {g : Gate} {c t : Qubit}
       simp only [commutesPastCnot, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
       refine SupportedOn.mul_comm (gateUnitary_supportedOn n _) (gateUnitary_supportedOn n _) ?_
       refine disjoint_support_of fun q' hq' q'' hq'' => ?_
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq' hq''
       rcases hq' with rfl | rfl <;> subst hq'' <;> simp_all <;> tauto
   | s q | sdg q | z q | t q | tdg q | rz _ q =>
@@ -1327,7 +1324,7 @@ theorem gateUnitary_comm_commutesPastCnot {n : Nat} {g : Gate} {c t : Qubit}
   | cz a b =>
       refine comm_cnot_diag c t rfl fun q' hq' => ?_
       simp only [commutesPastCnot, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq'
       rcases hq' with rfl | rfl
       · exact h.1
@@ -1336,7 +1333,7 @@ theorem gateUnitary_comm_commutesPastCnot {n : Nat} {g : Gate} {c t : Qubit}
       simp only [commutesPastCnot, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
       refine SupportedOn.mul_comm (gateUnitary_supportedOn n _) (gateUnitary_supportedOn n _) ?_
       refine disjoint_support_of fun q' hq' q'' hq'' => ?_
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq' hq''
       obtain ⟨⟨⟨⟨⟨ha, hb⟩, hc⟩, hd⟩, he⟩, hf⟩ := h
       rcases hq' with rfl | rfl <;> rcases hq'' with rfl | rfl | rfl <;>
@@ -1350,7 +1347,7 @@ theorem gateUnitary_comm_commutesPastCnot {n : Nat} {g : Gate} {c t : Qubit}
   | ccz c₁ c₂ tgt =>
       refine comm_cnot_diag c t rfl fun q' hq' => ?_
       simp only [commutesPastCnot, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq'
       rcases hq' with rfl | rfl | rfl
       · exact h.1.2
@@ -1370,7 +1367,7 @@ theorem gateUnitary_comm_commutesPastCz {n : Nat} {g : Gate} {a b : Qubit}
       simp only [commutesPastCz, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
       refine SupportedOn.mul_comm (gateUnitary_supportedOn n _) (gateUnitary_supportedOn n _) ?_
       refine disjoint_support_of fun q' hq' q'' hq'' => ?_
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq' hq''
       subst hq''
       rcases hq' with rfl | rfl
@@ -1383,7 +1380,7 @@ theorem gateUnitary_comm_commutesPastCz {n : Nat} {g : Gate} {a b : Qubit}
   | cnot c₂ tgt =>
       simp only [commutesPastCz, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
       refine (comm_cnot_diag (n := n) c₂ tgt rfl fun q' hq' => ?_).symm
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq'
       rcases hq' with rfl | rfl
       · exact fun hc => h.1 hc.symm
@@ -1391,7 +1388,7 @@ theorem gateUnitary_comm_commutesPastCz {n : Nat} {g : Gate} {a b : Qubit}
   | ccx c₁ c₂ tgt =>
       simp only [commutesPastCz, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
       refine (comm_ccx_diag (n := n) c₁ c₂ tgt rfl fun q' hq' => ?_).symm
-      simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+      simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
         or_false] at hq'
       rcases hq' with rfl | rfl
       · exact fun hc => h.1 hc.symm
@@ -1455,7 +1452,7 @@ theorem Equivalent.pairCommutes_swap {n m : Nat} {p g : Gate} (hp : isPair p = t
         cases g with
         | measure qm cm =>
             simp only [commutesPastCnot, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
-            simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+            simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
               or_false] at hq hq'
             subst hq'
             rcases hq with rfl | rfl
@@ -1463,7 +1460,7 @@ theorem Equivalent.pairCommutes_swap {n m : Nat} {p g : Gate} (hp : isPair p = t
             · exact fun hc => h.2 hc.symm
         | reset qr =>
             simp only [commutesPastCnot, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
-            simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+            simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
               or_false] at hq hq'
             subst hq'
             rcases hq with rfl | rfl
@@ -1475,7 +1472,7 @@ theorem Equivalent.pairCommutes_swap {n m : Nat} {p g : Gate} (hp : isPair p = t
         cases g with
         | measure qm cm =>
             simp only [commutesPastCz, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
-            simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+            simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
               or_false] at hq hq'
             subst hq'
             rcases hq with rfl | rfl
@@ -1483,7 +1480,7 @@ theorem Equivalent.pairCommutes_swap {n m : Nat} {p g : Gate} (hp : isPair p = t
             · exact fun hc => h.2 hc.symm
         | reset qr =>
             simp only [commutesPastCz, Bool.and_eq_true, bne_iff_ne, ne_eq] at h
-            simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton, List.not_mem_nil,
+            simp only [Gate.qubitsOf, List.mem_cons, List.not_mem_nil,
               or_false] at hq hq'
             subst hq'
             rcases hq with rfl | rfl
