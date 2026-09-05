@@ -111,7 +111,7 @@ theorem getD_set_self (l : List Form) (q : Qubit) (f : Form) (h : q < l.length) 
 
 theorem getD_set_ne (l : List Form) {q r : Qubit} (f : Form) (h : r ≠ q) :
     (l.set q f).getD r (Form.const false) = l.getD r (Form.const false) := by
-  simp [List.getD_eq_getElem?_getD, List.getElem?_set, h, Ne.symm h]
+  simp [List.getD_eq_getElem?_getD, Ne.symm h]
 
 theorem getD_set_out (l : List Form) (q : Qubit) (f : Form) (h : ¬ q < l.length) :
     (l.set q f).getD q (Form.const false) = Form.const false := by
@@ -138,9 +138,9 @@ theorem bounded_step {st : AState} (hst : st.Bounded) (g : Gate) : (st.step g).B
   cases g with
   | x p => exact bounded_set hmono (Form.bounded_flip (hmono p))
   | cnot c t => exact bounded_set hmono (Form.bounded_add (hmono t) (hmono c))
-  | h p => exact bounded_set hmono (Form.bounded_var (by simp [step]))
-  | ccx c₁ c₂ t => exact bounded_set hmono (Form.bounded_var (by simp [step]))
-  | reset p => exact bounded_set hmono (Form.bounded_var (by simp [step]))
+  | h p => exact bounded_set hmono (Form.bounded_var (by simp))
+  | ccx c₁ c₂ t => exact bounded_set hmono (Form.bounded_var (by simp))
+  | reset p => exact bounded_set hmono (Form.bounded_var (by simp))
   | _ => exact hmono
 
 theorem bounded_steps {st : AState} (hst : st.Bounded) (gs : List Gate) :

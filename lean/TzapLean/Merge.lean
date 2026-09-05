@@ -86,7 +86,7 @@ theorem unitary_rot_smul (n : Nat) (θ : ℚ) (q : Qubit) :
     have hconst : phaseMatrix (rzPhase n θ q) = ep (-θ / 2) • (1 : Density n) := by
       funext out inp
       by_cases h : out = inp <;>
-        simp [phaseMatrix, h, rzPhase, Basis.get, hq, Matrix.one_apply]
+        simp [phaseMatrix, h, rzPhase, Basis.get, hq]
     rw [hconst, smul_smul, gateUnitary, embed1_eq_one _ hq, ← ep_add,
       show θ / 2 + -θ / 2 = 0 by ring, ep_zero, one_smul]
 
@@ -108,7 +108,7 @@ theorem phase_hop {n : Nat} (A B : Density n) (θ : ℚ) (q q' : Qubit) (sign : 
   have hkq : k.get q = (b'.get q' != sign) := h b k b' hA hB
   have hphase : rzPhase n θ q k = rzPhase n (signedAngle sign θ) q' b' := by
     simp only [rzPhase, hkq]
-    cases sign <;> cases hb : b'.get q' <;> simp [signedAngle, hb]
+    cases sign <;> cases hb : b'.get q' <;> simp [signedAngle]
   rw [hphase]; ring
 
 /-! ## From analysis to paths -/
@@ -139,7 +139,7 @@ theorem path_of_generic {n : Nat} {M : List Gate} (hM : ∀ g ∈ M, g.isUnitary
       rw [hkq, ← hagree, ← hb']
       simp
   | true =>
-      simp only [if_pos rfl, Form.evalB_flip] at hb'
+      simp only [] at hb'
       rw [hkq, ← hagree, hb']
       simp
 

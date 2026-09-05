@@ -136,7 +136,7 @@ theorem embed1_apply_set {n : Nat} (M : Bool → Bool → ℂ) {q : Qubit} (hq :
   rw [if_pos (fun r hr => by simp [Basis.set, hr])]
   congr 1
   · simp [Basis.get, hq]
-  · simp [Basis.set, hq]
+  · simp [Basis.set]
 
 theorem embed1_apply_eq_zero {n : Nat} (M : Bool → Bool → ℂ) {q : Qubit} (hq : q < n)
     (out k : Basis n) (h : k ≠ out.set q false) (h' : k ≠ out.set q true) :
@@ -147,9 +147,9 @@ theorem embed1_apply_eq_zero {n : Nat} (M : Bool → Bool → ℂ) {q : Qubit} (
     funext r
     by_cases hr : (r : Nat) = q
     · have hrq : r = ⟨q, hq⟩ := Fin.ext hr
-      rw [hrq]; simp [Basis.set, hq]
+      rw [hrq]; simp [Basis.set]
     · rw [Basis.set]
-      simp only [hr, if_neg]
+      simp only [hr]
       exact (hall r hr).symm
   cases hkq : k ⟨q, hq⟩
   · exact h (by rw [hk, hkq])
@@ -162,7 +162,7 @@ theorem embed1_row_sum {n : Nat} (M : Bool → Bool → ℂ) {q : Qubit} (hq : q
   have hne : out.set q false ≠ out.set q true := by
     intro hc
     have := congrFun hc ⟨q, hq⟩
-    simp [Basis.set, hq] at this
+    simp [Basis.set] at this
   rw [Finset.sum_eq_add_of_mem (out.set q false) (out.set q true) (Finset.mem_univ _)
     (Finset.mem_univ _) hne ?_]
   · rw [embed1_apply_set M hq out false, embed1_apply_set M hq out true]
@@ -184,15 +184,15 @@ theorem interp_applyH {n : Nat} (q : Qubit) (M : ExactMat n) :
     · have hself : out.set q true = out := by
         rw [← hb]; exact Basis.set_get_self out q
       simp only [applyH, if_pos hq, interp, hb, if_true, hself, h2_apply, Bool.true_and,
-        Bool.and_true, if_false, if_true, Cyc.interp_sub, pow_succ, reduceIte]
+        Bool.and_true, if_true, Cyc.interp_sub, pow_succ]
       field_simp
       norm_num [Cyc.interp_add, Cyc.interp_sub]
       try ring
     · have hbf : out.get q = false := by simpa using hb
       have hself : out.set q false = out := by
         rw [← hbf]; exact Basis.set_get_self out q
-      simp only [applyH, if_pos hq, interp, hbf, if_false, hself, h2_apply, Bool.false_and,
-        if_false, Cyc.interp_add, pow_succ, reduceIte]
+      simp only [applyH, if_pos hq, interp, hbf, hself, h2_apply, Bool.false_and,
+        pow_succ]
       field_simp
       norm_num [Cyc.interp_add, Cyc.interp_sub]
       try ring
@@ -423,7 +423,7 @@ theorem allDivisible_spec {n : Nat} {M : ExactMat n} (h : M.allDivisible = true)
 def normalizeAux {n : Nat} : Nat → ExactMat n → ExactMat n
   | 0, M => M
   | fuel + 1, M =>
-      match hd : M.den with
+      match _hd : M.den with
       | 0 => M
       | d + 1 =>
           if allDivisible M then

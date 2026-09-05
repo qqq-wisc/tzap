@@ -28,8 +28,7 @@ open ExactMat
 theorem Wf_mapQubits {f : Qubit → Qubit} {g : Gate} (hwf : g.Wf)
     (hinj : ∀ q ∈ g.qubitsOf, ∀ r ∈ g.qubitsOf, f q = f r → q = r) : (mapQubits f g).Wf := by
   cases g <;>
-    simp_all [mapQubits, Gate.Wf, Gate.qubitsOf] <;>
-    tauto
+    simp_all [mapQubits, Gate.Wf, Gate.qubitsOf]
 
 theorem localIdxD_inj {S : List Qubit} {q r : Qubit} (hq : q ∈ S) (hr : r ∈ S)
     (h : localIdxD S q = localIdxD S r) : q = r := by

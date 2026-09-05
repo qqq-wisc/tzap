@@ -56,20 +56,20 @@ theorem testBit_bitsToWordAux (t : Nat → Bool) :
       rw [bitsToWordAux, Nat.testBit_or, ih]
       cases htj : t j with
       | false =>
-          simp only [htj, Bool.false_eq_true, if_false, Nat.zero_testBit, Bool.or_false]
+          simp only [Bool.false_eq_true, if_false, Nat.zero_testBit, Bool.or_false]
           by_cases hij : i < j
           · simp [hij, Nat.lt_succ_of_lt hij]
           · by_cases hje : i = j
-            · subst hje; simp [hij, htj]
+            · subst hje; simp [htj]
             · have : ¬ (i < j + 1) := by omega
               simp [hij, this]
       | true =>
-          simp only [htj, if_true, Nat.testBit_two_pow]
+          simp only [if_true, Nat.testBit_two_pow]
           by_cases hij : i < j
           · have hne : ¬ (j = i) := by omega
             simp [hij, Nat.lt_succ_of_lt hij, hne]
           · by_cases hje : i = j
-            · subst hje; simp [hij, htj]
+            · subst hje; simp [htj]
             · have : ¬ (i < j + 1) := by omega
               have hne : ¬ (j = i) := by omega
               simp [hij, this, hne]
@@ -85,7 +85,7 @@ the function it stands for. -/
   funext j
   have hj : (j : Nat) < k := j.isLt
   simp only [wordToBits, bitsToWord, testBit_bitsToWordAux, hj, decide_true, Bool.true_and,
-    dif_pos hj]
+    ]
   simp
 
 /-- Distinct tag functions have distinct packings, so comparing tags decides the functions. -/

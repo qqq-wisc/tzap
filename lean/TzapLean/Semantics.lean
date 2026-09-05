@@ -422,7 +422,7 @@ theorem proj_sum (n : Nat) (q : Qubit) : ∑ b : Bool, proj n q b = (1 : Density
   funext out inp
   simp only [Matrix.sum_apply, Fintype.sum_bool, proj, phaseMatrix, Matrix.one_apply]
   by_cases h : out = inp
-  · subst h; cases hb : out.get q <;> simp [hb]
+  · subst h; cases hb : out.get q <;> simp
   · simp [h]
 
 /-- Two basis states that agree at qubit `q` and agree after zeroing `q` are equal. -/
@@ -464,7 +464,7 @@ theorem resetKraus_sum (n : Nat) (q : Qubit) :
   simp only [Matrix.sum_apply, Fintype.sum_bool, resetKraus_conjTranspose_mul,
     Matrix.one_apply]
   by_cases h : out = inp
-  · subst h; cases hb : out.get q <;> simp [hb]
+  · subst h; cases hb : out.get q <;> simp
   · have hne : ¬ (out.get q = inp.get q ∧ out.set q false = inp.set q false) := by
       rintro ⟨h1, h2⟩
       exact h (Basis.ext_of_get_set q h1 h2)
@@ -539,9 +539,9 @@ theorem totalTrace_step_measure {n m : Nat} (q : Qubit) (c : CBit) (ρ : CQState
       have hsum := trace_sum_proj n q (ρ (w.write c false) + ρ (w.write c true))
       rw [Fintype.sum_bool, Matrix.trace_add] at hsum
       cases hb : w.read c
-      · simp only [hb, Bool.not_false]
+      · simp only [Bool.not_false]
         exact (add_comm _ _).trans hsum
-      · simp only [hb, Bool.not_true]
+      · simp only [Bool.not_true]
         exact hsum
     -- each block pair, summed over all memories, covers every block twice
     have hsplit : ∀ w : Memory m,

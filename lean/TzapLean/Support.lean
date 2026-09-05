@@ -218,7 +218,7 @@ theorem supportedOn_phaseMatrix {n : Nat} (f : Basis n → ℂ) (S : Wires)
         · rw [← h1 r hr, h, ← h2 r hr]
         · simp only [Bool.not_eq_true] at hr
           exact h4 r hr
-      simp only [h, heq, if_pos rfl]
+      simp only [h, heq]
       exact hloc inp inp' h2
     · have hne : out' ≠ inp' := by
         intro hc
@@ -242,7 +242,7 @@ theorem Basis.get_congr {n : Nat} {S : Wires} {b b' : Basis n}
 /-- The identity is local on any wire set. -/
 theorem phaseMatrix_one {n : Nat} : phaseMatrix (fun _ : Basis n => (1 : ℂ)) = 1 := by
   funext out inp
-  simp [phaseMatrix, Matrix.one_apply, eq_comm]
+  simp [phaseMatrix, Matrix.one_apply]
 
 theorem supportedOn_one {n : Nat} (S : Wires) : SupportedOn (1 : Density n) S := by
   rw [← phaseMatrix_one]

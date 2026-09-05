@@ -56,7 +56,7 @@ theorem parityValAux_two_pow {n : Nat} (b : Basis n) (qs : List Qubit) (i k : Na
       simp only [parityValAux, ih, Nat.testBit_two_pow]
       by_cases h : i = k
       · subst h
-        simp [Nat.lt_succ_self, Nat.lt_irrefl]
+        simp
       · have h' : ¬ (i < k + 1) ↔ ¬ (i < k) := by omega
         by_cases hlt : i < k
         · simp [h, hlt, Nat.lt_succ_of_lt hlt]
@@ -230,15 +230,16 @@ theorem rotation_factor {n : Nat} (qs : List Qubit) (st : BlockState) (p : Parit
       (if k then ep θ else 1) * blockPhase qs (st.addTerm p k θ) b := by
   rw [blockPhase_addTerm]
   cases k
-  · simp only [Bool.xor_false, if_false, one_mul]
-    by_cases h : parityVal qs p b <;> simp [h] <;> ring
+  · simp only [Bool.xor_false]
+    by_cases h : parityVal qs p b <;> simp [h]
+    all_goals ring
   · simp only [Bool.xor_true, if_true]
     by_cases h : parityVal qs p b
-    · simp only [h, Bool.not_true, if_false, if_true, one_mul]
+    · simp only [h, Bool.not_true, if_true]
       rw [show ep θ * (blockPhase qs st b * ep (-θ)) = blockPhase qs st b * (ep θ * ep (-θ)) by ring,
         ← ep_add]
       simp
-    · simp only [h, Bool.not_false, if_true, if_false]
+    · simp only [h, Bool.not_false, if_true]
       simp
 
 /-- The `CZ` phase, written on the three parities the analysis records. -/
@@ -308,7 +309,7 @@ theorem localIdx_mem {qs : List Qubit} {q : Qubit} {i : Nat} (h : localIdx qs q 
   have hlt := localIdx_lt h
   have hget := localIdx_getD h
   rw [← hget]
-  simpa [List.getD, List.getElem?_eq_getElem hlt] using List.getElem_mem hlt
+  simp [List.getD, List.getElem?_eq_getElem hlt]
 
 /-! ## The analysis is sound -/
 
@@ -389,7 +390,7 @@ theorem getD_set_self {α : Type*} (l : List α) {i : Nat} (v d : α) (h : i < l
 
 theorem getD_set_ne {α : Type*} (l : List α) {i j : Nat} (h : j ≠ i) (v d : α) :
     (l.set i v).getD j d = l.getD j d := by
-  simp [List.getD_eq_getElem?_getD, List.getElem?_set, h, Ne.symm h]
+  simp [List.getD_eq_getElem?_getD, Ne.symm h]
 
 theorem getElem!_eq_getD {α : Type*} [Inhabited α] (l : List α) (i : Nat) :
     l[i]! = l.getD i default := by
@@ -621,7 +622,7 @@ theorem feedGate_isUnitary {qs : List Qubit} {st st' : BlockState} {g : Gate}
     (h : feedGate qs st g = some st') : g.isUnitary = true := by
   cases g <;> first | rfl | (simp [feedGate, rotAngle] at h)
 
-theorem blockMatrix_initial {n : Nat} (qs : List Qubit) (hrange : ∀ q ∈ qs, q < n) :
+theorem blockMatrix_initial {n : Nat} (qs : List Qubit) (_hrange : ∀ q ∈ qs, q < n) :
     blockMatrix n qs (BlockState.initial qs.length) = 1 := by
   have hperm : blockPerm qs (BlockState.initial qs.length) = fun b : Basis n => b := by
     funext b r
@@ -645,7 +646,7 @@ theorem blockMatrix_initial {n : Nat} (qs : List Qubit) (hrange : ∀ q ∈ qs, 
       dsimp only
       rw [hpar, hcon, parityVal_two_pow qs b hlt, localIdx_getD hj]
       have : (r : Nat) < n := r.isLt
-      simp [Basis.get, this, Bool.xor_false]
+      simp [Basis.get, this]
   have hphase : blockPhase qs (BlockState.initial qs.length) = fun _ : Basis n => (1 : ℂ) := by
     funext b; rfl
   rw [blockMatrix, hperm, hphase, permMatrix_id, phaseMatrix_one, Matrix.one_mul]
@@ -851,7 +852,7 @@ theorem feedGate_mem {qs : List Qubit} {st st' : BlockState} {g : Gate}
           · simp at h
           · simp at h
           · refine ⟨fun r hr => ?_, rfl⟩
-            simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton,
+            simp only [Gate.qubitsOf, List.mem_cons,
               List.not_mem_nil, or_false] at hr
             rcases hr with rfl | rfl
             · exact localIdx_mem hc
@@ -867,7 +868,7 @@ theorem feedGate_mem {qs : List Qubit} {st st' : BlockState} {g : Gate}
           · simp at h
           · simp at h
           · refine ⟨fun r hr => ?_, rfl⟩
-            simp only [Gate.qubitsOf, List.mem_cons, List.mem_singleton,
+            simp only [Gate.qubitsOf, List.mem_cons,
               List.not_mem_nil, or_false] at hr
             rcases hr with rfl | rfl
             · exact localIdx_mem hc
@@ -1229,7 +1230,7 @@ theorem runGates_spec {n m : Nat} : ∀ (gs : List Gate) (ch : Chunk),
         dsimp only
         rw [hru]
       rw [hrun]
-      refine ⟨?_, by rw [hnq'] at *; simpa [hnq] using hnq', hok'', ?_, hwf₄⟩
+      refine ⟨?_, by rw [hnq'] at *; simp [hnq], hok'', ?_, hwf₄⟩
       · have step₁ : Equivalent n m (e ++ (rest ++ ch''.original)) (e ++ (ch'.original ++ gs)) :=
           Equivalent.append_left e (by simpa using hih)
         have step₂ : Equivalent n m ((e ++ ch'.original) ++ gs) ((ch.original ++ [g]) ++ gs) :=

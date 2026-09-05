@@ -87,7 +87,7 @@ theorem gateUnitary_unitary (n : Nat) (g : Gate) (hwf : g.Wf) :
   | x q =>
       refine embed x2 q ?_
       funext o i
-      cases o <;> cases i <;> simp [mul2, x2, id2, Fintype.sum_bool]
+      cases o <;> cases i <;> simp [mul2, x2, id2]
   | h q =>
       refine embed h2 q ?_
       have hsq : ((Real.sqrt 2 : ℝ) : ℂ) ^ 2 = 2 := by
@@ -95,12 +95,11 @@ theorem gateUnitary_unitary (n : Nat) (g : Gate) (hwf : g.Wf) :
       have hne := ofReal_sqrt_two_ne_zero
       funext o i
       cases o <;> cases i <;>
-        · simp only [mul2, h2, id2, Fintype.sum_bool, RCLike.star_def, map_div₀, map_one,
-            map_neg, Complex.conj_ofReal]
+        · simp only [mul2, h2, id2, Fintype.sum_bool, RCLike.star_def, map_div₀,
+            Complex.conj_ofReal]
           norm_num
           try field_simp
           try exact hsq.symm
-          try (rw [pow_two]; exact hsq.symm)
           try (rw [pow_two, hsq])
           try rw [hsq]
           try ring
@@ -368,11 +367,11 @@ theorem list_order_is_execution_order :
   have hxh : unitary 1 [Gate.x 0, Gate.h 0] ![true] ![false] = -1 / (Real.sqrt 2 : ℂ) := by
     simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary, embed1_mul]
     rw [embed1_apply_one]
-    simp [mul2, h2, x2, Fintype.sum_bool]
+    simp [mul2, h2, x2]
   have hhx : unitary 1 [Gate.h 0, Gate.x 0] ![true] ![false] = 1 / (Real.sqrt 2 : ℂ) := by
     simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary, embed1_mul]
     rw [embed1_apply_one]
-    simp [mul2, h2, x2, Fintype.sum_bool]
+    simp [mul2, h2, x2]
   rw [hxh, hhx]
   intro hc
   field_simp at hc
@@ -456,14 +455,14 @@ theorem bell_state (out inp : Basis 2) :
     simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary]
     rw [permMatrix_mul_apply hinv, embed1_apply_two_zero]
     simp only [cnot_perm_zero, cnot_perm_one, Matrix.cons_val_zero, Matrix.cons_val_one,
-      Matrix.head_cons]
+      ]
     by_cases h : b 0 = b 1
     · rw [if_pos (by rw [← h]; simp), if_pos h]
       cases hb : b 0 <;> simp [h2]
     · rw [if_neg (by simp; intro hc; exact h hc.symm), if_neg h]
   rw [conj_ketBra, hcol, hcol]
   have hstar : star ((1 : ℂ) / ((Real.sqrt 2 : ℝ) : ℂ)) = 1 / ((Real.sqrt 2 : ℝ) : ℂ) := by
-    simp [Complex.star_def, Complex.conj_ofReal]
+    simp [Complex.conj_ofReal]
   by_cases h1 : out 0 = out 1 <;> by_cases h2 : inp 0 = inp 1
   · rw [if_pos h1, if_pos h2, if_pos (And.intro h1 h2), hstar, div_mul_div_comm, one_mul, hsq]
   · rw [if_pos h1, if_neg h2,
@@ -905,7 +904,7 @@ theorem not_equivalent_of_perm {n : Nat} {σ τ : Basis n → Basis n} {gs hs : 
     (b : Basis n) (hne : σ b ≠ τ b) : ¬ Equivalent n 0 gs hs := by
   refine not_equivalent_of_entry hg hh b b (σ b) (σ b) ?_
   rw [hgs, hhs]
-  simp only [permMatrix, if_pos rfl, if_neg hne]
+  simp only [permMatrix, if_neg hne]
   norm_num
 
 /-- `not_equiv_h_vs_x` -/
@@ -938,7 +937,7 @@ theorem hsdgh_is_not_s : ¬ Equivalent 1 0 [Gate.h 0, Gate.sdg 0, Gate.h 0] [Gat
       (1 + -Complex.I) / (((Real.sqrt 2 : ℝ) : ℂ) * ((Real.sqrt 2 : ℝ) : ℂ)) := by
     simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary, embed1_mul]
     rw [embed1_apply_one]
-    simp [mul2, h2, diag2, Fintype.sum_bool, ep_neg_half]
+    simp [mul2, h2, diag2, ep_neg_half]
     ring
   have hb : unitary 1 [Gate.s 0] ![false] ![false] = 1 := by
     simp only [unitary_cons, unitary_nil, Matrix.one_mul, gateUnitary]
@@ -946,7 +945,7 @@ theorem hsdgh_is_not_s : ¬ Equivalent 1 0 [Gate.h 0, Gate.sdg 0, Gate.h 0] [Gat
     simp [diag2]
   rw [ha, hb, hsq]
   have hstar : star ((1 + -Complex.I) / 2) = (1 + Complex.I) / 2 := by
-    simp [Complex.star_def]
+    simp
   rw [hstar]
   intro hc
   have h2' : (1 + -Complex.I) * (1 + Complex.I) = 2 := by
@@ -1117,7 +1116,7 @@ theorem cz_equals_h_cnot_h :
     have h1 : (Basis.set (out.set 1 v) 1
         (Basis.get (out.set 1 v) 1 != Basis.get (out.set 1 v) 0)) 1 = (v != out 0) := by
       rw [cnot_perm_one]
-      simp [Basis.set, Basis.get]
+      simp [Basis.set]
     rw [h0, h1]
   have g0 : ∀ b : Basis 2, Basis.get b 0 = b 0 := fun b => by simp [Basis.get]
   have g1 : ∀ b : Basis 2, Basis.get b 1 = b 1 := fun b => by simp [Basis.get]
@@ -1134,7 +1133,6 @@ theorem cz_equals_h_cnot_h :
           norm_num
           try field_simp
           try exact hsq.symm
-          try (rw [pow_two]; exact hsq.symm)
           try (rw [pow_two, hsq])
           try rw [hsq]
           try ring
@@ -1151,7 +1149,6 @@ theorem cz_equals_h_cnot_h :
                norm_num
                try field_simp
                try exact hsq.symm
-               try (rw [pow_two]; exact hsq.symm)
                try (rw [pow_two, hsq])
                try rw [hsq]
                try ring)
@@ -1184,8 +1181,8 @@ theorem cnot_swap_decomposition :
   congr 1
   funext b
   refine basis_two_ext ?_ ?_ <;>
-    simp [Function.comp_apply, Basis.set, Basis.get] <;>
-    cases b 0 <;> cases b 1 <;> rfl
+    simp [Function.comp_apply, Basis.set, Basis.get]
+  all_goals (cases b 0 <;> cases b 1 <;> rfl)
 
 /-- `cz_does_not_commute_with_cnot_targeting_operand` -/
 theorem cz_does_not_commute_with_cnot_targeting_operand :
@@ -1332,7 +1329,6 @@ theorem ccz_equals_h_ccx_h :
           norm_num
           try field_simp
           try exact hsq.symm
-          try (rw [pow_two]; exact hsq.symm)
           try (rw [pow_two, hsq])
           try rw [hsq]
           try ring
@@ -1351,7 +1347,6 @@ theorem ccz_equals_h_ccx_h :
                norm_num
                try field_simp
                try exact hsq.symm
-               try (rw [pow_two]; exact hsq.symm)
                try (rw [pow_two, hsq])
                try rw [hsq]
                try ring)
