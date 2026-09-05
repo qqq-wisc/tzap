@@ -14,7 +14,7 @@ A super fast, Rust-based optimizer for large Clifford+T circuits.
 - tzap is state-of-the-art in *speed*, *scalability*, and *gate-count reduction*.
 - tzap **minimizes T-count** with a new linear-time phase folding algorithm, based on [this paper](https://arxiv.org/abs/2605.13929).
 - tzap implements a new and fast **superoptimization** pass.
-- The core optimization algorithms are **fully formalized in Lean** under [`formalization`](https://github.com/qqq-wisc/tzap/blob/main/formalization/).
+- A **formally verified** Lean port of tzap is available in [`lean`](lean/).
 
 tzap is **multiple orders of magnitude** faster than other optimizers&mdash;and **linearly** **scales** to **millions** of gates!
 Here's a runtime comparison to two powerful optimizers on increasingly larger circuits.
@@ -133,7 +133,7 @@ Toffoli (`ccx`) and doubly controlled-Z (`ccz`) are auto-decomposed into Cliffor
 ## Correctness
 
 1. **Fuzzing and equivalence verification** on small random circuits and benchmark circuits.
-2. **Lean formalization:** core algorithms are implemented and proven sound in Lean 4 — see [`formalization`](https://github.com/qqq-wisc/tzap/blob/main/formalization/).
+2. **Lean port:** the core optimizer is implemented and proven sound in Lean 4 — see [`lean/`](lean/).
 
 ## Citation
 

@@ -58,7 +58,6 @@ exclude = [
     "assets/**",
     "benchmarks/**",
     "experiments/**",
-    "formalization/**",
 ]
 
 [tool.pytest.ini_options]
