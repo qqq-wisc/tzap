@@ -16,9 +16,9 @@ seed and a *bound on the probability that its output is wrong*.
 correct : ∀ c, c.Wf → Pr_{s ← dist c} [ ⟦run c s⟧ ≠ ⟦c⟧ ] ≤ error c
 ```
 
-A deterministic pass is the `error = 0` case, with a one-point seed: `Pass.toRand` turns any
-`Pass` into a `RandPass` whose failure event is literally empty. Nothing about the existing
-`CancelGates` and `CnotMin` proofs changes; they are reused verbatim.
+A deterministic transformation is the `error = 0` case, with a one-point seed. The concrete
+deterministic passes enter this idealized randomized theory through adapters in `Pipeline`;
+their existing correctness proofs are reused verbatim.
 
 Composition is where the design pays off. `RandPass.comp` draws the second pass's seed
 *after* seeing the first pass's output — `PMF.bind`, so the seed space of the composite is a
@@ -75,31 +75,6 @@ def failure (p : RandPass) (c : Circuit) : Set (p.Seed c) :=
   {s | ¬ Equivalent c.numQubits c.numCbits (p.run c s).gates c.gates}
 
 /-! ## Deterministic passes are the `error = 0` case -/
-
-/-- Any `Pass` is a `RandPass` that ignores its seed and never fails. -/
-def _root_.TzapLean.Pass.toRand (p : Pass) : RandPass where
-  name := p.name
-  Seed := fun _ => Unit
-  dist := fun _ => PMF.pure ()
-  run := fun c _ => p.run c
-  error := fun _ => 0
-  numQubits_run c _ := p.numQubits_run c
-  numCbits_run c _ := p.numCbits_run c
-  wf_run c _ hc := p.wf_run c hc
-  wellFormed_run c _ hwf hc := p.wellFormed_run c hwf hc
-  flagsOk_run c _ hc := p.flagsOk_run c hc
-  correct c hc := by
-    have hempty : {s : Unit | ¬ Equivalent c.numQubits c.numCbits (p.run c).gates c.gates} = ∅ := by
-      ext s
-      simp only [Set.mem_ofPred_eq, Set.mem_empty_iff_false, iff_false, not_not]
-      exact p.correct c hc
-    rw [hempty]
-    simp
-
-@[simp] theorem toRand_error (p : Pass) (c : Circuit) : (Pass.toRand p).error c = 0 := rfl
-
-@[simp] theorem toRand_run (p : Pass) (c : Circuit) (s : Unit) :
-    (Pass.toRand p).run c s = p.run c := rfl
 
 /-- The identity pass. -/
 def id : RandPass where
@@ -341,15 +316,6 @@ theorem pipeline_error_le (B : ℝ≥0∞) :
         _ = ((ps.length : ℝ≥0∞) + 1) * B := by ring
         _ = ((p :: ps).length : ℝ≥0∞) * B := by
               rw [List.length_cons]; push_cast; ring
-
-/-- **A pipeline of deterministic passes has error zero** — the `Pass` world, recovered. -/
-theorem pipeline_error_eq_zero (ps : List Pass) (c : Circuit) :
-    (pipeline (ps.map Pass.toRand)).error c = 0 := by
-  induction ps generalizing c with
-  | nil => rfl
-  | cons p ps ih =>
-      simp only [List.map_cons, pipeline_cons, comp_error, Pass.toRand]
-      simp [ih]
 
 end RandPass
 

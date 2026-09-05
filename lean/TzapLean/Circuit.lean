@@ -89,8 +89,8 @@ def cbitsOf : Gate → List CBit
 
 `cnot q q` is not a gate QASM can express and the Rust implementation never builds one;
 semantically it would be the map `b ↦ b[q := 0]`, which is idempotent rather than
-self-inverse, so cancelling a pair of them would be unsound. It is the precondition of
-`Pass.correct`, and `Qasm.validate` is what establishes it. -/
+self-inverse, so cancelling a pair of them would be unsound. It is carried by
+`Circuit.Checked`, and `Qasm.validate` is what establishes it. -/
 def Wf : Gate → Prop
   | .cnot c tgt | .cz c tgt => c ≠ tgt
   | .ccx c₁ c₂ tgt | .ccz c₁ c₂ tgt => c₁ ≠ c₂ ∧ c₁ ≠ tgt ∧ c₂ ≠ tgt
@@ -254,12 +254,26 @@ def Wf (c : Circuit) : Prop := ∀ g ∈ c.gates, g.Wf
 
 instance (c : Circuit) : Decidable c.Wf := by unfold Wf; infer_instance
 
+/-- A circuit accepted by the optimizer.  The register sizes are indices, and the operand
+distinctness invariant needed by the semantic proofs is carried with the gate list.  Raw
+`Circuit` remains the parser-facing representation so malformed input can receive a useful
+diagnostic before it reaches an optimizer pass. -/
+structure Checked (n m : Nat) where
+  raw : Circuit
+  numQubits_eq : raw.numQubits = n
+  numCbits_eq : raw.numCbits = m
+  wf : raw.Wf
+
+/-- Package a raw circuit once its optimizer precondition has been established. -/
+def Checked.of (c : Circuit) (hc : c.Wf) : Checked c.numQubits c.numCbits :=
+  ⟨c, rfl, rfl, hc⟩
+
 /-- The cached `has*` flags say what a scan of `gates` would say.
 
 Rust maintains these incrementally in `Circuit::apply` and its passes rebuild them when they
 rebuild the gate list; a pass that forgot to would leave a circuit whose metadata lies, and
-downstream passes skip work on the strength of that metadata. `Pass.flagsOk_run` makes
-rebuilding them an obligation rather than a convention. -/
+downstream passes skip work on the strength of that metadata. The QASM output boundary checks
+the flags before serialization. -/
 def FlagsOk (c : Circuit) : Prop :=
   c.hasToffoli = c.gates.any Gate.isToffoli ∧
   c.hasCcz = c.gates.any Gate.isCcz ∧
@@ -268,8 +282,7 @@ def FlagsOk (c : Circuit) : Prop :=
 instance (c : Circuit) : Decidable c.FlagsOk := by unfold FlagsOk; infer_instance
 
 /-- Rebuild a circuit around a new gate list, recomputing the `has*` flags as the Rust passes
-do. Every pass that replaces the gate list goes through this, which is what makes
-`Pass.flagsOk_run` hold by construction. -/
+do. Optimizer transformations use this whenever they replace the gate list. -/
 def withGates (c : Circuit) (gs : List Gate) : Circuit where
   numQubits := c.numQubits
   numCbits := c.numCbits

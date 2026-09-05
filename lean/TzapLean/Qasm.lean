@@ -285,14 +285,14 @@ def parseRaw (source : String) : Except String Circuit := do
 /-! ## Validating
 
 The parser checks each operand against its register's size, but nothing checks that a
-multi-qubit gate's operands are *distinct*: `cx q[0],q[0]` parses. That circuit is not one
-the pipeline may be handed. `Pass.correct` is conditional on `Circuit.Wf`, and the condition
-is not idle — `cnot q q` denotes `b ↦ b[q := 0]`, which is idempotent rather than
+multi-qubit gate's operands are *distinct*: `cx q[0],q[0]` parses. That circuit cannot be
+packaged as the `Circuit.Checked` input a pass requires. The restriction is not idle —
+`cnot q q` denotes `b ↦ b[q := 0]`, which is idempotent rather than
 self-inverse, so `CancelGates` deleting a pair of them is a genuinely unsound rewrite. (The
 Rust front end has the same gap; there it is a latent bug rather than a broken proof.)
 
 So the front end rejects such a circuit rather than passing it on, and `parse_wf` below
-turns that check into the precondition every downstream pass asks for. The range check comes
+turns that check into the proof used to construct a checked circuit. The range check comes
 along for the ride: it is implied by the per-register bound in `resolveIdx`, but checking it
 here is cheaper than threading a proof through the parser's state monad, and it is what
 `parse_wellFormed` needs so the back end can only ever emit subscripts that are in range.
@@ -323,8 +323,8 @@ theorem validate_eq {c c' : Circuit} (h : validate c = .ok c') : c' = c.withGate
   · exact (Except.ok.injEq _ _ ▸ h).symm ▸ rfl
   · exact absurd h (by simp)
 
-/-- **A validated circuit has distinct multi-qubit operands** — the precondition of every
-`Pass.correct`. -/
+/-- **A validated circuit has distinct multi-qubit operands** — the invariant carried by
+`Circuit.Checked`. -/
 theorem validate_wf {c c' : Circuit} (h : validate c = .ok c') : c'.Wf := by
   unfold validate at h
   split at h
@@ -356,9 +356,8 @@ theorem parse_eq_validate {source : String} {c : Circuit} (h : parseRaw source =
     parse source = validate c := by
   simp only [parse, h, bind, Except.bind]
 
-/-- **Everything the parser promises the rest of the compiler.** `Circuit.Wf` is the
-precondition of `Pass.correct`; `WellFormed` and `FlagsOk` are what `Pass` then preserves,
-so the whole pipeline runs on circuits satisfying all three. -/
+/-- **Everything the parser promises the rest of the compiler.** `Circuit.Wf` permits entry
+into the checked optimizer; `WellFormed` and `FlagsOk` support checked serialization. -/
 theorem parse_valid {source : String} {c : Circuit} (h : parse source = .ok c) :
     c.Wf ∧ c.WellFormed ∧ c.FlagsOk := by
   unfold parse at h

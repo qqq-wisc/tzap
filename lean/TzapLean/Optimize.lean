@@ -14,7 +14,7 @@ reports.
 All four executable passes are `Pass`es and carry unconditional proofs.  Phase folding uses a
 collision-free affine encoding; the fixed-width randomized construction remains in
 `PhaseFoldRand.lean` as a separately proved algorithm, but is not in the executable's trusted
-path.  `runPipeline`, `runToFixpoint`, and `runConfigured` are pure executable definitions with
+path. `runPipeline`, `runToFixpoint`, and `runConfigured` are pure executable definitions with
 correctness theorems, so there is no hand-matched IO loop.
 
 Not ported: `DecomposeToffoli`, `DecomposeCz`, `DecomposeRz` (gridsynth), `CliffordResynth`,
@@ -222,7 +222,7 @@ unconditional `Pass` guarantee. -/
 
 theorem passOf_error_eq_zero {nm : PassName} (h : nm ≠ .PhaseFoldRand) (cfg : SuperOptConfig)
     (tbl : SynthTable) (c : Circuit) : (passOf cfg tbl nm).error c = 0 := by
-  cases nm <;> simp_all [passOf, CancelGatesR, CnotMinR, SuperOptR]
+  cases nm <;> simp_all [passOf, CancelGatesR, CnotMinR, SuperOptR, deterministicRand]
 
 theorem tzapRound_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
     (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) :
@@ -272,54 +272,12 @@ theorem tzapRun_structural (cfg : SuperOptConfig) (tbl : SynthTable) (names : Li
 
 /-! ## Verified executable core -/
 
-/-- A pass as the driver runs it: a name and a pure circuit transformation. -/
-structure Step where
-  /-- The name shown in the progress output. -/
-  name : String
-  /-- The transformation. -/
-  run : Circuit → Circuit
-
-/-- Build the transformation for one pass name.
-
-Each transformation is the run field of an unconditionally correct `Pass`. -/
-def stepOf (cfg : SuperOptConfig) (tbl : SynthTable) : PassName → Step
-  | .CancelGates => ⟨"Gate cancellation", CancelGates.run⟩
-  | .CnotMin => ⟨"CNOT minimization", CnotMin.run⟩
-  | .SuperOpt => ⟨"Superoptimization", superOpt cfg tbl⟩
-  | .PhaseFoldRand => ⟨"Phase folding", phaseFoldExact⟩
-
-theorem stepOf_cancelGates_run (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) :
-    CancelGates.run c = (passOf cfg tbl .CancelGates).run c () := rfl
-
-theorem stepOf_cnotMin_run (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) :
-    CnotMin.run c = (passOf cfg tbl .CnotMin).run c () := rfl
-
-theorem stepOf_superOpt_run (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) :
-    superOpt cfg tbl c = (passOf cfg tbl .SuperOpt).run c () := rfl
-
-theorem stepOf_phaseFold_run (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit)
-    : phaseFoldExact c = (stepOf cfg tbl .PhaseFoldRand).run c := rfl
-
 /-- The verified pass behind an executable step. -/
-noncomputable def verifiedStep (cfg : SuperOptConfig) (tbl : SynthTable) : PassName → Pass
+def verifiedStep (cfg : SuperOptConfig) (tbl : SynthTable) : PassName → Pass
   | .CancelGates => CancelGates
   | .CnotMin => CnotMin
   | .SuperOpt => SuperOpt cfg tbl
   | .PhaseFoldRand => PhaseFoldExact
-
-theorem stepOf_eq_verifiedStep (cfg : SuperOptConfig) (tbl : SynthTable) (nm : PassName) :
-    (stepOf cfg tbl nm).run = (verifiedStep cfg tbl nm).run := by cases nm <;> rfl
-
-theorem stepOf_correct (cfg : SuperOptConfig) (tbl : SynthTable) (nm : PassName)
-    (c : Circuit) (hc : c.Wf) :
-    Equivalent c.numQubits c.numCbits ((stepOf cfg tbl nm).run c).gates c.gates := by
-  rw [stepOf_eq_verifiedStep]
-  exact (verifiedStep cfg tbl nm).correct c hc
-
-theorem stepOf_wf (cfg : SuperOptConfig) (tbl : SynthTable) (nm : PassName)
-    (c : Circuit) (hc : c.Wf) : ((stepOf cfg tbl nm).run c).Wf := by
-  rw [stepOf_eq_verifiedStep]
-  exact (verifiedStep cfg tbl nm).wf_run c hc
 
 /-- How many fixpoint rounds a level allows: `O2` is the cheap bounded tier, the rest run out
 fully. -/
@@ -363,57 +321,10 @@ def force (n : Unit → Nat) : IO Unit := do
   let _ ← IO.lazyPure n
   pure ()
 
-/-- Run every pass once, in order.  This pure function is both the executable and the object
-of the correctness theorem below. -/
-def runPipeline (steps : List Step) (c : Circuit) : Circuit :=
-  steps.foldl (fun acc st => st.run acc) c
-
-theorem runPipeline_correct (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
-    (c : Circuit) (hc : c.Wf) :
-    Equivalent c.numQubits c.numCbits (runPipeline (names.map (stepOf cfg tbl)) c).gates c.gates := by
-  induction names generalizing c with
-  | nil => exact Equivalent.refl _ _ _
-  | cons nm names ih =>
-      simp only [List.map_cons, runPipeline, List.foldl_cons]
-      let c' := (stepOf cfg tbl nm).run c
-      have hstep := stepOf_correct cfg tbl nm c hc
-      have hwf := stepOf_wf cfg tbl nm c hc
-      have htail := ih c' hwf
-      have hnq := (verifiedStep cfg tbl nm).numQubits_run c
-      have hnc := (verifiedStep cfg tbl nm).numCbits_run c
-      rw [← stepOf_eq_verifiedStep] at hnq hnc
-      rw [hnq, hnc] at htail
-      exact Equivalent.trans htail hstep
-
-theorem runPipeline_wf (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
-    (c : Circuit) (hc : c.Wf) : runPipeline (names.map (stepOf cfg tbl)) c |>.Wf := by
-  induction names generalizing c with
-  | nil => exact hc
-  | cons nm names ih =>
-      simp only [List.map_cons, runPipeline, List.foldl_cons]
-      exact ih _ (stepOf_wf cfg tbl nm c hc)
-
-theorem runPipeline_numQubits (cfg : SuperOptConfig) (tbl : SynthTable)
-    (names : List PassName) (c : Circuit) :
-    (runPipeline (names.map (stepOf cfg tbl)) c).numQubits = c.numQubits := by
-  induction names generalizing c with
-  | nil => rfl
-  | cons nm names ih =>
-      change (runPipeline (names.map (stepOf cfg tbl))
-        ((stepOf cfg tbl nm).run c)).numQubits = c.numQubits
-      rw [ih]
-      cases nm <;> rfl
-
-theorem runPipeline_numCbits (cfg : SuperOptConfig) (tbl : SynthTable)
-    (names : List PassName) (c : Circuit) :
-    (runPipeline (names.map (stepOf cfg tbl)) c).numCbits = c.numCbits := by
-  induction names generalizing c with
-  | nil => rfl
-  | cons nm names ih =>
-      change (runPipeline (names.map (stepOf cfg tbl))
-        ((stepOf cfg tbl nm).run c)).numCbits = c.numCbits
-      rw [ih]
-      cases nm <;> rfl
+/-- Run every pass once, in order. The checked type makes this pure function both the
+executable and the object of its correctness theorem. -/
+def runPipeline (passes : List Pass) (c : Circuit.Checked n m) : Circuit.Checked n m :=
+  Pass.runAll passes c
 
 /-- How many rounds a run may take.
 
@@ -424,43 +335,23 @@ def roundFuel (maxRounds : Option Nat) (c : Circuit) : Nat :=
   maxRounds.getD (c.gates.length + 1)
 
 /-- Repeat the pipeline while it keeps removing gates, at most the supplied number of rounds. -/
-def runToFixpoint (steps : List Step) : Nat → Circuit → Circuit
+def runToFixpoint (passes : List Pass) : Nat → Circuit.Checked n m → Circuit.Checked n m
   | 0, c => c
   | fuel + 1, c =>
-      let out := runPipeline steps c
-      if out.gates.length < c.gates.length then runToFixpoint steps fuel out else out
+      let out := runPipeline passes c
+      if out.raw.gates.length < c.raw.gates.length then runToFixpoint passes fuel out else out
 
-theorem runToFixpoint_wf (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName) :
-    ∀ fuel c, c.Wf → (runToFixpoint (names.map (stepOf cfg tbl)) fuel c).Wf := by
+theorem runToFixpoint_correct (passes : List Pass) : ∀ fuel (c : Circuit.Checked n m),
+    (runToFixpoint passes fuel c).Equivalent c := by
   intro fuel
   induction fuel with
-  | zero => intro c hc; exact hc
+  | zero => intro c; exact Equivalent.refl _ _ _
   | succ fuel ih =>
-      intro c hc
+      intro c
+      have hround := Pass.correct_runAll passes c
       simp only [runToFixpoint]
       split
-      · exact ih _ (runPipeline_wf cfg tbl names c hc)
-      · exact runPipeline_wf cfg tbl names c hc
-
-theorem runToFixpoint_correct (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName) :
-    ∀ fuel c, c.Wf → Equivalent c.numQubits c.numCbits
-      (runToFixpoint (names.map (stepOf cfg tbl)) fuel c).gates c.gates := by
-  intro fuel
-  induction fuel with
-  | zero => intro c hc; exact Equivalent.refl _ _ _
-  | succ fuel ih =>
-      intro c hc
-      have hround := runPipeline_correct cfg tbl names c hc
-      have hwf := runPipeline_wf cfg tbl names c hc
-      simp only [runToFixpoint]
-      split
-      · rename_i hshrunk
-        let out := runPipeline (names.map (stepOf cfg tbl)) c
-        have hrest := ih out hwf
-        have hnq : out.numQubits = c.numQubits := runPipeline_numQubits cfg tbl names c
-        have hnc : out.numCbits = c.numCbits := runPipeline_numCbits cfg tbl names c
-        rw [hnq, hnc] at hrest
-        exact Equivalent.trans hrest hround
+      · exact Equivalent.trans (ih (runPipeline passes c)) hround
       · exact hround
 
 /-- The result of a run: the counts the banner compares. -/
@@ -471,32 +362,43 @@ structure Report where
   output : Metrics
 deriving Repr, Inhabited
 
-/-- The pure optimization core used by the IO shell.  Keeping table loading and reporting
-outside this definition makes the circuit returned by the executable the direct subject of a
-Lean correctness theorem. -/
-def runConfigured (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) (o : Options) : Circuit :=
+/-- The pure checked optimization core used by the IO shell. -/
+def runConfiguredChecked (cfg : SuperOptConfig) (tbl : SynthTable)
+    (c : Circuit.Checked n m) (o : Options) : Circuit.Checked n m :=
   let names := o.passes.getD o.level.pipeline
-  let steps := names.map (stepOf cfg tbl)
+  let passes := names.map (verifiedStep cfg tbl)
   if o.passes.isSome then
-    if o.fixpoint then runToFixpoint steps (roundFuel none c) c
-    else runPipeline steps c
+    if o.fixpoint then runToFixpoint passes (roundFuel none c.raw) c
+    else runPipeline passes c
   else if o.level.usesSuperOpt then
-    runToFixpoint steps (roundFuel o.level.maxRounds c) c
-  else if o.fixpoint then runToFixpoint steps (roundFuel none c) c
-  else runPipeline steps c
+    runToFixpoint passes (roundFuel o.level.maxRounds c.raw) c
+  else if o.fixpoint then runToFixpoint passes (roundFuel none c.raw) c
+  else runPipeline passes c
+
+/-- The raw API boundary. Malformed internal circuits are left unchanged; parsed QASM always
+takes the checked branch. -/
+def runConfigured (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) (o : Options) : Circuit :=
+  if hc : c.Wf then (runConfiguredChecked cfg tbl (Circuit.Checked.of c hc) o).raw else c
+
+/-- Correctness of the checked optimization core. -/
+theorem runConfiguredChecked_correct (cfg : SuperOptConfig) (tbl : SynthTable)
+    (c : Circuit.Checked n m) (o : Options) :
+    (runConfiguredChecked cfg tbl c o).Equivalent c := by
+  unfold runConfiguredChecked
+  split <;> split
+  · exact runToFixpoint_correct _ _ _
+  · exact Pass.correct_runAll _ _
+  · exact runToFixpoint_correct _ _ _
+  · split
+    · exact runToFixpoint_correct _ _ _
+    · exact Pass.correct_runAll _ _
 
 /-- **End-to-end correctness of the executable optimization core.** -/
 theorem runConfigured_correct (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit)
     (o : Options) (hc : c.Wf) :
     Equivalent c.numQubits c.numCbits (runConfigured cfg tbl c o).gates c.gates := by
-  unfold runConfigured
-  split <;> split
-  · exact runToFixpoint_correct cfg tbl _ _ _ hc
-  · exact runPipeline_correct cfg tbl _ c hc
-  · exact runToFixpoint_correct cfg tbl _ _ _ hc
-  · split
-    · exact runToFixpoint_correct cfg tbl _ _ _ hc
-    · exact runPipeline_correct cfg tbl _ c hc
+  rw [runConfigured, dif_pos hc]
+  exact runConfiguredChecked_correct cfg tbl (Circuit.Checked.of c hc) o
 
 /-- **End-to-end checked-output theorem.** If the front end accepts `input` and the checked
 serializer accepts the optimized circuit, then the emitted source parses back to that exact

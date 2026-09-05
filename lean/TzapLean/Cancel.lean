@@ -2019,16 +2019,15 @@ theorem cancelGates_correct {n m : Nat} (gs : List Gate) (hwf : ∀ g ∈ gs, g.
   Equivalent.trans (cancelGatesLoop_correct _ (cancelPairs_wf hwf))
     (cancelPairs_correct _ hwf)
 
+/-- Run gate cancellation on a raw circuit. -/
+def cancelGatesCircuit (c : Circuit) : Circuit := c.withGates (cancelGates c.gates)
+
 /-- **The `CancelGates` pass**, with its correctness proof as a field. -/
 def CancelGates : Pass where
   name := "Gate cancellation"
-  run c := c.withGates (cancelGates c.gates)
-  numQubits_run _ := rfl
-  numCbits_run _ := rfl
-  wf_run c hc := cancelGates_wf hc
-  wellFormed_run c _ hc := cancelGates_inRange hc
-  flagsOk_run c _ := Circuit.flagsOk_withGates _ _
-  correct c hc := cancelGates_correct c.gates hc
+  run := fun c => ⟨cancelGatesCircuit c.raw, c.numQubits_eq, c.numCbits_eq,
+    cancelGates_wf c.wf⟩
+  correct c := cancelGates_correct c.raw.gates c.wf
 
 end
 end TzapLean

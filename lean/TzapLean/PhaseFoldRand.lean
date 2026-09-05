@@ -118,7 +118,7 @@ theorem phaseFoldGates_wf {k n : Nat} (wdraws : Nat → Tag) {gs : List Gate}
 /-! ## Operand ranges are preserved
 
 `Wf` above is about *distinctness*; this is about *range*, and together they are what
-`Pass.wf_run` and `Pass.wellFormed_run` ask for. The two arguments have the same shape
+the optimizer's checked representation and output boundary require. The two arguments have the same shape
 because the pass only ever invents one kind of gate: a diagonal rotation on a wire the gate
 it replaced already used. -/
 
@@ -380,14 +380,13 @@ def phaseFoldExact (c : Circuit) : Circuit :=
 `Pass`: every output is correct. -/
 def PhaseFoldExact : Pass where
   name := "Phase folding"
-  run := phaseFoldExact
-  numQubits_run _ := rfl
-  numCbits_run _ := rfl
-  wf_run c hc := phaseFoldGates_wf _ hc
-  wellFormed_run c _ hc := phaseFoldGates_inRange _ hc
-  flagsOk_run c _ := Circuit.flagsOk_withGates _ _
-  correct c hc := phaseFoldGates_correct (wordToBits_pow (varBound c))
-    c.gates hc (exactDraws_faithful c)
+  run := fun c => ⟨phaseFoldExact c.raw, c.numQubits_eq, c.numCbits_eq,
+    phaseFoldGates_wf _ c.wf⟩
+  correct := by
+    intro n m c
+    rcases c with ⟨c, rfl, rfl, hc⟩
+    exact phaseFoldGates_correct (wordToBits_pow (varBound c))
+      c.gates hc (exactDraws_faithful c)
 
 /-! ## The pass -/
 

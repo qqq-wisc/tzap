@@ -262,15 +262,14 @@ the set of them by `Sep` and `OnSupp`, so the obligations are discharged by chec
 already runs. -/
 def SuperOpt (cfg : SuperOptConfig) (tbl : SynthTable) : Pass where
   name := "Superoptimization"
-  run := superOpt cfg tbl
-  numQubits_run _ := rfl
-  numCbits_run _ := rfl
-  wf_run c hc := superOptGates_wf cfg tbl c.gates hc
-  wellFormed_run c _ hc := superOptGates_inRange cfg tbl c.gates hc
-  flagsOk_run c _ := Circuit.flagsOk_withGates _ _
-  correct c _ := superOptGates_correct cfg tbl c.gates
+  run := fun c => ⟨superOpt cfg tbl c.raw, c.numQubits_eq, c.numCbits_eq,
+    superOptGates_wf cfg tbl c.raw.gates c.wf⟩
+  correct := by
+    intro n m c
+    rcases c with ⟨c, rfl, rfl, hc⟩
+    exact superOptGates_correct cfg tbl c.gates
 
-@[simp] theorem SuperOpt_run (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) :
-    (SuperOpt cfg tbl).run c = superOpt cfg tbl c := rfl
+@[simp] theorem SuperOpt_run (cfg : SuperOptConfig) (tbl : SynthTable)
+    (c : Circuit.Checked n m) : ((SuperOpt cfg tbl).run c).raw = superOpt cfg tbl c.raw := rfl
 
 end TzapLean

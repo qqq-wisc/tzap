@@ -284,7 +284,7 @@ def phaseFoldGates (k : Nat) (wdraws : Nat → Tag) (n : Nat) (gs : List Gate) :
 /-- Phase folding on a circuit.
 
 Through `withGates`, so the cached `has*` flags describe the gates that came out rather than
-the ones that went in — `Pass.flagsOk_run` is the obligation that keeps that honest. -/
+the ones that went in. The checked serializer verifies that metadata before emitting QASM. -/
 def phaseFold (k : Nat) (wdraws : Nat → Tag) (c : Circuit) : Circuit :=
   c.withGates (phaseFoldGates k wdraws c.numQubits c.gates)
 

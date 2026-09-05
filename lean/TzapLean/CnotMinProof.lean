@@ -1335,16 +1335,19 @@ theorem cnotMinGates_wf {n : Nat} (maxQ maxT : Nat) (gs : List Gate) (hwf : ∀ 
   · exact hwf₁ g h'
   · exact flush_wf _ hwf₂ g h'
 
+/-- Run CNOT minimization on a raw circuit. -/
+def cnotMinCircuit (c : Circuit) : Circuit :=
+  c.withGates (cnotMinGates c.numQubits maxChunkQubits maxChunkTerms c.gates)
+
 /-- **The `CnotMin` pass**, with its correctness proof as a field. -/
 def CnotMin : Pass where
   name := "CNOT minimization"
-  run c := c.withGates (cnotMinGates c.numQubits maxChunkQubits maxChunkTerms c.gates)
-  numQubits_run _ := rfl
-  numCbits_run _ := rfl
-  wf_run c hc := cnotMinGates_wf _ _ c.gates hc
-  wellFormed_run c _ hc := cnotMinGates_inRange _ _ c.gates hc
-  flagsOk_run c _ := Circuit.flagsOk_withGates _ _
-  correct c hc := cnotMinGates_correct _ _ c.gates hc
+  run := fun c => ⟨cnotMinCircuit c.raw, c.numQubits_eq, c.numCbits_eq,
+    cnotMinGates_wf _ _ c.raw.gates c.wf⟩
+  correct := by
+    intro n m c
+    rcases c with ⟨c, rfl, rfl, hc⟩
+    exact cnotMinGates_correct _ _ c.gates hc
 
 end
 end TzapLean

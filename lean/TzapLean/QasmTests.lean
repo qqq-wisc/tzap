@@ -87,8 +87,8 @@ def roundTrip (c : Circuit) : Bool :=
 
 /-! ## Validation
 
-`cx q[0],q[0]` parses but is not a circuit any pass may be handed: `Pass.correct` assumes
-`Circuit.Wf`, and without it `CancelGates` would delete the pair as self-inverse — which
+`cx q[0],q[0]` parses but cannot be packaged as the checked circuit a pass requires. Without
+`Circuit.Wf`, `CancelGates` would delete the pair as self-inverse — which
 `cnot q q` is not. The front end rejects it rather than passing it on. -/
 
 /-- Whether the parser accepts a source. -/

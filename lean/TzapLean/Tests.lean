@@ -33,7 +33,7 @@ def isCzGate : Gate → Bool | .cz .. => true | _ => false
 def countH (c : Circuit) : Nat := countKind isHGate c
 
 /-- The pass under test, as a plain function. -/
-def runCancel (c : Circuit) : Circuit := Pass.run CancelGates c
+def runCancel (c : Circuit) : Circuit := cancelGatesCircuit c
 
 /-! ## `src/cancel.rs` -/
 
@@ -654,9 +654,10 @@ def runCancel (c : Circuit) : Circuit := Pass.run CancelGates c
 
 -- Composition of two passes is again a pass, correctness included.
 #guard ((Pass.comp CancelGates CancelGates).run
-  (Circuit.ofGates 1 0 [Gate.h 0, Gate.h 0])).gates.length = 0
-#guard (Pass.runAll [CancelGates, CancelGates] (Circuit.ofGates 2 0
-  [Gate.cnot 0 1, Gate.h 0, Gate.h 0, Gate.cnot 0 1])).gates.length = 0
+  (Circuit.Checked.of (Circuit.ofGates 1 0 [Gate.h 0, Gate.h 0]) (by decide))).raw.gates.length = 0
+#guard (Pass.runAll [CancelGates, CancelGates]
+  (Circuit.Checked.of (Circuit.ofGates 2 0
+    [Gate.cnot 0 1, Gate.h 0, Gate.h 0, Gate.cnot 0 1]) (by decide))).raw.gates.length = 0
 
 
 /-! ## `src/cnot_min.rs`
@@ -667,7 +668,7 @@ the Rust `cnot_min(&c)` becomes `cnotMin c.numQubits c.gates`. As above, the
 equivalence for every well-formed input. -/
 
 /-- The pass under test, as a plain function. -/
-def runCnotMin (c : Circuit) : Circuit := Pass.run CnotMin c
+def runCnotMin (c : Circuit) : Circuit := cnotMinCircuit c
 
 -- invert_identity_is_identity
 #guard invert ((Array.range 5).map (2 ^ ·)) 5 = some ((Array.range 5).map (2 ^ ·))

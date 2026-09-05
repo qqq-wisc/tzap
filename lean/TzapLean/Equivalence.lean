@@ -64,6 +64,15 @@ theorem window {n m : Nat} (pre suf : List Gate) {gs hs : List Gate}
 
 end Equivalent
 
+namespace Circuit.Checked
+
+/-- Two checked circuits with the same register indices denote the same channel. Cached
+metadata is intentionally excluded because it does not contribute to circuit semantics. -/
+abbrev Equivalent (c d : Circuit.Checked n m) : Prop :=
+  TzapLean.Equivalent n m c.raw.gates d.raw.gates
+
+end Circuit.Checked
+
 /-! ## Global phase is invisible -/
 
 theorem conj_smul {n : Nat} (c : ℂ) (U ρ : Density n) (hc : c * star c = 1) :
