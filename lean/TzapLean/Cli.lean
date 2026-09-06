@@ -195,7 +195,7 @@ def resultRow (label : String) (before after : Nat) : String :=
   s!"    {label}{pad}  {fmtNum before} → {fmtNum after}  ({fmtPct before after}% reduction)"
 
 /-- Read and parse the input, exiting with Rust's message shape on failure. -/
-def readCircuit (verbose : Bool) (path : String) : IO Circuit := do
+def readCircuit (verbose : Bool) (path : String) : IO RawCircuit := do
   let t0 ← IO.monoNanosNow
   let source ← try IO.FS.readFile path
     catch e => do

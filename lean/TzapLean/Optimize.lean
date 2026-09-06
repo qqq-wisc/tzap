@@ -47,7 +47,7 @@ queries that chain once per qubit, which costs `O(gates × qubits)`. The driver 
 established that every operand is below `numQubits`, so its reporting path can keep the same
 next-free-layer state in an array and compute all five counters alongside it in `O(gates)`.
 Metrics are presentation only; no optimizer decision or correctness proof depends on them. -/
-def Metrics.of (c : Circuit) : Metrics := Id.run do
+def Metrics.of (c : RawCircuit) : Metrics := Id.run do
   let mut next : Array Nat := Array.replicate c.numQubits 0
   let mut gates := 0
   let mut twoQubit := 0
@@ -221,11 +221,11 @@ only that each round's tags are drawn afresh, which is why `phaseFoldIO` draws p
 unconditional `Pass` guarantee. -/
 
 theorem passOf_error_eq_zero {nm : PassName} (h : nm ≠ .PhaseFoldRand) (cfg : SuperOptConfig)
-    (tbl : SynthTable) (c : Circuit) : (passOf cfg tbl nm).error c = 0 := by
+    (tbl : SynthTable) (c : RawCircuit) : (passOf cfg tbl nm).error c = 0 := by
   cases nm <;> simp_all [passOf, CancelGatesR, CnotMinR, SuperOptR, deterministicRand]
 
 theorem tzapRound_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
-    (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) :
+    (cfg : SuperOptConfig) (tbl : SynthTable) (c : RawCircuit) :
     (tzapRound cfg tbl names).error c = 0 := by
   refine le_antisymm ?_ (by simp)
   have := RandPass.pipeline_error_le 0 (names.map (passOf cfg tbl)) ?_ c
@@ -235,7 +235,7 @@ theorem tzapRound_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldR
     exact le_of_eq (passOf_error_eq_zero (by rintro rfl; exact h hnm) cfg tbl c)
 
 theorem tzapRun_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
-    (cfg : SuperOptConfig) (tbl : SynthTable) (fuel : Nat) (c : Circuit) :
+    (cfg : SuperOptConfig) (tbl : SynthTable) (fuel : Nat) (c : RawCircuit) :
     (tzapRun cfg tbl names fuel).error c = 0 := by
   refine le_antisymm ?_ (by simp)
   have := RandPass.fixpointShrink_error_le (tzapRound cfg tbl names) 0
@@ -245,7 +245,7 @@ theorem tzapRun_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldRan
 /-- **The optimizer is correct.** For a well-formed circuit, the pipeline's output denotes the
 same channel as its input, except on a set of seeds of measure at most `error`. -/
 theorem tzapRun_correct (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
-    (fuel : Nat) (c : Circuit) (hc : c.Wf) :
+    (fuel : Nat) (c : RawCircuit) (hc : c.Wf) :
     ((tzapRun cfg tbl names fuel).dist c).toOuterMeasure
         {s | ¬ Equivalent c.numQubits c.numCbits
           ((tzapRun cfg tbl names fuel).run c s).gates c.gates}
@@ -254,7 +254,7 @@ theorem tzapRun_correct (cfg : SuperOptConfig) (tbl : SynthTable) (names : List 
 
 /-- **…and exactly correct without the randomized pass.** -/
 theorem tzapRun_exact {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
-    (cfg : SuperOptConfig) (tbl : SynthTable) (fuel : Nat) (c : Circuit) (hc : c.Wf)
+    (cfg : SuperOptConfig) (tbl : SynthTable) (fuel : Nat) (c : RawCircuit) (hc : c.Wf)
     {s : (tzapRun cfg tbl names fuel).Seed c}
     (hs : s ∈ ((tzapRun cfg tbl names fuel).dist c).support) :
     Equivalent c.numQubits c.numCbits ((tzapRun cfg tbl names fuel).run c s).gates c.gates :=
@@ -264,7 +264,7 @@ theorem tzapRun_exact {names : List PassName} (h : PassName.PhaseFoldRand ∉ na
 honest `has*` flags, from `RandPass`'s structural obligations. With `Qasm.parse_valid`, which
 establishes the same of whatever the front end accepts, this holds from parse to emit. -/
 theorem tzapRun_structural (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
-    (fuel : Nat) (c : Circuit) (hwf : c.Wf) (hc : c.Structural)
+    (fuel : Nat) (c : RawCircuit) (hwf : c.Wf) (hc : c.Structural)
     (s : (tzapRun cfg tbl names fuel).Seed c) :
     ((tzapRun cfg tbl names fuel).run c s).Structural :=
   ⟨(tzapRun cfg tbl names fuel).wellFormed_run c s hwf hc.1,
@@ -323,7 +323,7 @@ def force (n : Unit → Nat) : IO Unit := do
 
 /-- Run every pass once, in order. The checked type makes this pure function both the
 executable and the object of its correctness theorem. -/
-def runPipeline (passes : List Pass) (c : Circuit.Checked n m) : Circuit.Checked n m :=
+def runPipeline (passes : List Pass) (c : Circuit n m) : Circuit n m :=
   Pass.runAll passes c
 
 /-- How many rounds a run may take.
@@ -331,17 +331,17 @@ def runPipeline (passes : List Pass) (c : Circuit.Checked n m) : Circuit.Checked
 `Level.maxRounds` when the level caps them; otherwise `gates + 1`, which is the whole loop:
 a round that removes no gate ends it, so no more than `gates` rounds can continue. This is
 the `fuel` `tzapRun` is indexed by. -/
-def roundFuel (maxRounds : Option Nat) (c : Circuit) : Nat :=
+def roundFuel (maxRounds : Option Nat) (c : RawCircuit) : Nat :=
   maxRounds.getD (c.gates.length + 1)
 
 /-- Repeat the pipeline while it keeps removing gates, at most the supplied number of rounds. -/
-def runToFixpoint (passes : List Pass) : Nat → Circuit.Checked n m → Circuit.Checked n m
+def runToFixpoint (passes : List Pass) : Nat → Circuit n m → Circuit n m
   | 0, c => c
   | fuel + 1, c =>
       let out := runPipeline passes c
       if out.raw.gates.length < c.raw.gates.length then runToFixpoint passes fuel out else out
 
-theorem runToFixpoint_correct (passes : List Pass) : ∀ fuel (c : Circuit.Checked n m),
+theorem runToFixpoint_correct (passes : List Pass) : ∀ fuel (c : Circuit n m),
     (runToFixpoint passes fuel c).Equivalent c := by
   intro fuel
   induction fuel with
@@ -364,7 +364,7 @@ deriving Repr, Inhabited
 
 /-- The pure checked optimization core used by the IO shell. -/
 def runConfiguredChecked (cfg : SuperOptConfig) (tbl : SynthTable)
-    (c : Circuit.Checked n m) (o : Options) : Circuit.Checked n m :=
+    (c : Circuit n m) (o : Options) : Circuit n m :=
   let names := o.passes.getD o.level.pipeline
   let passes := names.map (verifiedStep cfg tbl)
   if o.passes.isSome then
@@ -377,12 +377,12 @@ def runConfiguredChecked (cfg : SuperOptConfig) (tbl : SynthTable)
 
 /-- The raw API boundary. Malformed internal circuits are left unchanged; parsed QASM always
 takes the checked branch. -/
-def runConfigured (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) (o : Options) : Circuit :=
-  if hc : c.Wf then (runConfiguredChecked cfg tbl (Circuit.Checked.of c hc) o).raw else c
+def runConfigured (cfg : SuperOptConfig) (tbl : SynthTable) (c : RawCircuit) (o : Options) : RawCircuit :=
+  if hc : c.Wf then (runConfiguredChecked cfg tbl (Circuit.of c hc) o).raw else c
 
 /-- Correctness of the checked optimization core. -/
 theorem runConfiguredChecked_correct (cfg : SuperOptConfig) (tbl : SynthTable)
-    (c : Circuit.Checked n m) (o : Options) :
+    (c : Circuit n m) (o : Options) :
     (runConfiguredChecked cfg tbl c o).Equivalent c := by
   unfold runConfiguredChecked
   split <;> split
@@ -394,17 +394,17 @@ theorem runConfiguredChecked_correct (cfg : SuperOptConfig) (tbl : SynthTable)
     · exact Pass.correct_runAll _ _
 
 /-- **End-to-end correctness of the executable optimization core.** -/
-theorem runConfigured_correct (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit)
+theorem runConfigured_correct (cfg : SuperOptConfig) (tbl : SynthTable) (c : RawCircuit)
     (o : Options) (hc : c.Wf) :
     Equivalent c.numQubits c.numCbits (runConfigured cfg tbl c o).gates c.gates := by
   rw [runConfigured, dif_pos hc]
-  exact runConfiguredChecked_correct cfg tbl (Circuit.Checked.of c hc) o
+  exact runConfiguredChecked_correct cfg tbl (Circuit.of c hc) o
 
 /-- **End-to-end checked-output theorem.** If the front end accepts `input` and the checked
 serializer accepts the optimized circuit, then the emitted source parses back to that exact
 circuit (apart from rebuilt cache flags), and its gates denote the same channel as the input. -/
 theorem runConfigured_checkedOutput_correct (cfg : SuperOptConfig) (tbl : SynthTable)
-    (o : Options) {input output : String} {c : Circuit}
+    (o : Options) {input output : String} {c : RawCircuit}
     (hinput : Qasm.parse input = .ok c)
     (houtput : Qasm.serializeChecked (runConfigured cfg tbl c o) = .ok output) :
     Qasm.parse output = .ok ((runConfigured cfg tbl c o).withGates
@@ -415,7 +415,7 @@ theorem runConfigured_checkedOutput_correct (cfg : SuperOptConfig) (tbl : SynthT
 
 /-- Run the optimizer. Builds the synthesis table first when the pipeline needs one, then
 delegates the circuit transformation exactly to `runConfigured`. -/
-def optimize (c : Circuit) (o : Options) : IO (Circuit × Report) := do
+def optimize (c : RawCircuit) (o : Options) : IO (RawCircuit × Report) := do
   let names := o.passes.getD o.level.pipeline
   let (cfg, tcfg) := resolveBounds o
   -- Only pay for a table if some selected pass will consult it.

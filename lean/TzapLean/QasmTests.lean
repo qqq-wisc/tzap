@@ -15,14 +15,14 @@ open Qasm
 
 /-! ## Driver metrics -/
 
-def metricsSample : Circuit := Circuit.ofGates 3 0
+def metricsSample : RawCircuit := RawCircuit.ofGates 3 0
   [Gate.h 0, Gate.h 1, Gate.cnot 0 2, Gate.t 1, Gate.rz (1/4) 2, Gate.cz 1 2]
 
 #guard Metrics.of metricsSample ==
   { gates := 6, twoQubit := 2, depth := 4, t := 1, rz := 1 }
 
 /-- Parse and render compactly: qubit count, cbit count, gates. -/
-def render (r : Except String Circuit) : String :=
+def render (r : Except String RawCircuit) : String :=
   match r with
   | .error e => s!"ERR {e}"
   | .ok c =>
@@ -77,18 +77,18 @@ Each message is the Rust one, with `rz` the single deliberate difference. -/
 /-! ## Serializing -/
 
 /-- A circuit, its QASM, and the circuit that QASM parses back to. -/
-def roundTrip (c : Circuit) : Bool :=
+def roundTrip (c : RawCircuit) : Bool :=
   match parse (serialize c) with
   | .error _ => false
   | .ok c' => c'.gates == c.gates && c'.numQubits == c.numQubits && c'.numCbits == c.numCbits
 
-#guard roundTrip (Circuit.ofGates 3 1
+#guard roundTrip (RawCircuit.ofGates 3 1
   [.h 0, .cnot 0 1, .t 1, .ccx 0 1 2, .cz 0 1, .measure 0 0, .reset 1])
 
 /-! ## Validation
 
 `cx q[0],q[0]` parses but cannot be packaged as the checked circuit a pass requires. Without
-`Circuit.Wf`, `CancelGates` would delete the pair as self-inverse — which
+`RawCircuit.Wf`, `CancelGates` would delete the pair as self-inverse — which
 `cnot q q` is not. The front end rejects it rather than passing it on. -/
 
 /-- Whether the parser accepts a source. -/
@@ -104,8 +104,8 @@ def parseAccepts (src : String) : Bool := (parse src).toOption.isSome
 #guard (match parse "OPENQASM 2.0;\nqreg q[1];\ncx q[0],q[0];\n" with
         | .error e => (e.splitOn "distinct").length == 2
         | .ok _ => false)
-#guard roundTrip (Circuit.ofGates 3 0 [.x 0, .z 1, .s 2, .sdg 0, .tdg 1, .ccz 0 1 2])
-#guard serialize (Circuit.ofGates 1 0 [.h 0]) ==
+#guard roundTrip (RawCircuit.ofGates 3 0 [.x 0, .z 1, .s 2, .sdg 0, .tdg 1, .ccz 0 1 2])
+#guard serialize (RawCircuit.ofGates 1 0 [.h 0]) ==
   "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\nh q[0];\n"
 
 /-! ## Options -/
@@ -129,20 +129,20 @@ def parseAccepts (src : String) : Bool := (parse src).toOption.isSome
 
 /-! ## Checked serialization -/
 
-#guard (match Qasm.serializeChecked (Circuit.ofGates 2 0 [.h 0, .cnot 0 1, .t 1]) with
+#guard (match Qasm.serializeChecked (RawCircuit.ofGates 2 0 [.h 0, .cnot 0 1, .t 1]) with
   | .ok _ => true
   | .error _ => false)
 
 -- This build deliberately cannot parse `rz`, so the checked writer fails closed.
-#guard (match Qasm.serializeChecked (Circuit.ofGates 1 0 [.rz (1/3) 0]) with
+#guard (match Qasm.serializeChecked (RawCircuit.ofGates 1 0 [.rz (1/3) 0]) with
   | .ok _ => false
   | .error _ => true)
 
 /-! ## Metrics and formatting -/
 
-#guard (Metrics.of (Circuit.ofGates 2 0 [.t 0, .tdg 1, .cnot 0 1, .h 0])).t == 2
-#guard (Metrics.of (Circuit.ofGates 2 0 [.t 0, .tdg 1, .cnot 0 1, .h 0])).twoQubit == 1
-#guard (Metrics.of (Circuit.ofGates 2 0 [.t 0, .tdg 1, .cnot 0 1, .h 0])).gates == 4
+#guard (Metrics.of (RawCircuit.ofGates 2 0 [.t 0, .tdg 1, .cnot 0 1, .h 0])).t == 2
+#guard (Metrics.of (RawCircuit.ofGates 2 0 [.t 0, .tdg 1, .cnot 0 1, .h 0])).twoQubit == 1
+#guard (Metrics.of (RawCircuit.ofGates 2 0 [.t 0, .tdg 1, .cnot 0 1, .h 0])).gates == 4
 #guard fmtNum 0 == "0"
 #guard fmtNum 999 == "999"
 #guard fmtNum 1000 == "1,000"

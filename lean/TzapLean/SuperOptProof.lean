@@ -269,6 +269,6 @@ def SuperOpt (cfg : SuperOptConfig) (tbl : SynthTable) : Pass where
     exact superOptGates_correct cfg tbl c.gates
 
 @[simp] theorem SuperOpt_run (cfg : SuperOptConfig) (tbl : SynthTable)
-    (c : Circuit.Checked n m) : ((SuperOpt cfg tbl).run c).raw = superOpt cfg tbl c.raw := rfl
+    (c : Circuit n m) : ((SuperOpt cfg tbl).run c).raw = superOpt cfg tbl c.raw := rfl
 
 end TzapLean

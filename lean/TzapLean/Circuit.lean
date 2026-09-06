@@ -12,8 +12,8 @@ declaration per Rust item:
 | `type Qubit = usize` | `Qubit := Nat` |
 | `type CBit = usize` | `CBit := Nat` |
 | `enum Gate` | `Gate` |
-| `struct Circuit` | `Circuit` |
-| `Circuit::new`, `Circuit::with_cbits`, `Circuit::apply` | `Circuit.new`, `Circuit.withCbits`, `Circuit.apply` |
+| `struct Circuit` | `RawCircuit` |
+| `Circuit::new`, `Circuit::with_cbits`, `Circuit::apply` | `RawCircuit.new`, `RawCircuit.withCbits`, `RawCircuit.apply` |
 | `Gate::map_qubits` | `Gate.mapQubits` |
 | `qubit_operands`, `qubits_of` | `Gate.qubitOperands`, `Gate.qubitsOf` |
 | `remap_gate`, `remap_subcircuit` | `remapGate`, `remapSubcircuit` |
@@ -28,18 +28,18 @@ Two deliberate departures from the Rust:
   form.
 * **Qubit indices are unbounded `Nat`s, as in Rust.** Well-formedness — every operand
   below `numQubits`, every classical bit below `numCbits` — is the separate predicate
-  `Circuit.WellFormed`. `TzapLean/Semantics.lean` gives out-of-range operands the
+  `RawCircuit.WellFormed`. `TzapLean/Semantics.lean` gives out-of-range operands the
   identity semantics, so every syntactic circuit denotes *something*, and
   well-formedness is only needed where it is genuinely used.
 -/
 
 namespace TzapLean
 
-/-- Index of a qubit within a `Circuit`. As in Rust this is an unbounded index; see
-`Circuit.WellFormed`. -/
+/-- Index of a qubit within a `RawCircuit`. As in Rust this is an unbounded index; see
+`RawCircuit.WellFormed`. -/
 abbrev Qubit := Nat
 
-/-- Index of a classical bit within a `Circuit`. -/
+/-- Index of a classical bit within a `RawCircuit`. -/
 abbrev CBit := Nat
 
 /-- A single quantum (or classical `measure`/`reset`) operation.
@@ -90,7 +90,7 @@ def cbitsOf : Gate → List CBit
 `cnot q q` is not a gate QASM can express and the Rust implementation never builds one;
 semantically it would be the map `b ↦ b[q := 0]`, which is idempotent rather than
 self-inverse, so cancelling a pair of them would be unsound. It is carried by
-`Circuit.Checked`, and `Qasm.validate` is what establishes it. -/
+`Circuit`, and `Qasm.validate` is what establishes it. -/
 def Wf : Gate → Prop
   | .cnot c tgt | .cz c tgt => c ≠ tgt
   | .ccx c₁ c₂ tgt | .ccz c₁ c₂ tgt => c₁ ≠ c₂ ∧ c₁ ≠ tgt ∧ c₂ ≠ tgt
@@ -100,7 +100,7 @@ instance (g : Gate) : Decidable g.Wf := by
   cases g <;> unfold Gate.Wf <;> infer_instance
 
 /-- A gate whose operands are in range for an `n`-qubit, `m`-cbit circuit: every qubit
-operand below `n`, every classical bit below `m`. `Circuit.WellFormed` is this, gatewise. -/
+operand below `n`, every classical bit below `m`. `RawCircuit.WellFormed` is this, gatewise. -/
 structure InRange (n m : Nat) (g : Gate) : Prop where
   /-- Every qubit operand names a wire of the register. -/
   qubits : ∀ q ∈ g.qubitsOf, q < n
@@ -120,7 +120,7 @@ theorem inRange_of_qubitsOf_eq {n m : Nat} {g : Gate} {q : Qubit} (hq : q < n)
 
 /-- **The one way the passes invent a gate**: on a wire some gate they were given already
 uses, with no classical operand. Such a gate is in range whenever that one was, which is
-what carries `Circuit.WellFormed` through a rewrite. -/
+what carries `RawCircuit.WellFormed` through a rewrite. -/
 theorem InRange.onWire {n m : Nat} {g g' : Gate} {q : Qubit} (hg : g.InRange n m)
     (hq : q ∈ g.qubitsOf) (h₁ : g'.qubitsOf = [q]) (h₂ : g'.cbitsOf = []) : g'.InRange n m :=
   inRange_of_qubitsOf_eq (hg.1 q hq) h₁ h₂
@@ -192,11 +192,11 @@ end Gate
 
 /-- An ordered sequence of `Gate`s over a fixed number of qubits and classical bits.
 
-The `has*` flags are maintained by `Circuit.apply`, exactly as in Rust, where they let
+The `has*` flags are maintained by `RawCircuit.apply`, exactly as in Rust, where they let
 passes cheaply skip circuits without a given gate kind. `apply_hasToffoli` and friends
 below prove the flags agree with the corresponding scan over `gates`, so a proof may use
 whichever form is convenient. -/
-structure Circuit where
+structure RawCircuit where
   numQubits : Nat
   numCbits : Nat := 0
   gates : List Gate := []
@@ -205,18 +205,18 @@ structure Circuit where
   hasMeasurement : Bool := false
   deriving Repr, Inhabited, DecidableEq
 
-namespace Circuit
+namespace RawCircuit
 
 /-- An empty circuit over `numQubits` qubits and no classical bits. -/
-def new (numQubits : Nat) : Circuit := { numQubits }
+def new (numQubits : Nat) : RawCircuit := { numQubits }
 
 /-- An empty circuit over `numQubits` qubits and `numCbits` classical bits. Use this
 instead of `new` when the circuit contains `measure` gates. -/
-def withCbits (numQubits numCbits : Nat) : Circuit := { numQubits, numCbits }
+def withCbits (numQubits numCbits : Nat) : RawCircuit := { numQubits, numCbits }
 
 /-- Append `gate`, updating the `has*` flags as needed. Gates accumulate at the end of
 `gates`, so list order is execution order. -/
-def apply (c : Circuit) (g : Gate) : Circuit :=
+def apply (c : RawCircuit) (g : Gate) : RawCircuit :=
   { c with
     gates := c.gates ++ [g]
     hasToffoli := c.hasToffoli || g.isToffoli
@@ -225,11 +225,11 @@ def apply (c : Circuit) (g : Gate) : Circuit :=
 
 /-- Build a circuit by applying `gs` in order to the empty `n`-qubit, `m`-cbit circuit.
 
-Written directly rather than as `gs.foldl Circuit.apply (withCbits n m)`, which is what it
+Written directly rather than as `gs.foldl RawCircuit.apply (withCbits n m)`, which is what it
 means but not what it should cost: `apply` appends one gate with `c.gates ++ [g]`, so folding
 it over `n` gates copies the list `n` times. Parsing gf2^32 spent 3.1 s of its 3.2 s here.
 `ofGates_eq_foldl` records that the two agree. -/
-def ofGates (n m : Nat) (gs : List Gate) : Circuit where
+def ofGates (n m : Nat) (gs : List Gate) : RawCircuit where
   numQubits := n
   numCbits := m
   gates := gs
@@ -238,52 +238,56 @@ def ofGates (n m : Nat) (gs : List Gate) : Circuit where
   hasMeasurement := gs.any Gate.isMeasurement
 
 /-- Number of gates. -/
-def size (c : Circuit) : Nat := c.gates.length
+def size (c : RawCircuit) : Nat := c.gates.length
 
 /-- Every gate operand is in range: qubits below `numQubits`, classical bits below
 `numCbits`. The Rust representation leaves this implicit; the semantics in
 `TzapLean/Semantics.lean` needs it only to relate out-of-range operands to real ones, but
 the QASM back end needs it to emit a register subscript it is allowed to emit. -/
-def WellFormed (c : Circuit) : Prop :=
+def WellFormed (c : RawCircuit) : Prop :=
   ∀ g ∈ c.gates, g.InRange c.numQubits c.numCbits
 
-instance (c : Circuit) : Decidable c.WellFormed := by unfold WellFormed; infer_instance
+instance (c : RawCircuit) : Decidable c.WellFormed := by unfold WellFormed; infer_instance
 
 /-- Every circuit the front end may hand a pass has well-formed gates. -/
-def Wf (c : Circuit) : Prop := ∀ g ∈ c.gates, g.Wf
+def Wf (c : RawCircuit) : Prop := ∀ g ∈ c.gates, g.Wf
 
-instance (c : Circuit) : Decidable c.Wf := by unfold Wf; infer_instance
+instance (c : RawCircuit) : Decidable c.Wf := by unfold Wf; infer_instance
+
+end RawCircuit
 
 /-- A circuit accepted by the optimizer.  The register sizes are indices, and the operand
-distinctness invariant needed by the semantic proofs is carried with the gate list.  Raw
-`Circuit` remains the parser-facing representation so malformed input can receive a useful
+distinctness invariant needed by the semantic proofs is carried with the gate list.
+`RawCircuit` remains the parser-facing representation so malformed input can receive a useful
 diagnostic before it reaches an optimizer pass. -/
-structure Checked (n m : Nat) where
-  raw : Circuit
+structure Circuit (n m : Nat) where
+  raw : RawCircuit
   numQubits_eq : raw.numQubits = n
   numCbits_eq : raw.numCbits = m
   wf : raw.Wf
 
 /-- Package a raw circuit once its optimizer precondition has been established. -/
-def Checked.of (c : Circuit) (hc : c.Wf) : Checked c.numQubits c.numCbits :=
+def Circuit.of (c : RawCircuit) (hc : c.Wf) : Circuit c.numQubits c.numCbits :=
   ⟨c, rfl, rfl, hc⟩
+
+namespace RawCircuit
 
 /-- The cached `has*` flags say what a scan of `gates` would say.
 
-Rust maintains these incrementally in `Circuit::apply` and its passes rebuild them when they
+Rust maintains these incrementally in `RawCircuit::apply` and its passes rebuild them when they
 rebuild the gate list; a pass that forgot to would leave a circuit whose metadata lies, and
 downstream passes skip work on the strength of that metadata. The QASM output boundary checks
 the flags before serialization. -/
-def FlagsOk (c : Circuit) : Prop :=
+def FlagsOk (c : RawCircuit) : Prop :=
   c.hasToffoli = c.gates.any Gate.isToffoli ∧
   c.hasCcz = c.gates.any Gate.isCcz ∧
   c.hasMeasurement = c.gates.any Gate.isMeasurement
 
-instance (c : Circuit) : Decidable c.FlagsOk := by unfold FlagsOk; infer_instance
+instance (c : RawCircuit) : Decidable c.FlagsOk := by unfold FlagsOk; infer_instance
 
 /-- Rebuild a circuit around a new gate list, recomputing the `has*` flags as the Rust passes
 do. Optimizer transformations use this whenever they replace the gate list. -/
-def withGates (c : Circuit) (gs : List Gate) : Circuit where
+def withGates (c : RawCircuit) (gs : List Gate) : RawCircuit where
   numQubits := c.numQubits
   numCbits := c.numCbits
   gates := gs
@@ -291,55 +295,55 @@ def withGates (c : Circuit) (gs : List Gate) : Circuit where
   hasCcz := gs.any Gate.isCcz
   hasMeasurement := gs.any Gate.isMeasurement
 
-@[simp] theorem gates_withGates (c : Circuit) (gs : List Gate) : (c.withGates gs).gates = gs := rfl
+@[simp] theorem gates_withGates (c : RawCircuit) (gs : List Gate) : (c.withGates gs).gates = gs := rfl
 
-@[simp] theorem numQubits_withGates (c : Circuit) (gs : List Gate) :
+@[simp] theorem numQubits_withGates (c : RawCircuit) (gs : List Gate) :
     (c.withGates gs).numQubits = c.numQubits := rfl
 
-@[simp] theorem numCbits_withGates (c : Circuit) (gs : List Gate) :
+@[simp] theorem numCbits_withGates (c : RawCircuit) (gs : List Gate) :
     (c.withGates gs).numCbits = c.numCbits := rfl
 
 /-- A rebuilt circuit's flags are honest, whatever the gates. -/
-theorem flagsOk_withGates (c : Circuit) (gs : List Gate) : (c.withGates gs).FlagsOk :=
+theorem flagsOk_withGates (c : RawCircuit) (gs : List Gate) : (c.withGates gs).FlagsOk :=
   ⟨rfl, rfl, rfl⟩
 
 /-- A rebuilt circuit is well-formed exactly when its new gates are in range. -/
-theorem wellFormed_withGates {c : Circuit} {gs : List Gate}
+theorem wellFormed_withGates {c : RawCircuit} {gs : List Gate}
     (h : ∀ g ∈ gs, g.InRange c.numQubits c.numCbits) : (c.withGates gs).WellFormed := h
 
 /-- **The structural invariant the driver maintains.** Distinct operands (`Wf`, in
 `GateAlgebra`) is stated separately, because only it is a precondition of the semantic
 obligation; these two are about the output being a circuit one can print and re-parse. -/
-def Structural (c : Circuit) : Prop := c.WellFormed ∧ c.FlagsOk
+def Structural (c : RawCircuit) : Prop := c.WellFormed ∧ c.FlagsOk
 
-instance (c : Circuit) : Decidable c.Structural := by unfold Structural; infer_instance
+instance (c : RawCircuit) : Decidable c.Structural := by unfold Structural; infer_instance
 
 /-- Rendering, matching the Rust `Display` impl for `Circuit`. -/
-def toString (c : Circuit) : String :=
+def toString (c : RawCircuit) : String :=
   let header := s!"Circuit ({c.numQubits} qubits, {c.gates.length} gates):\n"
   let body := c.gates.zipIdx.foldl (fun acc (g, i) => acc ++ s!"  {i}: {g}\n") ""
   header ++ body
 
-instance : ToString Circuit := ⟨Circuit.toString⟩
+instance : ToString RawCircuit := ⟨RawCircuit.toString⟩
 
 @[simp] theorem gates_new (n : Nat) : (new n).gates = [] := rfl
 @[simp] theorem numCbits_new (n : Nat) : (new n).numCbits = 0 := rfl
-@[simp] theorem gates_apply (c : Circuit) (g : Gate) :
+@[simp] theorem gates_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).gates = c.gates ++ [g] := rfl
-@[simp] theorem numQubits_apply (c : Circuit) (g : Gate) :
+@[simp] theorem numQubits_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).numQubits = c.numQubits := rfl
-@[simp] theorem numCbits_apply (c : Circuit) (g : Gate) :
+@[simp] theorem numCbits_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).numCbits = c.numCbits := rfl
 
 /-- The `hasToffoli` flag of a circuit built by `apply` from a flagless start is exactly
 "some gate is a `ccx`". -/
-theorem hasToffoli_apply (c : Circuit) (g : Gate) :
+theorem hasToffoli_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).hasToffoli = (c.hasToffoli || g.isToffoli) := rfl
 
-theorem hasCcz_apply (c : Circuit) (g : Gate) :
+theorem hasCcz_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).hasCcz = (c.hasCcz || g.isCcz) := rfl
 
-theorem hasMeasurement_apply (c : Circuit) (g : Gate) :
+theorem hasMeasurement_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).hasMeasurement = (c.hasMeasurement || g.isMeasurement) := rfl
 
 /-- The flags maintained incrementally by `apply` agree with a scan of the gate list.
@@ -366,9 +370,9 @@ theorem flagsOk_ofGates (n m : Nat) (gs : List Gate) : (ofGates n m gs).FlagsOk 
 /-- **Building directly is building by `apply`.** The efficient definition above denotes what
 the Rust API's incremental construction denotes. -/
 theorem ofGates_eq_foldl (n m : Nat) (gs : List Gate) :
-    ofGates n m gs = gs.foldl Circuit.apply (withCbits n m) := by
-  have key : ∀ (gs : List Gate) (c : Circuit),
-      gs.foldl Circuit.apply c =
+    ofGates n m gs = gs.foldl RawCircuit.apply (withCbits n m) := by
+  have key : ∀ (gs : List Gate) (c : RawCircuit),
+      gs.foldl RawCircuit.apply c =
         { numQubits := c.numQubits, numCbits := c.numCbits, gates := c.gates ++ gs,
           hasToffoli := c.hasToffoli || gs.any Gate.isToffoli,
           hasCcz := c.hasCcz || gs.any Gate.isCcz,
@@ -379,11 +383,11 @@ theorem ofGates_eq_foldl (n m : Nat) (gs : List Gate) :
     | cons g gs ih =>
         intro c
         rw [List.foldl_cons, ih]
-        simp [Circuit.apply, List.any_cons, Bool.or_assoc]
+        simp [RawCircuit.apply, List.any_cons, Bool.or_assoc]
   rw [key gs (withCbits n m)]
   simp [ofGates, withCbits]
 
-end Circuit
+end RawCircuit
 
 /-- Remap a gate's qubits through a lookup table: qubit `i` becomes its index in `qubits`
 (and is left alone if absent, where Rust would panic). Classical bits are not remapped. -/
@@ -391,7 +395,7 @@ def remapGate (g : Gate) (qubits : List Qubit) : Gate :=
   g.mapQubits fun q => (qubits.idxOf q)
 
 /-- Build a compact circuit with qubits remapped to `0 .. qubits.length - 1`. -/
-def remapSubcircuit (gs : List Gate) (qubits : List Qubit) : Circuit :=
-  Circuit.ofGates qubits.length 0 (gs.map (remapGate · qubits))
+def remapSubcircuit (gs : List Gate) (qubits : List Qubit) : RawCircuit :=
+  RawCircuit.ofGates qubits.length 0 (gs.map (remapGate · qubits))
 
 end TzapLean

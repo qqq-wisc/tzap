@@ -447,7 +447,7 @@ def superOptGates (cfg : SuperOptConfig) (tbl : SynthTable) (n : Nat) (gs : List
   if onSuppB st.supp xs && sepAllB st.supp xs then applyAllLinear st.repl [] xs else gs
 
 /-- Peephole superoptimization of a circuit. -/
-def superOpt (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit) : Circuit :=
+def superOpt (cfg : SuperOptConfig) (tbl : SynthTable) (c : RawCircuit) : RawCircuit :=
   c.withGates (superOptGates cfg tbl c.numQubits c.gates)
 
 end TzapLean

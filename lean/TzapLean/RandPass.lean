@@ -45,13 +45,13 @@ structure RandPass where
   /-- The pass's name. -/
   name : String
   /-- The randomness the pass consumes, as a function of the circuit it is given. -/
-  Seed : Circuit → Type
+  Seed : RawCircuit → Type
   /-- The distribution the seed is drawn from (`PMF.uniformOfFintype` in practice). -/
-  dist : (c : Circuit) → PMF (Seed c)
+  dist : (c : RawCircuit) → PMF (Seed c)
   /-- The transformation, for a given seed. -/
-  run : (c : Circuit) → Seed c → Circuit
+  run : (c : RawCircuit) → Seed c → RawCircuit
   /-- The failure probability this pass is allowed. -/
-  error : Circuit → ℝ≥0∞
+  error : RawCircuit → ℝ≥0∞
   /-- Passes never change the number of qubits. -/
   numQubits_run : ∀ c s, (run c s).numQubits = c.numQubits
   /-- Passes never change the number of classical bits. -/
@@ -71,7 +71,7 @@ structure RandPass where
 namespace RandPass
 
 /-- The failure event of a pass on a circuit. -/
-def failure (p : RandPass) (c : Circuit) : Set (p.Seed c) :=
+def failure (p : RandPass) (c : RawCircuit) : Set (p.Seed c) :=
   {s | ¬ Equivalent c.numQubits c.numCbits (p.run c s).gates c.gates}
 
 /-! ## Deterministic passes are the `error = 0` case -/
@@ -99,7 +99,7 @@ def id : RandPass where
 /-- **Zero error collapses to deterministic correctness.** A `RandPass` with `error c = 0` is
 right on *every* seed its distribution can produce — the `Pass` notion, recovered from the
 randomized one rather than sitting beside it. -/
-theorem correct_of_error_eq_zero (p : RandPass) (c : Circuit) (hc : c.Wf)
+theorem correct_of_error_eq_zero (p : RandPass) (c : RawCircuit) (hc : c.Wf)
     (h : p.error c = 0) {s : p.Seed c} (hs : s ∈ (p.dist c).support) :
     Equivalent c.numQubits c.numCbits (p.run c s).gates c.gates := by
   have hzero : (p.dist c).toOuterMeasure (p.failure c) = 0 :=
@@ -120,7 +120,7 @@ and the two share this proof rather than having one each.
 The seed is drawn for `q` either way. That costs nothing — a `RandPass` is a specification,
 never run — and it keeps the seed space a plain sigma type, so the measure argument below
 needs no transport. -/
-def compWhen (p q : RandPass) (cond : Circuit → Circuit → Bool) : RandPass where
+def compWhen (p q : RandPass) (cond : RawCircuit → RawCircuit → Bool) : RandPass where
   name := q.name ++ " ∘? " ++ p.name
   Seed := fun c => Σ s : p.Seed c, q.Seed (p.run c s)
   dist := fun c => (p.dist c).bind fun s =>
@@ -227,18 +227,18 @@ def compWhen (p q : RandPass) (cond : Circuit → Circuit → Bool) : RandPass w
 /-- Run `p`, then `q` on its output, drawing `q`'s seed after seeing that output. -/
 def comp (p q : RandPass) : RandPass := p.compWhen q (fun _ _ => true)
 
-@[simp] theorem comp_run (p q : RandPass) (c : Circuit) (s : (p.comp q).Seed c) :
+@[simp] theorem comp_run (p q : RandPass) (c : RawCircuit) (s : (p.comp q).Seed c) :
     (p.comp q).run c s = q.run (p.run c s.1) s.2 := rfl
 
-@[simp] theorem comp_error (p q : RandPass) (c : Circuit) :
+@[simp] theorem comp_error (p q : RandPass) (c : RawCircuit) :
     (p.comp q).error c = p.error c + ⨆ s : p.Seed c, q.error (p.run c s) := rfl
 
-@[simp] theorem compWhen_error (p q : RandPass) (cond : Circuit → Circuit → Bool) (c : Circuit) :
+@[simp] theorem compWhen_error (p q : RandPass) (cond : RawCircuit → RawCircuit → Bool) (c : RawCircuit) :
     (p.compWhen q cond).error c = p.error c + ⨆ s : p.Seed c, q.error (p.run c s) := rfl
 
 /-- What one step of a conditional composition computes — the round loop's rule, as a
 rewrite. -/
-theorem compWhen_run (p q : RandPass) (cond : Circuit → Circuit → Bool) (c : Circuit)
+theorem compWhen_run (p q : RandPass) (cond : RawCircuit → RawCircuit → Bool) (c : RawCircuit)
     (s : (p.compWhen q cond).Seed c) :
     (p.compWhen q cond).run c s =
       (if cond c (p.run c s.1) then q.run (p.run c s.1) s.2 else p.run c s.1) := rfl
@@ -254,7 +254,7 @@ def pipeline : List RandPass → RandPass
     pipeline (p :: ps) = p.comp (pipeline ps) := rfl
 
 /-- The gate count fell: the optimizer's rule for going round again. -/
-def Shrank (c c' : Circuit) : Bool := decide (c'.gates.length < c.gates.length)
+def Shrank (c c' : RawCircuit) : Bool := decide (c'.gates.length < c.gates.length)
 
 /-- **Repeat `p` while it keeps shrinking the circuit**, at most `fuel` times — the driver's
 round loop, as a pass rather than as an `IO` loop.
@@ -271,7 +271,7 @@ def fixpointShrink (p : RandPass) : Nat → RandPass
     p.fixpointShrink (n + 1) = p.compWhen (p.fixpointShrink n) Shrank := rfl
 
 /-- One turn of the loop, as a rewrite: run the round, and go again exactly when it shrank. -/
-theorem fixpointShrink_run (p : RandPass) (n : Nat) (c : Circuit)
+theorem fixpointShrink_run (p : RandPass) (n : Nat) (c : RawCircuit)
     (s : (p.fixpointShrink (n + 1)).Seed c) :
     (p.fixpointShrink (n + 1)).run c s =
       (if (p.run c s.1).gates.length < c.gates.length then
@@ -285,7 +285,7 @@ times one round's, whatever the rounds do to each other's inputs — the composi
 round's seed after seeing the previous round's output, so nothing here assumes independence
 of the *events*, only that the draws are fresh. -/
 theorem fixpointShrink_error_le (p : RandPass) (B : ℝ≥0∞) (hB : ∀ c, p.error c ≤ B) :
-    ∀ (n : Nat) (c : Circuit), (p.fixpointShrink n).error c ≤ n * B := by
+    ∀ (n : Nat) (c : RawCircuit), (p.fixpointShrink n).error c ≤ n * B := by
   intro n
   induction n with
   | zero => intro c; simp [RandPass.id]

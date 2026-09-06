@@ -1789,7 +1789,7 @@ theorem reduceHadamards_wf {gs : List Gate} (hwf : ∀ g ∈ gs, g.Wf) :
 
 /-! ## Operand ranges
 
-The same three sweeps, against the other half of `Circuit`'s structural invariant. The
+The same three sweeps, against the other half of `RawCircuit`'s structural invariant. The
 argument is shorter than the `Wf` one only because the gates the Hadamard rule invents —
 `x`, `z`, `h`, `s`, `sdg` — all sit on the wire of the `h` that opened the run, so their
 range is the range of a gate the sweep was already given. -/
@@ -2017,7 +2017,7 @@ theorem cancelGates_correct {n m : Nat} (gs : List Gate) (hwf : ∀ g ∈ gs, g.
     (cancelPairs_correct _ hwf)
 
 /-- Run gate cancellation on a raw circuit. -/
-def cancelGatesCircuit (c : Circuit) : Circuit := c.withGates (cancelGates c.gates)
+def cancelGatesCircuit (c : RawCircuit) : RawCircuit := c.withGates (cancelGates c.gates)
 
 /-- **The `CancelGates` pass**, with its correctness proof as a field. -/
 def CancelGates : Pass where
