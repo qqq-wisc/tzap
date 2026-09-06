@@ -170,12 +170,6 @@ theorem phaseMatrix_mul {n : Nat} (f g : Basis n → ℂ) :
   · intro k _ hk; simp [hk]
   · simp
 
-/-- All diagonal gates commute with each other. -/
-theorem phaseMatrix_comm {n : Nat} (f g : Basis n → ℂ) :
-    phaseMatrix f * phaseMatrix g = phaseMatrix g * phaseMatrix f := by
-  rw [phaseMatrix_mul, phaseMatrix_mul]
-  simp [mul_comm]
-
 /-! ## Squares of the self-inverse gates -/
 
 /-- Writing a wire twice keeps only the second value. -/

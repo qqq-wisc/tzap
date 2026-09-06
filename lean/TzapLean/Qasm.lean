@@ -352,10 +352,6 @@ def parse (source : String) : Except String RawCircuit := do
   let c ← parseRaw source
   validate c
 
-theorem parse_eq_validate {source : String} {c : RawCircuit} (h : parseRaw source = .ok c) :
-    parse source = validate c := by
-  simp only [parse, h, bind, Except.bind]
-
 /-- **Everything the parser promises the rest of the compiler.** `RawCircuit.Wf` permits entry
 into the checked optimizer; `WellFormed` and `FlagsOk` support checked serialization. -/
 theorem parse_valid {source : String} {c : RawCircuit} (h : parse source = .ok c) :

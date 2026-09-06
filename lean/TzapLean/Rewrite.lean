@@ -519,26 +519,6 @@ theorem sepOneAux_seen (S : List Qubit) (w : Nat) :
           · exact absurd hrw ht
           · exact ⟨r, hr, hrw⟩
 
-theorem sepOneB_sound (S : List Qubit) (w : Nat) :
-    ∀ xs : List Tagged, sepOneB S w xs = true → SepOne S w xs := by
-  intro xs
-  induction xs with
-  | nil => intro _; trivial
-  | cons p rest ih =>
-      obtain ⟨g, t⟩ := p
-      intro h
-      by_cases ht : t = some w
-      · refine ⟨fun hne _ => absurd ht hne, ih ?_⟩
-        simpa [sepOneB, sepOneAux, ht] using h
-      · simp only [sepOneB, sepOneAux, if_neg ht, Bool.and_eq_true] at h
-        refine ⟨fun _ hex q hq hmem => ?_, ih (by simpa [sepOneB] using h.1)⟩
-        have hseen : (sepOneAux S w rest).2 = true := (sepOneAux_seen S w rest).2 hex
-        simp only [hseen, Bool.not_true, Bool.false_or, List.all_eq_true] at h
-        have hnc := h.2 q hq
-        simp only [Bool.not_eq_true'] at hnc
-        rw [List.contains_eq_mem, decide_eq_false_iff_not] at hnc
-        exact hnc hmem
-
 /-! `sepOneB` has a small proof-friendly specification, but its right-to-left traversal must
 visit the whole suffix before it knows where the last claim is.  The executable whole-set
 checker already knows each rewrite's member count.  `sepUntilB` consumes that count while
@@ -693,31 +673,6 @@ def sepB (supp : Nat → List Qubit) : List Nat → List Tagged → Bool
   | started, (_, none) :: rest => sepB supp started rest
   | started, (_, some w) :: rest =>
       (started.contains w || sepOneB (supp w) w rest) && sepB supp (w :: started) rest
-
-theorem sepB_sound (supp : Nat → List Qubit) :
-    ∀ (xs : List Tagged) (started : List Nat),
-      (∀ w ∈ started, SepOne (supp w) w xs) → sepB supp started xs = true → Sep supp xs := by
-  intro xs
-  induction xs with
-  | nil => intro _ _ _; trivial
-  | cons p rest ih =>
-      obtain ⟨g, t⟩ := p
-      intro started hst h
-      cases t with
-      | none =>
-          refine ⟨fun w hw => absurd hw (by simp), ?_⟩
-          exact ih started (fun w hw => (hst w hw).2) (by simpa [sepB] using h)
-      | some w =>
-          simp only [sepB, Bool.and_eq_true, Bool.or_eq_true] at h
-          have hw : SepOne (supp w) w rest := by
-            rcases h.1 with hc | hs
-            · exact (hst w (by simpa using hc)).2
-            · exact sepOneB_sound _ _ _ hs
-          refine ⟨fun v hv => ?_, ih (w :: started) (fun v hv => ?_) h.2⟩
-          · exact (Option.some.injEq w v ▸ hv) ▸ hw
-          · rcases List.mem_cons.1 hv with rfl | hv
-            · exact hw
-            · exact (hst v hv).2
 
 /-- `OnSupp`, decided. -/
 def onSuppB (supp : Nat → List Qubit) (xs : List Tagged) : Bool :=

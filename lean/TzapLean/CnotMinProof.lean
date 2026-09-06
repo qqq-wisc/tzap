@@ -176,12 +176,6 @@ theorem blockPerm_get {n : Nat} (qs : List Qubit) (st : BlockState) (b : Basis n
   simp only [Basis.get, dif_pos hq, blockPerm]
   simp [hi]
 
-theorem blockPerm_get_of_none {n : Nat} (qs : List Qubit) (st : BlockState) (b : Basis n)
-    {q : Qubit} (hq : q < n) (hi : localIdx qs q = none) :
-    (blockPerm qs st b).get q = b.get q := by
-  simp only [Basis.get, dif_pos hq, blockPerm]
-  simp [hi]
-
 /-! ## Folding a rotation into the phase polynomial -/
 
 /-- The phase polynomial's value, as a function of the term list alone. -/
@@ -1086,8 +1080,6 @@ theorem flush_inRange {n m : Nat} (ch : Chunk) (hn : ch.numQubits = n) (hok : ch
 
 theorem Chunk.reset_ok (ch : Chunk) : ch.reset.Ok := by
   intro q hq; simp [Chunk.reset, Chunk.empty] at hq
-
-theorem Chunk.reset_numQubits (ch : Chunk) : ch.reset.numQubits = ch.numQubits := rfl
 
 theorem Chunk.reset_original (ch : Chunk) : ch.reset.original = [] := rfl
 
