@@ -14,7 +14,7 @@ consume an arbitrary `rz`, gridsynth, is not ported either, so accepting one wou
 carrying a gate nothing downstream can lower. Rejecting it says so at the door rather than
 somewhere further in.
 
-Nothing here is verified. It is a front end: it turns bytes into a `Circuit`, and every
+Nothing here is verified. It is a front end: it turns bytes into a `RawCircuit`, and every
 theorem in this development is about what happens after that.
 -/
 
@@ -267,7 +267,7 @@ def parseStatement (line : String) (st : St) (lineNum : Nat) : Except String St 
 
 This is the parser proper; `parse` is this followed by `validate`, and everything outside
 this module should call `parse`. -/
-def parseRaw (source : String) : Except String Circuit := do
+def parseRaw (source : String) : Except String RawCircuit := do
   let source := stripBlockComments source
   let mut st : St := {}
   let mut lineNum := 0
@@ -280,13 +280,13 @@ def parseRaw (source : String) : Except String Circuit := do
         | none => piece
       if line ≠ "" then
         st ← parseStatement line st lineNum
-  return Circuit.ofGates st.numQubits st.numCbits st.revGates.reverse
+  return RawCircuit.ofGates st.numQubits st.numCbits st.revGates.reverse
 
 /-! ## Validating
 
 The parser checks each operand against its register's size, but nothing checks that a
 multi-qubit gate's operands are *distinct*: `cx q[0],q[0]` parses. That circuit cannot be
-packaged as the `Circuit.Checked` input a pass requires. The restriction is not idle —
+packaged as the `Circuit` input a pass requires. The restriction is not idle —
 `cnot q q` denotes `b ↦ b[q := 0]`, which is idempotent rather than
 self-inverse, so `CancelGates` deleting a pair of them is a genuinely unsound rewrite. (The
 Rust front end has the same gap; there it is a latent bug rather than a broken proof.)
@@ -299,7 +299,7 @@ here is cheaper than threading a proof through the parser's state monad, and it 
 -/
 
 /-- Name the gate that failed validation, for the error message. -/
-def badGate (c : Circuit) : String :=
+def badGate (c : RawCircuit) : String :=
   match c.gates.find? (fun g => !decide g.Wf) with
   | some g =>
       s!"gate '{g}' repeats a qubit operand — a multi-qubit gate needs distinct qubits"
@@ -310,22 +310,22 @@ def badGate (c : Circuit) : String :=
 
 /-- Accept a parsed circuit only if every gate has distinct operands and is in range,
 rebuilding it so that its cached `has*` flags are honest too. -/
-def validate (c : Circuit) : Except String Circuit :=
+def validate (c : RawCircuit) : Except String RawCircuit :=
   if ∀ g ∈ c.gates, g.Wf ∧ g.InRange c.numQubits c.numCbits then
     .ok (c.withGates c.gates)
   else
     .error (badGate c)
 
 /-- Validation returns the circuit it was given, up to the rebuilt flags. -/
-theorem validate_eq {c c' : Circuit} (h : validate c = .ok c') : c' = c.withGates c.gates := by
+theorem validate_eq {c c' : RawCircuit} (h : validate c = .ok c') : c' = c.withGates c.gates := by
   unfold validate at h
   split at h
   · exact (Except.ok.injEq _ _ ▸ h).symm ▸ rfl
   · exact absurd h (by simp)
 
 /-- **A validated circuit has distinct multi-qubit operands** — the invariant carried by
-`Circuit.Checked`. -/
-theorem validate_wf {c c' : Circuit} (h : validate c = .ok c') : c'.Wf := by
+`Circuit`. -/
+theorem validate_wf {c c' : RawCircuit} (h : validate c = .ok c') : c'.Wf := by
   unfold validate at h
   split at h
   · rename_i hall
@@ -334,7 +334,7 @@ theorem validate_wf {c c' : Circuit} (h : validate c = .ok c') : c'.Wf := by
   · exact absurd h (by simp)
 
 /-- **A validated circuit is well-formed**: every operand is a slot that was declared. -/
-theorem validate_wellFormed {c c' : Circuit} (h : validate c = .ok c') : c'.WellFormed := by
+theorem validate_wellFormed {c c' : RawCircuit} (h : validate c = .ok c') : c'.WellFormed := by
   unfold validate at h
   split at h
   · rename_i hall
@@ -343,22 +343,22 @@ theorem validate_wellFormed {c c' : Circuit} (h : validate c = .ok c') : c'.Well
   · exact absurd h (by simp)
 
 /-- **A validated circuit's flags are honest**, since validation rebuilds them. -/
-theorem validate_flagsOk {c c' : Circuit} (h : validate c = .ok c') : c'.FlagsOk := by
-  rw [validate_eq h]; exact Circuit.flagsOk_withGates _ _
+theorem validate_flagsOk {c c' : RawCircuit} (h : validate c = .ok c') : c'.FlagsOk := by
+  rw [validate_eq h]; exact RawCircuit.flagsOk_withGates _ _
 
 /-- Parse a circuit from OpenQASM 2.0 source, rejecting anything the pipeline may not
 assume. -/
-def parse (source : String) : Except String Circuit := do
+def parse (source : String) : Except String RawCircuit := do
   let c ← parseRaw source
   validate c
 
-theorem parse_eq_validate {source : String} {c : Circuit} (h : parseRaw source = .ok c) :
+theorem parse_eq_validate {source : String} {c : RawCircuit} (h : parseRaw source = .ok c) :
     parse source = validate c := by
   simp only [parse, h, bind, Except.bind]
 
-/-- **Everything the parser promises the rest of the compiler.** `Circuit.Wf` permits entry
+/-- **Everything the parser promises the rest of the compiler.** `RawCircuit.Wf` permits entry
 into the checked optimizer; `WellFormed` and `FlagsOk` support checked serialization. -/
-theorem parse_valid {source : String} {c : Circuit} (h : parse source = .ok c) :
+theorem parse_valid {source : String} {c : RawCircuit} (h : parse source = .ok c) :
     c.Wf ∧ c.WellFormed ∧ c.FlagsOk := by
   unfold parse at h
   simp only [bind, Except.bind] at h
@@ -368,10 +368,10 @@ theorem parse_valid {source : String} {c : Circuit} (h : parse source = .ok c) :
       rw [hraw] at h
       exact ⟨validate_wf h, validate_wellFormed h, validate_flagsOk h⟩
 
-theorem parse_wf {source : String} {c : Circuit} (h : parse source = .ok c) : c.Wf :=
+theorem parse_wf {source : String} {c : RawCircuit} (h : parse source = .ok c) : c.Wf :=
   (parse_valid h).1
 
-theorem parse_wellFormed {source : String} {c : Circuit} (h : parse source = .ok c) :
+theorem parse_wellFormed {source : String} {c : RawCircuit} (h : parse source = .ok c) :
     c.WellFormed := (parse_valid h).2.1
 
 /-! ## Serializing -/
@@ -394,7 +394,7 @@ def gateLine : Gate → String
   | .reset q => s!"reset q[{q}];"
 
 /-- Serialize a circuit to OpenQASM 2.0. -/
-def serialize (c : Circuit) : String :=
+def serialize (c : RawCircuit) : String :=
   let header :=
     "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n" ++ s!"qreg q[{c.numQubits}];\n" ++
       (if c.numCbits > 0 then s!"creg c[{c.numCbits}];\n" else "")
@@ -403,7 +403,7 @@ def serialize (c : Circuit) : String :=
 /-- Serialize only when the parser confirms that the emitted text reconstructs the same
 circuit.  This executable check makes the output boundary fail closed, including for syntax
 such as `rz` that this build can print but intentionally cannot parse. -/
-def serializeChecked (c : Circuit) : Except String String :=
+def serializeChecked (c : RawCircuit) : Except String String :=
   let source := serialize c
   match parse source with
   | .error e => .error s!"internal QASM serialization check failed: {e}"
@@ -413,7 +413,7 @@ def serializeChecked (c : Circuit) : Except String String :=
 
 /-- A successful checked serialization parses to exactly the circuit supplied, modulo the
 intentional rebuilding of cached flags. -/
-theorem serializeChecked_sound {c : Circuit} {source : String}
+theorem serializeChecked_sound {c : RawCircuit} {source : String}
     (h : serializeChecked c = .ok source) :
     source = serialize c ∧ parse source = .ok (c.withGates c.gates) := by
   cases hp : parse (serialize c) with

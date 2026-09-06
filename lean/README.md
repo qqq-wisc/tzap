@@ -28,8 +28,8 @@ The optimizer is composed of a number of passes (`Pass`), each of which returns 
 ```lean
 structure Pass where
   name : String
-  run : ∀ {n m}, Circuit.Checked n m → Circuit.Checked n m
-  correct : ∀ {n m} (c : Circuit.Checked n m),
+  run : ∀ {n m}, Circuit n m → Circuit n m
+  correct : ∀ {n m} (c : Circuit n m),
     (run c).Equivalent c
 ```
 

@@ -7,7 +7,7 @@ import TzapLean.Circuit
 /-!
 # Density-Matrix Semantics
 
-Circuits in `TzapLean/Circuit.lean` contain `measure` and `reset`, so they are not unitary
+Circuits in `TzapLean/RawCircuit.lean` contain `measure` and `reset`, so they are not unitary
 maps: they are *quantum channels* that also write classical bits. This file gives them an
 exact (no floating point) semantics in three layers.
 
@@ -52,7 +52,7 @@ memory `w`, and `∑ w, tr (ρ w) = 1` for a normalized state (`IsNormalized`).
   `ρ' w = P_{w c} (ρ w[c←0] + ρ w[c←1]) P_{w c}`. With `c` out of range the outcome is
   discarded instead: `ρ' w = ∑_b P_b (ρ w) P_b`.
 
-`denote` runs a gate list head-first, and `Circuit.denote` is the semantics of a circuit at
+`denote` runs a gate list head-first, and `RawCircuit.denote` is the semantics of a circuit at
 its own qubit/cbit counts.
 
 The two layers agree where they must: on a measurement-free circuit the channel semantics
@@ -232,7 +232,7 @@ theorem unitary_append (n : Nat) (gs hs : List Gate) :
   | cons g gs ih => simp [ih, Matrix.mul_assoc]
 
 /-- The unitary matrix of a whole circuit, at its own qubit count. -/
-def Circuit.unitary (c : Circuit) : Density c.numQubits :=
+def RawCircuit.unitary (c : RawCircuit) : Density c.numQubits :=
   _root_.TzapLean.unitary c.numQubits c.gates
 
 /-! ## Layer 2: classical-quantum states -/
@@ -342,7 +342,7 @@ def denote {n m : Nat} : List Gate → CQState n m → CQState n m
   | g :: gs, ρ => denote gs (step g ρ)
 
 /-- Semantics of a circuit at its own qubit and classical-bit counts. -/
-def Circuit.denote (c : Circuit) :
+def RawCircuit.denote (c : RawCircuit) :
     CQState c.numQubits c.numCbits → CQState c.numQubits c.numCbits :=
   _root_.TzapLean.denote c.gates
 
@@ -391,7 +391,7 @@ theorem denote_eq_conj_unitary {n m : Nat} (gs : List Gate)
 
 /-- The circuit-level form of `denote_eq_conj_unitary`, phrased with the `hasMeasurement`
 flag that the Rust implementation maintains. -/
-theorem Circuit.denote_eq_conj_unitary (c : Circuit) (n m : Nat)
+theorem RawCircuit.denote_eq_conj_unitary (c : RawCircuit) (n m : Nat)
     (hn : c.numQubits = n) (hm : c.numCbits = m)
     (h : ∀ g ∈ c.gates, g.isMeasurement = false) (ρ : CQState n m) :
     _root_.TzapLean.denote c.gates ρ =

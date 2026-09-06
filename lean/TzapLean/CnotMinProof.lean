@@ -1337,7 +1337,7 @@ theorem cnotMinGates_wf {n : Nat} (maxQ maxT : Nat) (gs : List Gate) (hwf : ∀ 
   · exact flush_wf _ hwf₂ g h'
 
 /-- Run CNOT minimization on a raw circuit. -/
-def cnotMinCircuit (c : Circuit) : Circuit :=
+def cnotMinCircuit (c : RawCircuit) : RawCircuit :=
   c.withGates (cnotMinGates c.numQubits maxChunkQubits maxChunkTerms c.gates)
 
 /-- **The `CnotMin` pass**, with its correctness proof as a field. -/

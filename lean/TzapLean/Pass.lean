@@ -13,7 +13,7 @@ pub trait Pass {
 ```
 
 with "returns an equivalent one" a comment. Here the transformation acts directly on
-`Circuit.Checked n m`, whose indices fix the register sizes and whose value carries the `Wf`
+`Circuit n m`, whose indices fix the register sizes and whose value carries the `Wf`
 precondition. An unverified transformation is not a `Pass`, so composition does not need
 separate preservation obligations.
 -/
@@ -27,9 +27,9 @@ structure Pass where
   /-- The pass's name, as in the Rust trait. -/
   name : String
   /-- The transformation on a validated, size-indexed circuit. -/
-  run : ∀ {n m}, Circuit.Checked n m → Circuit.Checked n m
+  run : ∀ {n m}, Circuit n m → Circuit n m
   /-- **The correctness obligation**: the output denotes the same channel as the input. -/
-  correct : ∀ {n m} (c : Circuit.Checked n m),
+  correct : ∀ {n m} (c : Circuit n m),
     (run c).Equivalent c
 
 namespace Pass
@@ -41,12 +41,12 @@ def comp (p q : Pass) : Pass where
   correct c := Equivalent.trans (q.correct (p.run c)) (p.correct c)
 
 /-- Run a list of passes in order, as the Rust `run_passes` does. -/
-def runAll : List Pass → Circuit.Checked n m → Circuit.Checked n m
+def runAll : List Pass → Circuit n m → Circuit n m
   | [], c => c
   | p :: ps, c => runAll ps (p.run c)
 
 /-- **Composed correctness**: any pipeline of passes preserves the semantics. -/
-theorem correct_runAll (ps : List Pass) (c : Circuit.Checked n m) :
+theorem correct_runAll (ps : List Pass) (c : Circuit n m) :
     (runAll ps c).Equivalent c := by
   induction ps generalizing c with
   | nil => exact Equivalent.refl _ _ _
@@ -58,15 +58,15 @@ end Pass
 /-! ## Circuit statistics (the Rust `pass.rs` helpers) -/
 
 /-- Number of `t`/`tdg` gates. -/
-def countT (c : Circuit) : Nat :=
+def countT (c : RawCircuit) : Nat :=
   c.gates.countP fun g => match g with | .t _ | .tdg _ => true | _ => false
 
 /-- Number of `rz` gates. -/
-def countRz (c : Circuit) : Nat :=
+def countRz (c : RawCircuit) : Nat :=
   c.gates.countP fun g => match g with | .rz _ _ => true | _ => false
 
 /-- Number of two-qubit `cnot`/`cz` gates. -/
-def count2q (c : Circuit) : Nat :=
+def count2q (c : RawCircuit) : Nat :=
   c.gates.countP fun g => match g with | .cnot .. | .cz .. => true | _ => false
 
 /-- Per-wire next-free layer after scheduling `gs`, greedily as early as possible. -/
@@ -77,7 +77,7 @@ def depthAux : (Qubit → Nat) → List Gate → (Qubit → Nat)
       depthAux (fun q => if g.qubitsOf.contains q then layer else next q) gs
 
 /-- Circuit depth: gates on disjoint qubits share a layer. -/
-def depth (c : Circuit) : Nat :=
+def depth (c : RawCircuit) : Nat :=
   ((List.range c.numQubits).map (depthAux (fun _ => 0) c.gates)).foldl max 0
 
 end

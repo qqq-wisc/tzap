@@ -283,10 +283,10 @@ theorem bounded_visited {n : Nat} : ∀ (gs : List Gate) (st : AState), st.Bound
         · exact ih (st.step g) (AState.bounded_step hst g) (by omega) p hp
 
 /-- The forms one run of the pass can compare. -/
-noncomputable def relevantForms (c : Circuit) : List Form :=
+noncomputable def relevantForms (c : RawCircuit) : List Form :=
   relevant c.numQubits (AState.initial c.numQubits) c.gates
 
-theorem bounded_relevantForms (c : Circuit) :
+theorem bounded_relevantForms (c : RawCircuit) :
     ∀ p ∈ relevantForms c, Form.Bounded (varBound c) p := by
   intro p hp
   have hbase : ∀ r ∈ visited c.numQubits (AState.initial c.numQubits) c.gates,
@@ -362,7 +362,7 @@ theorem exactDraws_injective {m : Nat} {p q : Form} (hp : Form.Bounded m p)
         exact hi (hq i (Finsupp.mem_support_iff.mpr hn))
       rw [hp0, hq0]
 
-theorem exactDraws_faithful (c : Circuit) :
+theorem exactDraws_faithful (c : RawCircuit) :
     Faithful (exactDraws (varBound c)) (relevantForms c) := by
   intro p hp q hq heq
   exact exactDraws_injective (bounded_relevantForms c p hp) (bounded_relevantForms c q hq) heq
@@ -373,7 +373,7 @@ theorem exactDraws_faithful (c : Circuit) :
   simp [wordToBits, exactDraws, bit, Nat.testBit_two_pow, eq_comm]
 
 /-- The executable collision-free phase folder. -/
-def phaseFoldExact (c : Circuit) : Circuit :=
+def phaseFoldExact (c : RawCircuit) : RawCircuit :=
   phaseFold (varBound c + 1) (fun i => 2 ^ i) c
 
 /-- Phase folding with a collision-free seed.  Unlike `PhaseFoldRand`, this is a deterministic
@@ -405,7 +405,7 @@ def PhaseFoldRand (k : Nat) : RandPass where
   numCbits_run _ _ := rfl
   wf_run c s hc := phaseFoldGates_wf (wordsOf k (liftSample s)) hc
   wellFormed_run c s _ hc := phaseFoldGates_inRange (wordsOf k (liftSample s)) hc
-  flagsOk_run c _ _ := Circuit.flagsOk_withGates _ _
+  flagsOk_run c _ _ := RawCircuit.flagsOk_withGates _ _
   correct c hc := by
     refine le_trans ((PMF.uniformOfFintype (Sample (varBound c) k)).toOuterMeasure_mono ?_)
       (collides_probability_le (relevantForms c) (bounded_relevantForms c))
@@ -414,7 +414,7 @@ def PhaseFoldRand (k : Nat) : RandPass where
     exact hs.1 (phaseFoldGates_correct (wordToBits_wordsOf k (liftSample s)) c.gates hc
       (faithful_of_not_collides hcol))
 
-@[simp] theorem PhaseFoldRand_run (k : Nat) (c : Circuit) (s : (PhaseFoldRand k).Seed c) :
+@[simp] theorem PhaseFoldRand_run (k : Nat) (c : RawCircuit) (s : (PhaseFoldRand k).Seed c) :
     (PhaseFoldRand k).run c s = phaseFold k (wordsOf k (liftSample s)) c := rfl
 
 /-- **What `phaseFoldIO` computes is what the bound is about.** This optional runner draws an element
@@ -422,12 +422,12 @@ of `Sample (varBound c) k` — the space `correct` above takes a measure over �
 pass at it; this says the two are the same function, by definition and not by resemblance.
 The one thing left unproved is that the draw is uniform, which is a fact about `IO.rand` and
 not about any Lean term. -/
-theorem phaseFoldIO_run (k : Nat) (c : Circuit) (s : Sample (varBound c) k) :
+theorem phaseFoldIO_run (k : Nat) (c : RawCircuit) (s : Sample (varBound c) k) :
     phaseFold k (wordsOf k (padSample s)) c = (PhaseFoldRand k).run c s := rfl
 
 /-- The failure bound in closed form: with `t` compared parities the pass is wrong with
 probability at most `C(t,2)·2⁻ᵏ`, so doubling the tag width squares the odds against it. -/
-theorem PhaseFoldRand_error (k : Nat) (c : Circuit) :
+theorem PhaseFoldRand_error (k : Nat) (c : RawCircuit) :
     (PhaseFoldRand k).error c =
       ((relevantForms c).length.choose 2 : ℝ≥0∞) * ((2 : ℝ≥0∞)⁻¹) ^ k := rfl
 

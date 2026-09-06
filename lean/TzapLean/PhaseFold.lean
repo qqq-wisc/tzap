@@ -285,13 +285,13 @@ def phaseFoldGates (k : Nat) (wdraws : Nat → Tag) (n : Nat) (gs : List Gate) :
 
 Through `withGates`, so the cached `has*` flags describe the gates that came out rather than
 the ones that went in. The checked serializer verifies that metadata before emitting QASM. -/
-def phaseFold (k : Nat) (wdraws : Nat → Tag) (c : Circuit) : Circuit :=
+def phaseFold (k : Nat) (wdraws : Nat → Tag) (c : RawCircuit) : RawCircuit :=
   c.withGates (phaseFoldGates k wdraws c.numQubits c.gates)
 
-@[simp] theorem phaseFold_numQubits (k : Nat) (wdraws : Nat → Tag) (c : Circuit) :
+@[simp] theorem phaseFold_numQubits (k : Nat) (wdraws : Nat → Tag) (c : RawCircuit) :
     (phaseFold k wdraws c).numQubits = c.numQubits := rfl
 
-@[simp] theorem phaseFold_numCbits (k : Nat) (wdraws : Nat → Tag) (c : Circuit) :
+@[simp] theorem phaseFold_numCbits (k : Nat) (wdraws : Nat → Tag) (c : RawCircuit) :
     (phaseFold k wdraws c).numCbits = c.numCbits := rfl
 
 /-! ## Where the randomness comes from
@@ -312,7 +312,7 @@ for. `PhaseFoldRand_run` records that `phaseFold k (wordsOf k (padSample s)) c` 
 allocating gate (`h`, `ccx`, `reset`). Counting only those rather than every gate is worth the
 slightly longer proof in `bounded_visited`: it is the size of either seed representation,
 and on a typical circuit it is four or five times smaller. -/
-def varBound (c : Circuit) : Nat := c.numQubits + c.gates.countP Gate.allocates
+def varBound (c : RawCircuit) : Nat := c.numQubits + c.gates.countP Gate.allocates
 
 /-- Executable `liftSample`: pad a finite seed out to a draw stream. -/
 def padSample {m k : Nat} (sample : Sample m k) : Draws k :=
@@ -356,7 +356,7 @@ def randomSample (m k : Nat) : IO (Sample m k) := do
 Fresh *per call*, which is what makes the round loop's union bound apply. A single stream
 reused across rounds would be adaptive — round two's circuit depends on round one's draws —
 and no bound here covers that. -/
-def phaseFoldIO (k : Nat) (c : Circuit) : IO Circuit := do
+def phaseFoldIO (k : Nat) (c : RawCircuit) : IO RawCircuit := do
   let s ← randomSample (varBound c) k
   return phaseFold k (wordsOf k (padSample s)) c
 
