@@ -48,16 +48,6 @@ theorem rzPhase_add (n : Nat) (θ φ : ℚ) (q : Qubit) (b : Basis n) :
   · rw [if_neg h, if_neg h, if_neg h, ← ep_add]
     ring_nf
 
-/-- Two rotations on one wire add. -/
-theorem gateUnitary_rz_mul (n : Nat) (θ φ : ℚ) (q : Qubit) (hq : q < n) :
-    gateUnitary n (Gate.rz θ q) * gateUnitary n (Gate.rz φ q)
-      = gateUnitary n (Gate.rz (θ + φ) q) := by
-  rw [gateUnitary_rz_eq n θ q hq, gateUnitary_rz_eq n φ q hq, gateUnitary_rz_eq n _ q hq,
-    phaseMatrix_mul]
-  congr 1
-  funext b
-  exact rzPhase_add n θ φ q b
-
 /-- A phase matrix scales rows. -/
 theorem phaseMatrix_mul_apply {n : Nat} (f : Basis n → ℂ) (A : Density n) (b' b : Basis n) :
     (phaseMatrix f * A) b' b = f b' * A b' b := by

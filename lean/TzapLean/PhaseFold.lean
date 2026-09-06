@@ -318,9 +318,6 @@ def varBound (c : RawCircuit) : Nat := c.numQubits + c.gates.countP Gate.allocat
 def padSample {m k : Nat} (sample : Sample m k) : Draws k :=
   fun i => if h : i < m then sample ⟨i, h⟩ else 0
 
-theorem padSample_eq {m k : Nat} (sample : Sample m k) : padSample sample = liftSample sample :=
-  rfl
-
 /-- The packed word stream a bit-valued draw stream stands for. -/
 def wordsOf (k : Nat) (draws : Draws k) : Nat → Tag := fun i => bitsToWord (draws i)
 

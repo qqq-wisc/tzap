@@ -42,10 +42,6 @@ abbrev F₂ := ZMod 2
 /-- Embed a Boolean into `𝔽₂`, turning xor into addition. -/
 def bit (b : Bool) : F₂ := if b then 1 else 0
 
-theorem bit_injective : Function.Injective bit := by
-  intro a b h
-  cases a <;> cases b <;> simp_all [bit]
-
 theorem bit_xor (a b : Bool) : bit (a != b) = bit a + bit b := by
   cases a <;> cases b <;> simp [bit]
   exact (CharTwo.add_self_eq_zero (1 : F₂)).symm
@@ -59,14 +55,6 @@ def unbit (x : F₂) : Bool := decide (x = 1)
 @[simp] theorem bit_unbit (x : F₂) : bit (unbit x) = x := by revert x; decide
 
 @[simp] theorem unbit_bit (b : Bool) : unbit (bit b) = b := by cases b <;> simp [unbit, bit]
-
-theorem unbit_add (x y : F₂) : unbit (x + y) = (unbit x ^^ unbit y) := by revert x y; decide
-
-theorem unbit_inj {x y : F₂} (h : unbit x = unbit y) : x = y := by
-  rw [← bit_unbit x, ← bit_unbit y, h]
-
-theorem bit_eq_iff (a b : Bool) : bit a = bit b ↔ a = b :=
-  ⟨fun h => bit_injective h, fun h => by rw [h]⟩
 
 /-! ## Affine forms -/
 
@@ -126,9 +114,6 @@ def eval (valuation : Nat → F₂) (p : Form) : F₂ :=
 /-- Evaluate at a Boolean valuation, back in `Bool`. -/
 def evalB (valuation : Nat → Bool) (p : Form) : Bool :=
   eval (fun i => bit (valuation i)) p = 1
-
-theorem evalB_eq_of_eq {p q : Form} (h : p = q) (v : Nat → Bool) :
-    evalB v p = evalB v q := by rw [h]
 
 theorem bit_eq_one_iff (b : Bool) : bit b = 1 ↔ b = true := by
   cases b <;> simp [bit]
@@ -234,10 +219,6 @@ def output {m k : Nat} (p : Form) (sample : Sample m k) : BitString k :=
 @[simp] theorem hash_const {k} (draws : Draws k) (b : Bool) :
     hash draws (Form.const b) = fun _ => bit b := by
   funext j; simp [hash]
-
-/-- Equal forms hash equal: the algorithm has no false negatives, whatever the draws. -/
-theorem hash_congr {k} (draws : Draws k) {p q : Form} (h : p = q) :
-    hash draws p = hash draws q := by rw [h]
 
 /-! ## The collision bound
 

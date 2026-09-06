@@ -236,13 +236,6 @@ def comp (p q : RandPass) : RandPass := p.compWhen q (fun _ _ => true)
 @[simp] theorem compWhen_error (p q : RandPass) (cond : RawCircuit → RawCircuit → Bool) (c : RawCircuit) :
     (p.compWhen q cond).error c = p.error c + ⨆ s : p.Seed c, q.error (p.run c s) := rfl
 
-/-- What one step of a conditional composition computes — the round loop's rule, as a
-rewrite. -/
-theorem compWhen_run (p q : RandPass) (cond : RawCircuit → RawCircuit → Bool) (c : RawCircuit)
-    (s : (p.compWhen q cond).Seed c) :
-    (p.compWhen q cond).run c s =
-      (if cond c (p.run c s.1) then q.run (p.run c s.1) s.2 else p.run c s.1) := rfl
-
 /-- A pipeline, run left to right: the head runs first, on the original circuit. -/
 def pipeline : List RandPass → RandPass
   | [] => RandPass.id
@@ -269,16 +262,6 @@ def fixpointShrink (p : RandPass) : Nat → RandPass
 
 @[simp] theorem fixpointShrink_succ (p : RandPass) (n : Nat) :
     p.fixpointShrink (n + 1) = p.compWhen (p.fixpointShrink n) Shrank := rfl
-
-/-- One turn of the loop, as a rewrite: run the round, and go again exactly when it shrank. -/
-theorem fixpointShrink_run (p : RandPass) (n : Nat) (c : RawCircuit)
-    (s : (p.fixpointShrink (n + 1)).Seed c) :
-    (p.fixpointShrink (n + 1)).run c s =
-      (if (p.run c s.1).gates.length < c.gates.length then
-        (p.fixpointShrink n).run (p.run c s.1) s.2 else p.run c s.1) := by
-  have hiff : (Shrank c (p.run c s.1) = true) ↔
-      ((p.run c s.1).gates.length < c.gates.length) := by simp [Shrank]
-  exact if_congr hiff rfl rfl
 
 /-- **The union bound over rounds.** `fuel` rounds are wrong with probability at most `fuel`
 times one round's, whatever the rounds do to each other's inputs — the composition draws each

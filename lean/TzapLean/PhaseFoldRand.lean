@@ -234,22 +234,6 @@ theorem phaseFoldGates_inRange {k n' n m : Nat} (wdraws : Nat → Tag) {gs : Lis
 
 /-! ## The compared parities are bounded -/
 
-theorem fresh_steps_le (st : AState) (gs : List Gate) :
-    (st.steps gs).fresh ≤ st.fresh + gs.countP Gate.allocates := by
-  induction gs generalizing st with
-  | nil => simp
-  | cons g gs ih =>
-      have := ih (st.step g)
-      rw [AState.steps_cons, List.countP_cons]
-      by_cases hall : Gate.allocates g = true
-      · rw [if_pos hall]
-        have hstep : (st.step g).fresh ≤ st.fresh + 1 := by cases g <;> simp [AState.step]
-        omega
-      · rw [if_neg hall]
-        have hstep : (st.step g).fresh = st.fresh := by
-          cases g <;> simp_all [AState.step, Gate.allocates]
-        omega
-
 theorem bounded_formsOf {n : Nat} {st : AState} (hst : st.Bounded) {m : Nat}
     (h : st.fresh ≤ m) : ∀ p ∈ formsOf n st, Form.Bounded m p := by
   intro p hp

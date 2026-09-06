@@ -90,11 +90,6 @@ theorem conj_sum {n : Nat} {ι : Type*} (s : Finset ι) (U : Density n) (f : ι 
 
 /-! ## Commutation -/
 
-/-- Matrices with disjoint supports commute after conjugate transposition too. -/
-theorem conjTranspose_comm_of_mul_comm {n : Nat} {U V : Density n} (h : U * V = V * U) :
-    Uᴴ * Vᴴ = Vᴴ * Uᴴ := by
-  rw [← Matrix.conjTranspose_mul, ← Matrix.conjTranspose_mul, h]
-
 theorem conj_comm {n : Nat} {U V : Density n} (h : U * V = V * U) (ρ : Density n) :
     conj U (conj V ρ) = conj V (conj U ρ) := by
   rw [← conj_mul, ← conj_mul, h]

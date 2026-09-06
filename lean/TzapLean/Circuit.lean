@@ -307,10 +307,6 @@ def withGates (c : RawCircuit) (gs : List Gate) : RawCircuit where
 theorem flagsOk_withGates (c : RawCircuit) (gs : List Gate) : (c.withGates gs).FlagsOk :=
   ⟨rfl, rfl, rfl⟩
 
-/-- A rebuilt circuit is well-formed exactly when its new gates are in range. -/
-theorem wellFormed_withGates {c : RawCircuit} {gs : List Gate}
-    (h : ∀ g ∈ gs, g.InRange c.numQubits c.numCbits) : (c.withGates gs).WellFormed := h
-
 /-- **The structural invariant the driver maintains.** Distinct operands (`Wf`, in
 `GateAlgebra`) is stated separately, because only it is a precondition of the semantic
 obligation; these two are about the output being a circuit one can print and re-parse. -/
@@ -334,29 +330,6 @@ instance : ToString RawCircuit := ⟨RawCircuit.toString⟩
     (c.apply g).numQubits = c.numQubits := rfl
 @[simp] theorem numCbits_apply (c : RawCircuit) (g : Gate) :
     (c.apply g).numCbits = c.numCbits := rfl
-
-/-- The `hasToffoli` flag of a circuit built by `apply` from a flagless start is exactly
-"some gate is a `ccx`". -/
-theorem hasToffoli_apply (c : RawCircuit) (g : Gate) :
-    (c.apply g).hasToffoli = (c.hasToffoli || g.isToffoli) := rfl
-
-theorem hasCcz_apply (c : RawCircuit) (g : Gate) :
-    (c.apply g).hasCcz = (c.hasCcz || g.isCcz) := rfl
-
-theorem hasMeasurement_apply (c : RawCircuit) (g : Gate) :
-    (c.apply g).hasMeasurement = (c.hasMeasurement || g.isMeasurement) := rfl
-
-/-- The flags maintained incrementally by `apply` agree with a scan of the gate list.
-Stated for `ofGates`, i.e. for circuits built the way the Rust API builds them. -/
-theorem flags_ofGates (n m : Nat) (gs : List Gate) :
-    (ofGates n m gs).hasToffoli = gs.any Gate.isToffoli ∧
-    (ofGates n m gs).hasCcz = gs.any Gate.isCcz ∧
-    (ofGates n m gs).hasMeasurement = gs.any Gate.isMeasurement :=
-  ⟨rfl, rfl, rfl⟩
-
-/-- Circuits built the way the front end builds them have honest flags. -/
-theorem flagsOk_ofGates (n m : Nat) (gs : List Gate) : (ofGates n m gs).FlagsOk :=
-  ⟨rfl, rfl, rfl⟩
 
 /-- Gate list of `ofGates`: the gates, in order. -/
 @[simp] theorem gates_ofGates (n m : Nat) (gs : List Gate) : (ofGates n m gs).gates = gs := rfl

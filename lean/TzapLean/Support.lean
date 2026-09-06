@@ -65,16 +65,6 @@ structure SupportedOn {n : Nat} (U : Density n) (S : Wires) : Prop where
 
 namespace SupportedOn
 
-/-- The conjugate transpose of a local operator is local on the same wires. -/
-theorem conjTranspose {n : Nat} {U : Density n} {S : Wires} (h : SupportedOn U S) :
-    SupportedOn Uᴴ S where
-  offdiag out inp r hr hne := by
-    simp [Matrix.conjTranspose_apply, h.offdiag inp out r hr (Ne.symm hne)]
-  local' out inp out' inp' h1 h2 h3 h4 := by
-    simp only [Matrix.conjTranspose_apply]
-    congr 1
-    exact h.local' inp out inp' out' h2 h1 (fun r hr => (h3 r hr).symm) fun r hr => (h4 r hr).symm
-
 /-- **Disjoint supports commute.** The proof pins the single intermediate basis state that
 can contribute to each product: `U` fixes the wires outside `S` and `V` those outside `T`,
 so with `S` and `T` disjoint the summation variable is forced, and the two forced choices

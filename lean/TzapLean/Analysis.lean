@@ -72,12 +72,6 @@ def steps (st : AState) : List Gate → AState
 @[simp] theorem steps_cons (st : AState) (g : Gate) (gs : List Gate) :
     st.steps (g :: gs) = (st.step g).steps gs := rfl
 
-theorem steps_append (st : AState) (gs hs : List Gate) :
-    st.steps (gs ++ hs) = (st.steps gs).steps hs := by
-  induction gs generalizing st with
-  | nil => rfl
-  | cons g gs ih => simp [ih]
-
 /-! ## Invariants -/
 
 /-- Every parity mentions only variables the state has allocated. -/
@@ -94,11 +88,6 @@ theorem length_steps (st : AState) (gs : List Gate) :
 
 theorem fresh_le_step (st : AState) (g : Gate) : st.fresh ≤ (st.step g).fresh := by
   cases g <;> simp [step]
-
-theorem fresh_le_steps (st : AState) (gs : List Gate) : st.fresh ≤ (st.steps gs).fresh := by
-  induction gs generalizing st with
-  | nil => exact le_rfl
-  | cons g gs ih => exact le_trans (fresh_le_step st g) (ih (st.step g))
 
 theorem parOf_mk (l : List Form) (fr : Nat) (q : Qubit) :
     (⟨l, fr⟩ : AState).parOf q = l.getD q (Form.const false) := rfl
@@ -142,12 +131,6 @@ theorem bounded_step {st : AState} (hst : st.Bounded) (g : Gate) : (st.step g).B
   | ccx c₁ c₂ t => exact bounded_set hmono (Form.bounded_var (by simp))
   | reset p => exact bounded_set hmono (Form.bounded_var (by simp))
   | _ => exact hmono
-
-theorem bounded_steps {st : AState} (hst : st.Bounded) (gs : List Gate) :
-    (st.steps gs).Bounded := by
-  induction gs generalizing st with
-  | nil => exact hst
-  | cons g gs ih => exact ih (bounded_step hst g)
 
 theorem bounded_initial (n : Nat) : (initial n).Bounded := by
   intro q
