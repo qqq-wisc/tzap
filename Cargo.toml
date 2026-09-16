@@ -3,7 +3,7 @@
 # unrelated project) — the lib/bin names below keep everything else (the
 # `tzap` binary, `use tzap::...` throughout this crate) unchanged.
 name = "tzap-opt"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "A super fast, Rust-based optimizer for large Clifford+T circuits"
 license = "Apache-2.0"
