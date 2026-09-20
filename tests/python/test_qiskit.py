@@ -80,6 +80,39 @@ def test_run_accepts_and_returns_a_dag():
     assert len(output.op_nodes()) == 0
 
 
+def test_run_serializes_before_no_copy_conversions(monkeypatch):
+    circuit = QuantumCircuit(1)
+    circuit.x(0)
+    circuit.x(0)
+    dag = circuit_to_dag(circuit)
+    events = []
+
+    def record_dag_to_qasm(input_dag):
+        events.append(("dag_to_qasm", None))
+        return _dag_to_qasm(input_dag)
+
+    def record_dag_to_circuit(input_dag, *, copy_operations=True):
+        events.append(("dag_to_circuit", copy_operations))
+        return dag_to_circuit(input_dag, copy_operations=copy_operations)
+
+    def record_circuit_to_dag(input_circuit, *, copy_operations=True):
+        events.append(("circuit_to_dag", copy_operations))
+        return circuit_to_dag(input_circuit, copy_operations=copy_operations)
+
+    monkeypatch.setattr(tzap_qiskit, "_dag_to_qasm", record_dag_to_qasm)
+    monkeypatch.setattr(tzap_qiskit, "dag_to_circuit", record_dag_to_circuit)
+    monkeypatch.setattr(tzap_qiskit, "circuit_to_dag", record_circuit_to_dag)
+
+    output = TzapPass(level="O1").run(dag)
+
+    assert len(output.op_nodes()) == 0
+    assert events == [
+        ("dag_to_qasm", None),
+        ("dag_to_circuit", False),
+        ("circuit_to_dag", False),
+    ]
+
+
 def test_empty_qiskit_circuit_round_trip():
     circuit = QuantumCircuit(3, name="empty", metadata={"empty": True})
 

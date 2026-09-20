@@ -185,10 +185,11 @@ class TzapPass(TransformationPass):
         }
 
     def run(self, dag: DAGCircuit) -> DAGCircuit:
-        original = dag_to_circuit(dag)
-        result = optimize_qasm(_dag_to_qasm(dag), **self._options)
+        source_qasm = _dag_to_qasm(dag)
+        original = dag_to_circuit(dag, copy_operations=False)
+        result = optimize_qasm(source_qasm, **self._options)
         rebuilt = _rebuild_on_original_bits(original, result.qasm)
-        return circuit_to_dag(rebuilt)
+        return circuit_to_dag(rebuilt, copy_operations=False)
 
 
 def optimize(circuit: QuantumCircuit, **options: Any) -> QuantumCircuit:
