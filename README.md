@@ -106,9 +106,9 @@ tzap benchmarks/feynman/hwb12.qasm -O1 -o optimized.qasm
 
 CCX, CCZ, CZ, and Rz stay native by default. To decompose them, use:
 
-- `--decompose-ccx` for CCX and CCZ
-- `--decompose-cz` for CZ
-- `--decompose-rz` for Rz
+- `--decompose-ccx` to decompose CCX and CCZ
+- `--decompose-cz` to decompose CZ into CX+H
+- `--decompose-rz` to decompose Rz via gridsynth
 
 ## Circuit support
 
@@ -118,10 +118,6 @@ tzap supports a subset of OpenQASM 2.0:
 - **Declarations:** `qreg`, `creg`
 - **Not supported:** classical conditionals (`if`), custom gate definitions (`gate`), barriers, `include` files (besides `qelib1.inc`, which is ignored)
 - Unrecognized lines produce an error
-
-Toffoli (`ccx`), doubly controlled-Z (`ccz`), controlled-Z (`cz`), and `rz`
-are all optimized natively and remain native unless their corresponding
-`--decompose-*` option is supplied.
 
 ## Correctness
 
