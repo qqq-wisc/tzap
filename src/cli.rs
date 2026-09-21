@@ -479,9 +479,6 @@ fn print_help(ui: &Ui) {
     out.push_str(&format!("  {heading}USAGE{reset}\n"));
     out.push_str("    tzap <input.qasm> [output.qasm] [options]\n");
     out.push('\n');
-    out.push_str("  Keeps CCX, CCZ, CZ, and Rz native by default. Requested decompositions\n");
-    out.push_str("  run between two optimization stages.\n");
-    out.push('\n');
     out.push_str(&format!("  {heading}ARGS{reset}\n"));
     out.push_str(&format!(
         "    {bold}<input.qasm>{reset}     Input OpenQASM 2.0 file, or - for stdin\n"

@@ -70,22 +70,22 @@ For example, using a benchmark in this repo:
 
 ```console
 $ tzap benchmarks/feynman/hwb12.qasm -o optimized.qasm
-⚡️ tzap v0.6.0
-  Parsed benchmarks/feynman/hwb12.qasm (5.5 MB) in 0.080s
+⚡️ tzap v0.6.1
+  Parsed benchmarks/feynman/hwb12.qasm (5.5 MB) in 0.079s
 	├─ 20 qubits · 514,412 gates
-	└─ Circuit gates: {h, x, t, tdg, cx, ccx}
+	└─ Circuit gates: {h, x, t, tdg, cx}
   Optimizing input circuit
-  Loaded MURM in 0.021s
-	└─ Synthesis basis: {h, x, z, s, sdg, t, tdg, cx, ccx}
+  Loaded MURM in 0.039s
+	└─ Synthesis basis: {h, x, z, s, sdg, t, tdg, cx}
 
   Converged after 6 rounds
 
-  ┌─ Final result · 43.7% fewer gates · 1.595s ──────────────────────────┐
-  │ Gates    ━━━━━━━━━━━━━╸────────────────── ↓43.7% · 514,412 → 289,484 │
-  │ 2q gates ━━━━━╸────────────────────────── ↓18.7% · 191,803 → 155,914 │
-  │ T/Tdg    ━━━━━━━━━━━━━━━╸──────────────── ↓49.9% · 171,465 →  85,897 │
-  │ Depth    ━━━━━━━╸──────────────────────── ↓24.3% · 274,781 → 207,940 │
-  └──────────────────────────────────────────────────────────────────────┘
+  ┌─ Final result · 44.6% fewer gates · 1.379s ────────────────┐
+  │ Gates    ━━━━━━━━━╸──────────── ↓44.6% · 514,412 → 284,848 │
+  │ 2q gates ━━━━╸───────────────── ↓22.1% · 191,803 → 149,500 │
+  │ T/Tdg    ━━━━━━━━━━╸─────────── ↓49.9% · 171,465 →  85,889 │
+  │ Depth    ━━━━━━╸─────────────── ↓28.4% · 274,781 → 196,865 │
+  └────────────────────────────────────────────────────────────┘
   wrote optimized.qasm
 ```
 
