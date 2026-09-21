@@ -63,9 +63,10 @@ lowers both `ccx` and `ccz` to Clifford+T.
 
 ## Optimizing
 
-`tzap::optimize` runs the same pipelines the `tzap` CLI does — including
-`-O3`'s decompose → cancel → superoptimize → phase-fold fixpoint loop — so
-there is no need to assemble one pass at a time to get the CLI's results.
+`tzap::optimize` runs the same staged workflow as the `tzap` CLI: optimize
+the input circuit, apply requested decompositions, then optimize the changed
+circuit again. There is no need to assemble one pass at a time to get the
+CLI's results.
 
 ```rust,ignore
 use tzap::circuit::Circuit;
@@ -82,8 +83,8 @@ println!(
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`Options::default()` is the CLI's default: `-O3`, sequential, no Rz or CZ
-decomposition.
+`Options::default()` is the CLI's default: `-O3`, sequential, and no
+CCX/CCZ, CZ, or Rz decomposition.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
@@ -92,16 +93,22 @@ decomposition.
 | `fixpoint` | `false` | Repeat until the gate count stops falling. Only consulted for pipelines that aren't already fixpoint loops (`passes`, or `O1`) |
 | `decompose_rz` | `false` | Decompose Rz into Clifford+T via gridsynth |
 | `decompose_cz` | `false` | Decompose CZ into H+CX+H before optimizing |
+| `decompose_ccx` | `false` | Decompose CCX and CCZ into Clifford+T |
 | `rz_epsilon` | `1e-10` | Approximation epsilon for `decompose_rz` |
 | `parallel` | `false` | Optimize gate-contiguous chunks concurrently, then concatenate |
-| `superopt` | all `None` | Per-run overrides for the SuperOpt window/table bounds |
+| `superopt` | all `None` | Per-run overrides for the SuperOpt window/MURM bounds |
+| `superopt_gates` | `Auto` | Base MURM basis plus native CZ/CCX/CCZ gates present in the current stage |
 
 `Report` carries three sets of `Metrics` (`gates`, `two_qubit`, `depth`, `t`,
-`rz`): `input` as handed in, `baseline` after the eager ccx/ccz (and
-optionally cz) decomposition that precedes optimization, and `output`.
-`baseline` is the honest comparison point for a reduction percentage — it's
-what the optimization passes actually worked against — and equals `input` when
-nothing needed decomposing.
+`rz`): `input` as handed in, `baseline` (the same original input comparison
+point), and `output`. Requested decompositions are opt-in middle stages:
+optimize the input circuit, decompose CCX/CCZ then CZ then Rz, and optimize
+again when a decomposition changed the circuit.
+
+The post-decomposition MURM basis excludes every gate family requested for
+decomposition, including gates named in an explicit `superopt_gates` basis.
+Within an explicit `passes` pipeline, `Auto` is resolved independently at each
+SuperOpt occurrence from the circuit produced by the preceding passes.
 
 ### Reporting progress
 
@@ -158,7 +165,7 @@ A custom pass only needs to supply `name` and `run`.
 | `DecomposeCz` | `tzap::decompose` | Explicitly lowers CZ gates to H+CX+H |
 | `DecomposeRz` | `tzap::decompose` | Decomposes Rz gates into Clifford+T via gridsynth |
 | `CancelGates` | `tzap::cancel` | Removes adjacent self-inverse gate pairs (HH, XX, etc.) |
-| `SuperOpt` | `tzap::super_opt` | Replaces small windows using its shared unitary-to-circuit table |
+| `SuperOpt` | `tzap::super_opt` | Replaces small windows using its shared MURM |
 | `PhaseFoldRand` | `tzap::phase_fold_rand` | Merges T/Rz gates across the circuit via randomized parity tracking |
 | `CnotMin` | `tzap::cnot_min` | Re-synthesizes CNOT-dihedral blocks to cut two-qubit gates |
 
@@ -209,16 +216,16 @@ from `tzap::pass`.
 
 `SuperOpt` is a peephole pass. It scans each maximal connected subcircuit window
 and replaces it with the smallest equivalent circuit from a precomputed
-unitary-to-circuit table, applying a rewrite only when it strictly reduces the
+MURM, applying a rewrite only when it strictly reduces the
 gate count. Every replacement is verified by matrix equality up to global phase
 before use, so rewrites are always semantics-preserving. Matrices use exact
 Clifford+T arithmetic; Rz gates act as window barriers and are left unchanged.
 The pass accepts unitary circuits only.
 
 ```rust,ignore
-use tzap::super_opt::{SuperOpt, SuperOptTableConfig};
+use tzap::super_opt::{SuperOpt, MurmConfig};
 
-let pass = SuperOpt::new(3, 10, SuperOptTableConfig::default())?;
+let pass = SuperOpt::new(3, 10, MurmConfig::default())?;
 let result = pass.run(&circuit)?;
 println!("{} rewrites", result.rewrites.len());
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -228,9 +235,9 @@ Parameters:
 
 - `max_qubits` — maximum distinct qubits in a scanned window.
 - `window_gates` — maximum gates in a scanned window.
-- `SuperOptTableConfig::new(max_qubits, max_gates, max_entries_per_qubit)` — bounds
-  for the synthesis table, independent of the window size; `default()` is
-  `(3, 8, 200_000)`. A table entry can only ever be used when it's strictly
+- `MurmConfig::new(max_qubits, max_gates, max_entries_per_qubit)` — bounds
+  for the MURM, independent of the window size; `default()` is
+  `(3, 8, 200_000)`. A MURM entry can only ever be used when it's strictly
   smaller than the window it would replace, so `max_gates` never needs to exceed
   `window_gates - 1`.
 
@@ -238,38 +245,43 @@ For a materially more thorough (but slower to build) configuration — the CLI's
 `-Osuper` uses exactly this — try:
 
 ```rust,ignore
-use tzap::super_opt::{SuperOpt, SuperOptTableConfig};
+use tzap::super_opt::{SuperOpt, MurmConfig};
 
-let pass = SuperOpt::new(5, 30, SuperOptTableConfig::new(5, 29, 5_000_000))?;
+let pass = SuperOpt::new(5, 30, MurmConfig::new(5, 29, 5_000_000))?;
 # Ok::<(), tzap::super_opt::SuperOptError>(())
 ```
 
-**Table construction and caching.** Building the synthesis table is the
+**MURM construction and caching.** Building the MURM is the
 expensive part — breadth-first enumeration over the gate library, bounded by
-`max_gates` and `max_entries_per_qubit`. Tables are cached two ways:
+`max_gates` and `max_entries_per_qubit`. The exact basis is part of
+`MurmConfig` and the cache identity. MURMs are cached two ways:
 
 1. **Per-process, in-memory.** Every `SuperOpt::new` call with the same
-   `SuperOptTableConfig` shares one already-built table for the life of the
+   `MurmConfig` shares one already-built MURM for the life of the
    process (`Arc`-backed, keyed by config).
-2. **On disk, across processes.** The built table is also persisted under
-   `<cache root>/superopt-tables/` (one file per distinct config), so a later
+2. **On disk, across processes.** The built MURM is also persisted under
+   `<cache root>/murm/` (one file per distinct config), so a later
    process with the same config loads it in well under a second instead of
-   rebuilding it. A missing, stale, or corrupt cache file is never a hard
-   error — it just triggers a fresh build, which then gets cached for next
-   time. Call `tzap::super_opt::table_is_cached(config)` to check up front
-   whether a given config's table is already cached (useful for deciding
-   whether to warn a caller that the next `SuperOpt::new` will be slow).
+   rebuilding it. The reader bounds every stored length, validates roots,
+   parent ordering, gate operands/basis, metadata, exact EOF, and a full-body
+   checksum before accepting a MURM. A missing, stale, or corrupt cache file
+   is never a hard error — it triggers a fresh build, which then gets cached
+   for next time. Call `tzap::super_opt::murm_is_cached(config)` to check up
+   front whether a matching cache candidate exists (useful for deciding
+   whether the next `SuperOpt::new` is likely to be slow); the subsequent load
+   remains authoritative and may rebuild a candidate whose body is invalid.
 
    The cache root follows the XDG Base Directory Specification:
    `$XDG_CACHE_HOME/tzap`, falling back to `$HOME/.cache/tzap`, with
    `$TZAP_CACHE_DIR` overriding both. A native Windows process has none of
    those, so `%LOCALAPPDATA%\tzap` and then `%USERPROFILE%\.cache\tzap` are
    tried after them. `tzap::super_opt::set_cache_dir(dir)`
-   overrides it for the process (call it once, before any table is built);
+   overrides it for the process (call it once, before any MURM is built);
    `cache_dir()` reports the location in force, `cache_entries()` lists what
-   is cached, and `clear_cache()` deletes it. Tables written by tzap ≤0.6 to
-   `~/.tzap/superopt-tables/` are still read, so an upgrade doesn't orphan
-   them, but nothing new is written there.
+   is cached, and `clear_cache()` deletes it. Pre-MURM synthesis tables under
+   `~/.tzap/superopt-tables/` use an incompatible format and are not read as
+   MURMs. `clear_cache()` only removes current MURM files; obsolete tables may
+   be deleted manually.
 
 `SuperOpt` also implements `tzap::pass::Pass`. Chain `.without_subcircuits()` when
 only the optimized circuit is needed, to skip retaining per-window diagnostics.

@@ -1,4 +1,4 @@
-//! Where tzap keeps its on-disk synthesis tables, and the two actions that
+//! Where tzap keeps its on-disk MURMs, and the two actions that
 //! inspect and clear them.
 //!
 //! Every test here pins the cache to a directory it owns: the resolution
@@ -16,18 +16,18 @@ use support::{Json, Tzap, assert_plain, tzap};
 
 const TEST_QASM: &str = "tests/fixtures/test.qasm";
 
-/// Tiny SuperOpt bounds: a real table, built and cached in milliseconds.
+/// Tiny SuperOpt bounds: a real MURM, built and cached in milliseconds.
 const TINY: [&str; 6] = [
     "--superopt-qubits",
     "2",
     "--superopt-window-gates",
     "4",
-    "--superopt-table-entries",
+    "--superopt-murm-entries",
     "300",
 ];
 
-/// The subdirectory the tables themselves live in, inside the cache root.
-const TABLES: &str = "superopt-tables";
+/// The subdirectory the MURMs themselves live in, inside the cache root.
+const MURMS: &str = "murm";
 
 /// A run with no environment-derived cache location at all, so only what the
 /// test sets can be found. `HOME` is removed too — several tests are about
@@ -36,7 +36,7 @@ fn isolated(args: &[&str]) -> Tzap {
     Tzap::new(args).env_remove("HOME")
 }
 
-/// Optimize something with SuperOpt in the pipeline, so a table is built or
+/// Optimize something with SuperOpt in the pipeline, so a MURM is built or
 /// loaded, against the cache root `env` describes.
 fn warm(dir_flag: Option<&Path>, env: &[(&str, &str)]) -> support::Run {
     let mut args = vec![TEST_QASM, "-q", "--passes", "SuperOpt"];
@@ -69,8 +69,8 @@ fn reported_dir(env: &[(&str, &str)], args: &[&str]) -> Option<PathBuf> {
     }
 }
 
-fn table_files(root: &Path) -> Vec<PathBuf> {
-    let dir = root.join(TABLES);
+fn murm_files(root: &Path) -> Vec<PathBuf> {
+    let dir = root.join(MURMS);
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -137,7 +137,7 @@ fn the_cache_root_follows_the_documented_precedence() {
 
 /// The Windows locations come after the XDG ones: a native Windows process
 /// has no `$HOME` at all, and used to end up with no cache — rebuilding its
-/// synthesis table on every single run — while being told it was cached for
+/// MURM on every single run — while being told it was cached for
 /// future use.
 #[test]
 fn the_windows_locations_are_the_last_resort() {
@@ -162,7 +162,7 @@ fn the_windows_locations_are_the_last_resort() {
         Some(local.join("tzap"))
     );
     // ...and $HOME beats both, so a Unix shell on Windows (MSYS, Git Bash)
-    // keeps reading the tables it has already cached.
+    // keeps reading the MURMs it has already cached.
     assert_eq!(
         reported_dir(
             &[
@@ -227,19 +227,19 @@ fn a_run_with_no_cache_location_still_works() {
     let run = isolated(&args)
         .run()
         .ok("optimizing with no cache location");
-    assert!(run.stderr.contains("Building superoptimizer table"));
+    assert!(run.stderr.contains("Building MURM"));
 }
 
-/// `--cache-dir` is where the table actually lands, not just what gets
+/// `--cache-dir` is where the MURM actually lands, not just what gets
 /// reported.
 #[test]
-fn the_table_is_written_under_the_chosen_root() {
+fn the_murm_is_written_under_the_chosen_root() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(table_files(dir.path()).is_empty());
+    assert!(murm_files(dir.path()).is_empty());
 
     warm(Some(dir.path()), &[]);
-    let files = table_files(dir.path());
-    assert_eq!(files.len(), 1, "expected exactly one table, got {files:?}");
+    let files = murm_files(dir.path());
+    assert_eq!(files.len(), 1, "expected exactly one MURM, got {files:?}");
     let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
     assert!(
         name.contains("q2_g3_e300"),
@@ -253,24 +253,24 @@ fn the_table_is_written_under_the_chosen_root() {
 
 /// The same for each environment-derived location.
 #[test]
-fn the_table_is_written_under_each_environment_root() {
+fn the_murm_is_written_under_each_environment_root() {
     let dir = tempfile::tempdir().unwrap();
 
     let env_root = dir.path().join("env");
     warm(None, &[("TZAP_CACHE_DIR", env_root.to_str().unwrap())]);
-    assert_eq!(table_files(&env_root).len(), 1);
+    assert_eq!(murm_files(&env_root).len(), 1);
 
     let xdg = dir.path().join("xdg");
     warm(None, &[("XDG_CACHE_HOME", xdg.to_str().unwrap())]);
-    assert_eq!(table_files(&xdg.join("tzap")).len(), 1);
+    assert_eq!(murm_files(&xdg.join("tzap")).len(), 1);
 
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
     warm(None, &[("HOME", home.to_str().unwrap())]);
-    assert_eq!(table_files(&home.join(".cache").join("tzap")).len(), 1);
+    assert_eq!(murm_files(&home.join(".cache").join("tzap")).len(), 1);
 }
 
-/// The second run reads the table instead of rebuilding it — the entire
+/// The second run reads the MURM instead of rebuilding it — the entire
 /// reason the cache exists.
 #[test]
 fn a_warm_cache_is_loaded_rather_than_rebuilt() {
@@ -282,89 +282,96 @@ fn a_warm_cache_is_loaded_rather_than_rebuilt() {
 
     let cold = isolated(&args).run().ok("cold run");
     assert!(
-        cold.stderr.contains("Building superoptimizer table"),
+        cold.stderr.contains("Building MURM"),
         "got: {}",
         cold.stderr
     );
 
     let warm = isolated(&args).run().ok("warm run");
     assert!(
-        !warm.stderr.contains("Building superoptimizer table"),
+        !warm.stderr.contains("Building MURM"),
         "the second run should not rebuild:\n{}",
         warm.stderr
     );
-    assert!(
-        warm.stderr.contains("Loaded superoptimizer table"),
-        "got: {}",
-        warm.stderr
-    );
+    assert!(warm.stderr.contains("Loaded MURM"), "got: {}", warm.stderr);
 }
 
-/// A cache built under the pre-XDG `~/.tzap` location is still read, so
-/// upgrading tzap doesn't silently orphan a table that took minutes to build.
 #[test]
-fn the_pre_xdg_location_is_still_read() {
+fn a_structurally_valid_cache_with_body_corruption_is_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap();
+    let mut args = vec![TEST_QASM, "--passes", "SuperOpt", "--cache-dir", path];
+    args.extend_from_slice(&TINY);
+
+    isolated(&args).run().ok("initial cache build");
+    let cache = murm_files(dir.path()).pop().expect("one cache file");
+    let original = fs::read(&cache).unwrap();
+    let mut corrupt = original.clone();
+    let body_byte = corrupt.len() - 16;
+    corrupt[body_byte] ^= 0x80;
+    fs::write(&cache, &corrupt).unwrap();
+
+    isolated(&args).run().ok("corrupt cache fallback");
+    assert_eq!(
+        fs::read(&cache).unwrap(),
+        original,
+        "a corrupt body should be replaced by a deterministic fresh MURM"
+    );
+    isolated(&args).run().ok("rebuilt cache warm read");
+}
+
+#[test]
+fn concurrent_cold_writers_leave_one_valid_warm_murm() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_str().unwrap();
+    let mut args = vec![TEST_QASM, "--passes", "SuperOpt", "--cache-dir", path];
+    args.extend_from_slice(&TINY);
+
+    let first = isolated(&args).spawn();
+    let second = isolated(&args).spawn();
+    let first = support::Run::from(first.wait_with_output().unwrap()).ok("first concurrent writer");
+    let second =
+        support::Run::from(second.wait_with_output().unwrap()).ok("second concurrent writer");
+    assert!(first.status.success() && second.status.success());
+    assert_eq!(murm_files(dir.path()).len(), 1);
+    let leftovers: Vec<_> = fs::read_dir(dir.path().join(MURMS))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files leaked after the race"
+    );
+
+    let warm = isolated(&args)
+        .run()
+        .ok("warm read after concurrent writers");
+    assert!(!warm.stderr.contains("Building MURM"), "{}", warm.stderr);
+}
+
+/// Pre-MURM caches used a different format and directory. They are never
+/// mistaken for current MURMs; a current cache is built in the XDG location.
+#[test]
+fn obsolete_superopt_tables_are_not_read_as_murms() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    let legacy = home.join(".tzap").join(TABLES);
+    let legacy = home.join(".tzap").join("superopt-tables");
     fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("old-table.bin"), b"obsolete format").unwrap();
 
-    // Build into the legacy directory by pointing TZAP_CACHE_DIR at it...
-    warm(
-        None,
-        &[("TZAP_CACHE_DIR", home.join(".tzap").to_str().unwrap())],
-    );
-    let built = table_files(&home.join(".tzap"));
-    assert_eq!(built.len(), 1, "expected a table in the legacy location");
-
-    // ...then run with only HOME set, so the XDG location is empty and the
-    // legacy one is the only place the table can come from.
     let mut args = vec![TEST_QASM, "--passes", "SuperOpt"];
     args.extend_from_slice(&TINY);
     let run = isolated(&args)
         .env("HOME", home.to_str().unwrap())
         .run()
-        .ok("legacy fallback");
+        .ok("obsolete cache ignored");
     assert!(
-        !run.stderr.contains("Building superoptimizer table"),
-        "the legacy table should have been found:\n{}",
+        run.stderr.contains("Building MURM"),
+        "the obsolete table must not be treated as a MURM:\n{}",
         run.stderr
     );
-    assert!(run.stderr.contains("Loaded superoptimizer table"));
-
-    // The fallback is read-only: nothing is written into the legacy location
-    // by a run that resolved to the XDG one.
-    assert_eq!(table_files(&home.join(".tzap")).len(), 1);
-}
-
-/// An explicit location means *that* location: the legacy directory is not
-/// consulted, because an operator naming a cache root isn't asking for a
-/// union of it and a historical one.
-#[test]
-fn an_explicit_location_ignores_the_pre_xdg_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
-    warm(
-        None,
-        &[("TZAP_CACHE_DIR", home.join(".tzap").to_str().unwrap())],
-    );
-    assert_eq!(table_files(&home.join(".tzap")).len(), 1);
-
-    let fresh = dir.path().join("fresh");
-    let mut args = vec![TEST_QASM, "--passes", "SuperOpt", "--cache-dir"];
-    let fresh_path = fresh.to_str().unwrap();
-    args.push(fresh_path);
-    args.extend_from_slice(&TINY);
-    let run = isolated(&args)
-        .env("HOME", home.to_str().unwrap())
-        .run()
-        .ok("--cache-dir ignores legacy");
-    assert!(
-        run.stderr.contains("Building superoptimizer table"),
-        "an explicit --cache-dir must not read the legacy directory:\n{}",
-        run.stderr
-    );
-    assert_eq!(table_files(&fresh).len(), 1);
+    assert_eq!(murm_files(&home.join(".cache").join("tzap")).len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +379,7 @@ fn an_explicit_location_ignores_the_pre_xdg_one() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cache_info_reports_the_tables_it_finds() {
+fn cache_info_reports_the_murms_it_finds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap();
 
@@ -381,7 +388,7 @@ fn cache_info_reports_the_tables_it_finds() {
         .ok("empty --cache-info");
     assert!(empty.stdout.contains(path), "got: {}", empty.stdout);
     assert!(
-        empty.stdout.contains("0 cached tables"),
+        empty.stdout.contains("0 cached MURMs"),
         "got: {}",
         empty.stdout
     );
@@ -393,19 +400,19 @@ fn cache_info_reports_the_tables_it_finds() {
         .run()
         .ok("warm --cache-info");
     assert!(
-        warm_info.stdout.contains("1 cached table ·"),
-        "the count should be singular for one table:\n{}",
+        warm_info.stdout.contains("1 cached MURM ·"),
+        "the count should be singular for one MURM:\n{}",
         warm_info.stdout
     );
     assert!(
         warm_info.stdout.contains("q2_g3_e300"),
-        "each table should be listed by name:\n{}",
+        "each MURM should be listed by name:\n{}",
         warm_info.stdout
     );
 }
 
 #[test]
-fn cache_info_json_lists_every_table_with_its_size() {
+fn cache_info_json_lists_every_murm_with_its_size() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap();
     warm(Some(dir.path()), &[]);
@@ -416,23 +423,33 @@ fn cache_info_json_lists_every_table_with_its_size() {
     let report = Json::parse(&run.stdout);
     assert_eq!(
         report.keys(),
-        vec!["tzap", "cache_dir", "tables", "total_bytes"]
+        vec!["tzap", "cache_dir", "tables", "murms", "total_bytes"]
     );
     assert_eq!(report.get("tzap").as_str(), env!("CARGO_PKG_VERSION"));
     assert_eq!(report.get("cache_dir").as_str(), path);
 
+    let murms = report.get("murms").arr();
     let tables = report.get("tables").arr();
-    assert_eq!(tables.len(), 1);
-    assert_eq!(tables[0].keys(), vec!["path", "bytes"]);
-    let listed = PathBuf::from(tables[0].get("path").as_str());
+    assert_eq!(murms.len(), 1);
+    assert_eq!(tables.len(), murms.len());
+    assert_eq!(murms[0].keys(), vec!["path", "bytes"]);
+    let listed = PathBuf::from(murms[0].get("path").as_str());
     assert!(listed.exists(), "the listed path should exist: {listed:?}");
     assert_eq!(
-        tables[0].get("bytes").as_usize(),
+        murms[0].get("bytes").as_usize(),
         fs::metadata(&listed).unwrap().len() as usize
     );
     assert_eq!(
         report.get("total_bytes").as_usize(),
-        tables[0].get("bytes").as_usize()
+        murms[0].get("bytes").as_usize()
+    );
+    assert_eq!(
+        tables[0].get("path").as_str(),
+        murms[0].get("path").as_str()
+    );
+    assert_eq!(
+        tables[0].get("bytes").as_usize(),
+        murms[0].get("bytes").as_usize()
     );
 }
 
@@ -506,42 +523,42 @@ fn cache_dir_accepts_the_equals_spelling() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn clear_cache_removes_the_tables_and_reports_what_it_freed() {
+fn clear_cache_removes_the_murms_and_reports_what_it_freed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap();
     warm(Some(dir.path()), &[]);
-    assert_eq!(table_files(dir.path()).len(), 1);
+    assert_eq!(murm_files(dir.path()).len(), 1);
 
     let run = isolated(&["--clear-cache", "--cache-dir", path])
         .run()
         .ok("--clear-cache");
     assert!(
-        run.stderr.contains("Removed 1 cached table"),
+        run.stderr.contains("Removed 1 cached MURM"),
         "got: {}",
         run.stderr
     );
     assert!(run.stderr.contains("freed"), "got: {}", run.stderr);
-    assert!(table_files(dir.path()).is_empty(), "tables should be gone");
+    assert!(murm_files(dir.path()).is_empty(), "MURMs should be gone");
 
     // Clearing an already-empty cache is a no-op, not an error.
     let again = isolated(&["--clear-cache", "--cache-dir", path])
         .run()
         .ok("--clear-cache twice");
-    assert!(again.stderr.contains("Removed 0 cached tables"));
+    assert!(again.stderr.contains("Removed 0 cached MURMs"));
 }
 
 /// A cache root can be shared with other tools (`$XDG_CACHE_HOME/tzap`, or
 /// whatever an operator points `--cache-dir` at), so clearing touches only
-/// the table files — never the directory, and never anything else in it.
+/// the MURM files — never the directory, and never anything else in it.
 #[test]
-fn clear_cache_leaves_everything_that_is_not_a_table_alone() {
+fn clear_cache_leaves_everything_that_is_not_a_murm_alone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap();
     warm(Some(dir.path()), &[]);
 
-    let tables_dir = dir.path().join(TABLES);
-    let stray = tables_dir.join("notes.txt");
-    fs::write(&stray, "not a table").unwrap();
+    let murms_dir = dir.path().join(MURMS);
+    let stray = murms_dir.join("notes.txt");
+    fs::write(&stray, "not a MURM").unwrap();
     let sibling = dir.path().join("something-else.bin");
     fs::write(&sibling, "another tool's cache").unwrap();
 
@@ -549,13 +566,13 @@ fn clear_cache_leaves_everything_that_is_not_a_table_alone() {
         .run()
         .ok("--clear-cache with strays");
 
-    assert!(table_files(dir.path()).is_empty());
-    assert!(stray.exists(), "a non-table file must survive");
+    assert!(murm_files(dir.path()).is_empty());
+    assert!(stray.exists(), "a non-MURM file must survive");
     assert!(
         sibling.exists(),
-        "a file outside the tables dir must survive"
+        "a file outside the MURMs dir must survive"
     );
-    assert!(tables_dir.exists(), "the directory itself must survive");
+    assert!(murms_dir.exists(), "the directory itself must survive");
 }
 
 /// `--clear-cache --json` reports what it removed, for a script that wants
@@ -565,16 +582,16 @@ fn clear_cache_json_lists_what_it_removed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap();
     warm(Some(dir.path()), &[]);
-    let before = fs::metadata(&table_files(dir.path())[0]).unwrap().len() as usize;
+    let before = fs::metadata(&murm_files(dir.path())[0]).unwrap().len() as usize;
 
     let run = isolated(&["--clear-cache", "--json", "--cache-dir", path])
         .run()
         .ok("--clear-cache --json");
     let report = Json::parse(&run.stdout);
-    assert_eq!(report.get("tables").arr().len(), 1);
+    assert_eq!(report.get("murms").arr().len(), 1);
     assert_eq!(report.get("total_bytes").as_usize(), before);
     assert_eq!(report.get("cache_dir").as_str(), path);
-    assert!(table_files(dir.path()).is_empty());
+    assert!(murm_files(dir.path()).is_empty());
 }
 
 /// Its summary is commentary on an action, so `--quiet` silences it — while
@@ -591,7 +608,7 @@ fn clear_cache_is_silent_when_quiet() {
     assert_eq!(run.stderr, "");
     assert!(run.stdout.is_empty());
     assert!(
-        table_files(dir.path()).is_empty(),
+        murm_files(dir.path()).is_empty(),
         "it should still have run"
     );
 }
@@ -646,7 +663,7 @@ fn a_run_reports_the_same_cache_directory_it_uses() {
 
     let run = isolated(&args).run().ok("--json --cache-dir");
     assert_eq!(Json::parse(&run.stdout).get("cache_dir").as_str(), path);
-    assert_eq!(table_files(dir.path()).len(), 1);
+    assert_eq!(murm_files(dir.path()).len(), 1);
 
     // With nothing to resolve, the report says so rather than naming a
     // directory that was never used.

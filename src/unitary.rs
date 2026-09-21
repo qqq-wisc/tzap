@@ -272,11 +272,11 @@ pub(crate) fn circuit_unitary(circuit: &Circuit) -> Vec<Vec<C>> {
 pub fn circuits_equiv(a: &Circuit, b: &Circuit, tol: f64) -> bool {
     assert_eq!(a.num_qubits, b.num_qubits);
     assert!(
-        !a.has_measurement,
+        !a.has_measurement(),
         "circuits_equiv: left circuit contains measurement/reset — not a unitary"
     );
     assert!(
-        !b.has_measurement,
+        !b.has_measurement(),
         "circuits_equiv: right circuit contains measurement/reset — not a unitary"
     );
     let ua = circuit_unitary(a);

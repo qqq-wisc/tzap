@@ -3,7 +3,7 @@
 //! A pass instance that has already analyzed a previous version of its input
 //! only needs to anchor windows near gates that changed since then. A window
 //! whose gates are all unchanged was analyzed against the same synthesis
-//! table in an earlier run and selected nothing — had it selected a rewrite,
+//! MURM in an earlier run and selected nothing — had it selected a rewrite,
 //! its gates would have been replaced and would differ now — so skipping it
 //! leaves the output identical to a full sweep.
 

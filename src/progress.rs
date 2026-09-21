@@ -169,7 +169,9 @@ impl Ui {
 }
 
 /// Width, in characters, of a progress bar's fill/track region.
-const BAR_WIDTH: usize = 32;
+// 22 is 31.25% shorter than the previous 32-character bars (the nearest
+// whole-character width to a 30% reduction).
+const BAR_WIDTH: usize = 22;
 /// Width of a progress box row's label field, with one column of padding after
 /// the longest label ("2q gates").
 const LABEL_WIDTH: usize = 9;
@@ -545,6 +547,14 @@ mod tests {
         assert_eq!(lines[2].chars().count(), width);
         assert!(width > 60);
         assert!(lines[1].contains("1,234,567,890,123"));
+    }
+
+    #[test]
+    fn progress_bars_use_the_compact_width() {
+        let bar = Ui::plain().render_bar(0.5, BAR_WIDTH, GATES_BAR_COLOR);
+        assert_eq!(BAR_WIDTH, 22);
+        assert_eq!(bar.chars().count(), BAR_WIDTH);
+        assert_eq!(bar, "━━━━━━━━━━━───────────");
     }
 
     #[test]

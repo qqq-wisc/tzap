@@ -4,8 +4,10 @@ use std::io::{self, Read};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tzap::circuit::Circuit;
-use tzap::optimize::{Metrics, Observer, Report, optimize_with};
+use tzap::circuit::{Circuit, GateSet};
+use tzap::optimize::{Metrics, Observer, Report, StageKind, optimize_with};
+#[cfg(test)]
+use tzap::super_opt::BASE_GATE_SET;
 
 mod cli;
 mod json;
@@ -13,12 +15,12 @@ mod progress;
 mod ui;
 
 use cli::{AUTO_PARALLEL_GATES, Action, Opts, Run, STREAM_PATH, arg_error, parse_args};
-use json::{FixpointRecord, PassRecord, Recording, RunInfo, TableRecord};
+use json::{FixpointRecord, MurmRecord, PassRecord, Recording, RunInfo};
 use progress::{box_lines, fmt_num, fmt_size};
 use ui::Ui;
 
 /// Renders a run's progress to the terminal: the per-pass result lines, the
-/// SuperOpt table-load status, and the live redrawn progress boxes. The whole
+/// SuperOpt MURM-load status, and the live redrawn progress boxes. The whole
 /// of the CLI's output during optimization, and the only thing standing
 /// between `tzap::optimize` and a silent run.
 ///
@@ -93,16 +95,23 @@ impl Observer for Terminal {
         self.draws_progress()
     }
 
+    fn stage_start(&self, stage: StageKind) {
+        self.record(|recording| recording.stages.push(stage.name().to_string()));
+        self.ui.info(&format!("  {}", stage.name()));
+    }
+
     /// Report one pass with timing and a result line, followed by a blank
-    /// separator line — this and the SuperOpt table-load message each own a
+    /// separator line — this and the SuperOpt MURM-load message each own a
     /// trailing blank line, so a live progress box that follows never needs to
     /// print one itself. [`read_circuit`] deliberately does *not* trail with a
     /// blank: it should stay flush with whatever comes right after it, whether
-    /// that's this, the table message, or a box directly.
+    /// that's this, the MURM message, or a box directly.
     fn pass_done(&self, name: &str, input: &Circuit, result: &Circuit, elapsed: Duration) {
         let metrics = Metrics::of(result);
         self.record(|recording| {
+            let stage = recording.current_stage();
             recording.passes.push(PassRecord {
+                stage,
                 name: name.to_string(),
                 input_gates: input.gates.len(),
                 output_gates: metrics.gates,
@@ -128,37 +137,36 @@ impl Observer for Terminal {
         self.ui.blank();
     }
 
-    /// One name for the table in every message — a cold run used to call it a
-    /// "semantic lookup table" and a warm run "minimal unitary
-    /// representatives", leaving no way to tell they were the same artifact.
-    fn table_load_start(&self, cached: bool) {
+    /// One name for the synthesis artifact in every message.
+    fn murm_load_start(&self, cached: bool, _basis: GateSet) {
         if cached {
-            // Reading a large cached table off disk can itself take a
+            // Reading a large cached MURM off disk can itself take a
             // moment, so say so before it starts; overwritten in place with
             // the completed message below rather than left as its own line.
-            self.ui.start_inline("  Loading superoptimizer table...");
+            self.ui.start_inline("  Loading MURM...");
         } else {
             self.ui
-                .info("  🔧 Building superoptimizer table (one-time — cached for future use)...");
+                .info("  🔧 Building MURM (one-time — cached for future use)...");
         }
     }
 
-    fn table_load_done(&self, cached: bool, elapsed: Duration) {
+    fn murm_load_done(&self, cached: bool, basis: GateSet, elapsed: Duration) {
         self.record(|recording| {
-            recording.table = Some(TableRecord {
+            let stage = recording.current_stage();
+            recording.murms.push(MurmRecord {
+                stage,
                 cached,
+                basis,
                 seconds: elapsed.as_secs_f64(),
             })
         });
-        let message = format!(
-            "  Loaded superoptimizer table in {:.3}s",
-            elapsed.as_secs_f64()
-        );
+        let message = format!("  Loaded MURM in {:.3}s", elapsed.as_secs_f64());
         if cached {
             self.ui.finish_inline(&message);
         } else {
             self.ui.info(&message);
         }
+        self.ui.info(&format!("\t└─ Synthesis basis: {basis}"));
         self.ui.blank();
     }
 
@@ -209,7 +217,9 @@ impl Observer for Terminal {
 
     fn fixpoint_done(&self, rounds: usize, reached_fixpoint: bool) {
         self.record(|recording| {
-            recording.fixpoint = Some(FixpointRecord {
+            let stage = recording.current_stage();
+            recording.fixpoints.push(FixpointRecord {
+                stage,
                 rounds,
                 converged: reached_fixpoint,
             })
@@ -309,10 +319,11 @@ fn read_circuit(ui: &Ui, path: &str) -> Parsed {
         None => format!("  Parsed {label} in {seconds:.3}s"),
     });
     ui.info(&format!(
-        "\t└─ {} qubits · {} gates",
+        "\t├─ {} qubits · {} gates",
         fmt_num(circuit.num_qubits),
         fmt_num(circuit.gates.len()),
     ));
+    ui.info(&format!("\t└─ Circuit gates: {}", circuit.gate_set()));
     Parsed {
         circuit,
         bytes,
@@ -320,7 +331,7 @@ fn read_circuit(ui: &Ui, path: &str) -> Parsed {
     }
 }
 
-/// `--cache-info`: where tzap's on-disk synthesis tables live and what they
+/// `--cache-info`: where tzap's on-disk MURMs live and what they
 /// cost. A query, so it answers on stdout — including under `--quiet`, which
 /// silences commentary, not the thing that was asked for.
 fn print_cache_info(ui: &Ui, json: bool) {
@@ -333,16 +344,12 @@ fn print_cache_info(ui: &Ui, json: bool) {
         ui.write_stdout(
             "No cache directory: none of --cache-dir, $TZAP_CACHE_DIR, \
              $XDG_CACHE_HOME, $HOME, %LOCALAPPDATA%, or %USERPROFILE% is set, \
-             so tables are rebuilt every run.\n",
+             so MURMs are rebuilt every run.\n",
         );
         return;
     };
     let total: u64 = entries.iter().map(|entry| entry.bytes).sum();
-    let plural = if entries.len() == 1 {
-        "table"
-    } else {
-        "tables"
-    };
+    let plural = if entries.len() == 1 { "MURM" } else { "MURMs" };
     let mut out = format!(
         "Cache directory: {}\n{} cached {plural} · {}\n",
         dir.display(),
@@ -360,23 +367,19 @@ fn print_cache_info(ui: &Ui, json: bool) {
     ui.write_stdout(&out);
 }
 
-/// `--clear-cache`: delete every cached synthesis table. The summary is
+/// `--clear-cache`: delete every cached MURM. The summary is
 /// commentary on an action rather than a queried result, so it goes to
 /// stderr and `--quiet` silences it; `--json` puts the machine-readable list
 /// on stdout as usual.
 fn clear_cache(ui: &Ui, json: bool) {
     let removed = tzap::super_opt::clear_cache()
-        .unwrap_or_else(|e| ui.abort(&format!("Error clearing the table cache: {e}")));
+        .unwrap_or_else(|e| ui.abort(&format!("Error clearing the MURM cache: {e}")));
     if json {
         ui.write_stdout(&json::render_cache_info(&removed));
         return;
     }
     let total: u64 = removed.iter().map(|entry| entry.bytes).sum();
-    let plural = if removed.len() == 1 {
-        "table"
-    } else {
-        "tables"
-    };
+    let plural = if removed.len() == 1 { "MURM" } else { "MURMs" };
     ui.info(&format!(
         "  Removed {} cached {plural} · {} freed",
         removed.len(),
@@ -384,9 +387,8 @@ fn clear_cache(ui: &Ui, json: bool) {
     ));
 }
 
-/// Print the result banner against the pipeline's baseline counts (the
-/// circuit as it stood after any eager decomposition, not as parsed), and
-/// write the output file (if requested).
+/// Print the result banner against the original input baseline and write the
+/// output file (if requested).
 fn finish(ui: &Ui, report: &Report, result: &Circuit, run: &Run, start: Instant) {
     ui.print_result(
         report.baseline.gates,
@@ -445,8 +447,10 @@ fn main() {
             input_path: (!run.reads_stdin()).then_some(run.input_path.as_str()),
             input_bytes: parsed.bytes,
             input_qubits: parsed.circuit.num_qubits,
+            input_gate_set: parsed.circuit.gate_set(),
             parse_seconds: parsed.seconds,
             output_path: run.output_path.as_deref(),
+            output_gate_set: result.gate_set(),
             seconds: start.elapsed().as_secs_f64(),
         };
         let recording = observer.take_recording();
@@ -583,8 +587,8 @@ mod tests {
         let elapsed = Duration::from_millis(7);
         observer.pass_done("Toffoli decomposition", &circuit, &circuit, elapsed);
         for cached in [true, false] {
-            observer.table_load_start(cached);
-            observer.table_load_done(cached, elapsed);
+            observer.murm_load_start(cached, BASE_GATE_SET);
+            observer.murm_load_done(cached, BASE_GATE_SET, elapsed);
         }
 
         // A sequential pipeline, then a fixpoint one, then a parallel run —
@@ -622,8 +626,15 @@ mod tests {
         // exactly as they do from the silent one.
         let recording = observer.take_recording();
         assert_eq!(recording.passes.len(), 1);
-        assert_eq!(recording.fixpoint.map(|f| f.rounds), Some(2));
-        assert!(recording.table.is_some());
+        assert_eq!(
+            recording
+                .fixpoints
+                .iter()
+                .map(|f| f.rounds)
+                .collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        assert_eq!(recording.murms.len(), 2);
     }
 
     /// A circuit with no gates at all still renders: every bar is a division
@@ -659,24 +670,26 @@ mod tests {
     fn json_recording_is_kept_only_when_asked_for() {
         let observer = Terminal::new(Ui::plain(), false);
         observer.record(|recording| {
-            recording.fixpoint = Some(FixpointRecord {
+            recording.fixpoints.push(FixpointRecord {
+                stage: None,
                 rounds: 1,
                 converged: true,
             })
         });
-        assert!(observer.take_recording().fixpoint.is_none());
+        assert!(observer.take_recording().fixpoints.is_empty());
 
         let observer = Terminal::new(Ui::plain(), true);
         observer.record(|recording| {
-            recording.fixpoint = Some(FixpointRecord {
+            recording.fixpoints.push(FixpointRecord {
+                stage: None,
                 rounds: 2,
                 converged: false,
             })
         });
         let recording = observer.take_recording();
-        assert_eq!(recording.fixpoint.map(|f| f.rounds), Some(2));
+        assert_eq!(recording.fixpoints.first().map(|f| f.rounds), Some(2));
         assert!(
-            observer.take_recording().fixpoint.is_none(),
+            observer.take_recording().fixpoints.is_empty(),
             "the recording is taken, not copied"
         );
     }

@@ -7,18 +7,23 @@
 //! parsing, file I/O, and terminal rendering; it plugs the latter in through
 //! [`Observer`].
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
 use crate::cancel::CancelGates;
-use crate::circuit::{Circuit, Gate, qubit_operands};
+use crate::circuit::{Circuit, Gate, GateKind, GateSet, qubit_operands};
 use crate::cnot_min::CnotMin;
 use crate::decompose::{DecomposeCz, DecomposeRz, DecomposeToffoli};
 use crate::pass::Pass;
 use crate::phase_fold_rand::PhaseFoldRand;
-use crate::super_opt::{SuperOpt, SuperOptError, SuperOptTableConfig, table_is_cached};
+#[cfg(test)]
+use crate::super_opt::OPTIONAL_GATE_KINDS;
+use crate::super_opt::{
+    BASE_GATE_SET, MurmConfig, OPTIONAL_GATE_SET, SUPPORTED_GATE_SET, SuperOpt, SuperOptError,
+    murm_is_cached,
+};
 
 /// Map-reduce chunks per logical core. Deliberately more than one thread per
 /// core (see [`num_threads`]): chunks cost varies (some hit more SuperOpt
@@ -29,38 +34,38 @@ const CHUNK_MULTIPLIER: usize = 2;
 /// Default approximation epsilon for [`Options::rz_epsilon`].
 pub const DEFAULT_RZ_EPSILON: f64 = 1e-10;
 
-/// Default SuperOpt window/table bounds, overridable per-run via
+/// Default SuperOpt window/MURM bounds, overridable per-run via
 /// [`SuperOptBounds`].
 ///
-/// The window and table share both a qubit bound and a gate-count bound: the
-/// [`SuperOpt`] pass itself allows window and table bounds to differ on either
-/// axis (e.g. a window wider or deeper than the table backing it, to exercise
-/// window mechanics beyond what the table can synthesize replacements for —
+/// The window and MURM share both a qubit bound and a gate-count bound: the
+/// [`SuperOpt`] pass itself allows window and MURM bounds to differ on either
+/// axis (e.g. a window wider or deeper than the MURM backing it, to exercise
+/// window mechanics beyond what the MURM can synthesize replacements for —
 /// see `super_opt::tests`), but the driver has no everyday use case for that,
 /// so it only exposes one knob per axis.
 ///
 /// `window_gates=10` leaves real T-count on the table suite-wide; the T
 /// floor is reached by `window_gates≈15` and gate-count keeps improving
 /// slowly beyond that, so 25 is used as a deliberately more thorough
-/// default. `qubits` and `table_entries` showed no benefit worth their
+/// default. `qubits` and `murm_entries` showed no benefit worth their
 /// added cost at this tier and were left alone.
 pub const DEFAULT_SUPEROPT_QUBITS: usize = 3;
 /// See [`DEFAULT_SUPEROPT_QUBITS`].
 pub const DEFAULT_SUPEROPT_WINDOW_GATES: usize = 25;
 /// See [`DEFAULT_SUPEROPT_QUBITS`].
-pub const DEFAULT_SUPEROPT_TABLE_ENTRIES: usize = 200_000;
+pub const DEFAULT_SUPEROPT_MURM_ENTRIES: usize = 200_000;
 
-/// SuperOpt bounds for [`Level::Osuper`]: a materially bigger window/table
+/// SuperOpt bounds for [`Level::Osuper`]: a materially bigger window/MURM
 /// than the default. Confirmed (by direct comparison against
 /// `DEFAULT_SUPEROPT_*` across the full feynman+cobble benchmark suite) to be
 /// a real, zero-regression improvement — concentrated in circuits with long
-/// single-qubit runs — at the cost of a slower one-time table build (still
+/// single-qubit runs — at the cost of a slower one-time MURM build (still
 /// cached to disk after the first run). `window_gates` was swept 15→20→30,
 /// each step a further zero-or-near-zero-regression win (feynman gains
 /// saturated by 20; cobble kept improving through 30 with zero regressions).
 /// Two other axes stopped helping, though: bigger qubit widths hit an
-/// out-of-memory wall during table construction, and a bigger entries cap
-/// starts *regressing* output (a bigger table is a strict fingerprint
+/// out-of-memory wall during MURM construction, and a bigger entries cap
+/// starts *regressing* output (a bigger MURM is a strict fingerprint
 /// superset, but the greedy, non-backtracking rewrite-selection rule doesn't
 /// turn "more matches available" into "better output" monotonically).
 /// `window_gates=40` is the best gate-count point found at this
@@ -69,7 +74,7 @@ pub const SUPER_SUPEROPT_QUBITS: usize = 5;
 /// See [`SUPER_SUPEROPT_QUBITS`].
 pub const SUPER_SUPEROPT_WINDOW_GATES: usize = 40;
 /// See [`SUPER_SUPEROPT_QUBITS`].
-pub const SUPER_SUPEROPT_TABLE_ENTRIES: usize = 5_000_000;
+pub const SUPER_SUPEROPT_MURM_ENTRIES: usize = 5_000_000;
 
 /// An optimization level: which default pipeline [`optimize`] runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +105,30 @@ pub enum PassName {
     CnotMin,
 }
 
+/// A structured top-level stage in an optimization run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageKind {
+    ExplicitPipeline,
+    InputOptimization,
+    DecomposeCcx,
+    DecomposeCz,
+    DecomposeRz,
+    PostDecompositionOptimization,
+}
+
+impl StageKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ExplicitPipeline => "Running explicit pipeline",
+            Self::InputOptimization => "Optimizing input circuit",
+            Self::DecomposeCcx => "Decomposing CCX/CCZ",
+            Self::DecomposeCz => "Decomposing CZ",
+            Self::DecomposeRz => "Decomposing Rz",
+            Self::PostDecompositionOptimization => "Optimizing decomposed circuit",
+        }
+    }
+}
+
 impl PassName {
     /// All passes — `(name, variant, description)` — in a stable order
     /// suitable for listing to a user.
@@ -127,7 +156,7 @@ impl PassName {
         (
             "SuperOpt",
             PassName::SuperOpt,
-            "Replace small subcircuit windows using a synthesis table",
+            "Replace small subcircuit windows using a MURM",
         ),
         (
             "PhaseFoldRand",
@@ -159,47 +188,111 @@ impl PassName {
     }
 }
 
-/// Per-run overrides for the SuperOpt window/table bounds. `None` means "use
+/// Per-run overrides for the SuperOpt window/MURM bounds. `None` means "use
 /// whichever preset the optimization level implies" (`DEFAULT_SUPEROPT_*`, or
 /// `SUPER_SUPEROPT_*` under [`Level::Osuper`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SuperOptBounds {
     pub qubits: Option<usize>,
     pub window_gates: Option<usize>,
-    pub table_entries: Option<usize>,
+    pub murm_entries: Option<usize>,
+}
+
+/// Which gates SuperOpt may use in MURM representatives.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SuperOptGates {
+    /// Base Clifford+T/CX plus optional native gates present in this stage.
+    #[default]
+    Auto,
+    /// Exactly the built-in Clifford+T/CX basis.
+    Base,
+    /// Exactly the requested non-empty supported basis.
+    Explicit(GateSet),
+}
+
+impl SuperOptGates {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => return Ok(Self::Auto),
+            "base" => return Ok(Self::Base),
+            "" => {
+                return Err(
+                    "--superopt-gates requires 'auto', 'base', or a non-empty gate list".to_owned(),
+                );
+            }
+            _ => {}
+        }
+        let mut basis = GateSet::EMPTY;
+        for name in value.split(',') {
+            let Some(kind) = GateKind::parse(name) else {
+                return Err(format!(
+                    "unsupported SuperOpt gate {name:?}; expected a subset of {}",
+                    SUPPORTED_GATE_SET
+                ));
+            };
+            if !SUPPORTED_GATE_SET.contains(kind) {
+                return Err(format!(
+                    "gate {name:?} cannot be emitted by SuperOpt; expected a subset of {}",
+                    SUPPORTED_GATE_SET
+                ));
+            }
+            basis.insert(kind);
+        }
+        if basis.is_empty() {
+            return Err("the explicit SuperOpt basis cannot be empty".to_owned());
+        }
+        Ok(Self::Explicit(basis))
+    }
+
+    pub const fn effective(&self, stage_gates: GateSet) -> GateSet {
+        match self {
+            Self::Auto => BASE_GATE_SET.union(stage_gates.intersection(OPTIONAL_GATE_SET)),
+            Self::Base => BASE_GATE_SET,
+            Self::Explicit(basis) => *basis,
+        }
+    }
+
+    pub fn as_argument(&self) -> String {
+        match self {
+            Self::Auto => "auto".to_owned(),
+            Self::Base => "base".to_owned(),
+            Self::Explicit(basis) => basis.names().collect::<Vec<_>>().join(","),
+        }
+    }
 }
 
 impl SuperOptBounds {
     /// These bounds with every unset field filled in from `level`'s preset —
-    /// the exact `(qubits, window_gates, table_entries)` a run at `level`
+    /// the exact `(qubits, window_gates, murm_entries)` a run at `level`
     /// will use. Shared by [`initialize_superopt`] and by callers that want
     /// to *report* the effective configuration (the CLI's `--json` and
     /// `--cache-info`) without duplicating the fallback rules.
     pub fn resolved(self, level: Level) -> (usize, usize, usize) {
-        let (qubits, window_gates, table_entries) = if level == Level::Osuper {
+        let (qubits, window_gates, murm_entries) = if level == Level::Osuper {
             (
                 SUPER_SUPEROPT_QUBITS,
                 SUPER_SUPEROPT_WINDOW_GATES,
-                SUPER_SUPEROPT_TABLE_ENTRIES,
+                SUPER_SUPEROPT_MURM_ENTRIES,
             )
         } else {
             (
                 DEFAULT_SUPEROPT_QUBITS,
                 DEFAULT_SUPEROPT_WINDOW_GATES,
-                DEFAULT_SUPEROPT_TABLE_ENTRIES,
+                DEFAULT_SUPEROPT_MURM_ENTRIES,
             )
         };
         (
             self.qubits.unwrap_or(qubits),
             self.window_gates.unwrap_or(window_gates),
-            self.table_entries.unwrap_or(table_entries),
+            self.murm_entries.unwrap_or(murm_entries),
         )
     }
 }
 
 /// Everything [`optimize`] needs to know about how to optimize a circuit.
 ///
-/// `Default` is the CLI's default: `-O3`, sequential, no Rz/CZ decomposition.
+/// `Default` is the CLI's default: `-O3`, sequential, with all decomposition
+/// options disabled.
 #[derive(Clone, Debug)]
 pub struct Options {
     /// Which default pipeline to run. Ignored when `passes` is set.
@@ -214,13 +307,17 @@ pub struct Options {
     pub decompose_rz: bool,
     /// Decompose CZ gates into H+CX+H before optimizing.
     pub decompose_cz: bool,
+    /// Decompose CCX and CCZ gates into Clifford+T.
+    pub decompose_ccx: bool,
     /// Approximation epsilon for `decompose_rz`.
     pub rz_epsilon: f64,
     /// Optimize gate-contiguous chunks of the circuit in parallel, then
     /// concatenate the results (see [`optimize`]).
     pub parallel: bool,
-    /// SuperOpt window/table bounds.
+    /// SuperOpt window/MURM bounds.
     pub superopt: SuperOptBounds,
+    /// Gate basis SuperOpt may emit.
+    pub superopt_gates: SuperOptGates,
 }
 
 impl Default for Options {
@@ -231,9 +328,11 @@ impl Default for Options {
             fixpoint: false,
             decompose_rz: false,
             decompose_cz: false,
+            decompose_ccx: false,
             rz_epsilon: DEFAULT_RZ_EPSILON,
             parallel: false,
             superopt: SuperOptBounds::default(),
+            superopt_gates: SuperOptGates::Auto,
         }
     }
 }
@@ -353,11 +452,9 @@ impl MetricSums {
 pub struct Report {
     /// The circuit as handed in.
     pub input: Metrics,
-    /// The circuit after the eager ccx/ccz (and, under
-    /// [`Options::decompose_cz`], cz) decomposition that precedes
-    /// optimization — the baseline the optimization passes actually worked
-    /// against, and so the honest comparison point for a reduction
-    /// percentage. Equal to `input` when nothing needed decomposing.
+    /// Stable comparison metrics for reduction reporting. This is the
+    /// original input, including when opt-in decompositions run between the
+    /// two optimization stages.
     pub baseline: Metrics,
     /// The optimized circuit.
     pub output: Metrics,
@@ -366,7 +463,7 @@ pub struct Report {
 /// Anything that can go wrong in [`optimize`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The synthesis table backing [`PassName::SuperOpt`] could not be built.
+    /// The MURM backing [`PassName::SuperOpt`] could not be built.
     SuperOpt(SuperOptError),
 }
 
@@ -404,18 +501,21 @@ pub trait Observer: Sync {
         false
     }
 
-    /// A whole-circuit pass (the eager ccx/ccz or cz decomposition) finished.
+    /// A top-level optimization/decomposition stage is starting.
+    fn stage_start(&self, _stage: StageKind) {}
+
+    /// A whole-circuit decomposition pass finished.
     /// Both sides are reported: a decomposition *grows* the circuit, so a
     /// renderer that only showed `result` would leave its counts looking
     /// unexplained next to the input's.
     fn pass_done(&self, _name: &str, _input: &Circuit, _result: &Circuit, _elapsed: Duration) {}
 
-    /// The SuperOpt synthesis table is about to be loaded from disk
+    /// The SuperOpt MURM is about to be loaded from disk
     /// (`cached`) or built from scratch.
-    fn table_load_start(&self, _cached: bool) {}
+    fn murm_load_start(&self, _cached: bool, _basis: GateSet) {}
 
-    /// The SuperOpt synthesis table is ready.
-    fn table_load_done(&self, _cached: bool, _elapsed: Duration) {}
+    /// The SuperOpt MURM is ready.
+    fn murm_load_done(&self, _cached: bool, _basis: GateSet, _elapsed: Duration) {}
 
     /// A pass pipeline is starting, against `baseline`. Paired with
     /// [`Observer::progress_end`].
@@ -457,6 +557,44 @@ pub trait Observer: Sync {
 pub struct Silent;
 
 impl Observer for Silent {}
+
+/// Collects the only chunk-local event that has whole-stage meaning. Parallel
+/// chunks can take different numbers of fixpoint sweeps, so the stage reports
+/// the maximum round count and is converged only when every reporting chunk
+/// converged. Other chunk events remain intentionally silent.
+struct ParallelFixpointAggregate {
+    reports: AtomicUsize,
+    max_rounds: AtomicUsize,
+    all_converged: AtomicBool,
+}
+
+impl ParallelFixpointAggregate {
+    fn new() -> Self {
+        Self {
+            reports: AtomicUsize::new(0),
+            max_rounds: AtomicUsize::new(0),
+            all_converged: AtomicBool::new(true),
+        }
+    }
+
+    fn report_to(&self, observer: &dyn Observer) {
+        if self.reports.load(Ordering::Relaxed) != 0 {
+            observer.fixpoint_done(
+                self.max_rounds.load(Ordering::Relaxed),
+                self.all_converged.load(Ordering::Relaxed),
+            );
+        }
+    }
+}
+
+impl Observer for ParallelFixpointAggregate {
+    fn fixpoint_done(&self, rounds: usize, reached_fixpoint: bool) {
+        self.max_rounds.fetch_max(rounds, Ordering::Relaxed);
+        self.all_converged
+            .fetch_and(reached_fixpoint, Ordering::Relaxed);
+        self.reports.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Number of logical cores, for sizing the rayon thread pool. CPU-bound work
 /// like ours gets no benefit from oversubscribing OS threads beyond the core
@@ -652,32 +790,33 @@ fn run_to_fixpoint(
 fn initialize_superopt(
     options: &Options,
     level: Level,
+    basis: GateSet,
     observer: &dyn Observer,
 ) -> Result<SuperOpt, Error> {
-    let (qubits, window_gates, table_entries) = options.superopt.resolved(level);
+    let (qubits, window_gates, murm_entries) = options.superopt.resolved(level);
 
-    // A table entry needs strictly fewer gates than the window it replaces
+    // A MURM entry needs strictly fewer gates than the window it replaces
     // (see `ActiveWindow::consider`'s `local.len() >= gate_indices.len()`
     // rejection), and no window ever exceeds `window_gates`. So a stored
-    // circuit at exactly `window_gates` depth could never be strictly
+    // representative at exactly `window_gates` depth could never be strictly
     // smaller than the largest possible window — `window_gates - 1` is the
-    // deepest depth any table entry can ever be used at.
-    let table_gates = window_gates.saturating_sub(1);
-    let table_config = SuperOptTableConfig::new(qubits, table_gates, table_entries);
+    // deepest depth any MURM entry can ever be used at.
+    let murm_gates = window_gates.saturating_sub(1);
+    let murm_config = MurmConfig::new(qubits, murm_gates, murm_entries).with_basis(basis);
     // Captured before the build/load below can create the cache file (which
-    // would make a second `table_is_cached` call always say "cached").
-    let cached = table_is_cached(table_config);
-    observer.table_load_start(cached);
+    // would make a second `murm_is_cached` call always say "cached").
+    let cached = murm_is_cached(murm_config);
+    observer.murm_load_start(cached, basis);
     let start = Instant::now();
-    let pass = SuperOpt::new(qubits, window_gates, table_config)?;
-    observer.table_load_done(cached, start.elapsed());
+    let pass = SuperOpt::new(qubits, window_gates, murm_config)?;
+    observer.murm_load_done(cached, basis, start.elapsed());
     Ok(pass.without_subcircuits().incremental())
 }
 
 /// Run `optimize` once on the whole circuit when sequential, or independently
 /// on each of `num_chunks` chunks in parallel (map), recombining the results
 /// in order (reduce). Each chunk is optimized completely independently: no
-/// state — not even a synthesis table's matrix cache — is shared between
+/// state — not even a MURM's matrix cache — is shared between
 /// chunks, so `optimize` must construct every stateful pass (`SuperOpt`)
 /// fresh on every call.
 fn run_map_reduce(
@@ -706,6 +845,7 @@ fn run_map_reduce(
     let done = AtomicUsize::new(0);
     let sum_before = MetricSums::default();
     let sum_after = MetricSums::default();
+    let fixpoint = ParallelFixpointAggregate::new();
 
     if tracking {
         observer.chunks_start(total, baseline);
@@ -716,7 +856,7 @@ fn run_map_reduce(
             // Walked only when someone is watching: two passes over the chunk
             // that a `Silent` run has no use for.
             let before = tracking.then(|| Metrics::of(chunk));
-            let result = optimize(chunk, &Silent)?;
+            let result = optimize(chunk, &fixpoint)?;
             if let Some(before) = before {
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 let current =
@@ -730,57 +870,140 @@ fn run_map_reduce(
         observer.chunks_end(baseline);
     }
     let optimized = optimized.into_iter().collect::<Result<Vec<_>, _>>()?;
+    fixpoint.report_to(observer);
     Ok(stitch(circuit.num_qubits, circuit.num_cbits, &optimized))
 }
 
-/// Run the explicit [`Options::passes`] pipeline on `circuit`, constructing a
-/// fresh `SuperOpt` if it's selected. Used as one map-reduce worker per chunk.
+/// Run one named pass over the current whole-circuit stage. SuperOpt resolves
+/// `auto` lazily from that exact circuit, after every earlier named pass. In a
+/// parallel run the whole-circuit basis is fixed before chunking, then each
+/// worker constructs its own stateful pass instance.
+fn run_explicit_pass(
+    circuit: &Circuit,
+    name: PassName,
+    options: &Options,
+    num_chunks: usize,
+    observer: &dyn Observer,
+) -> Result<Circuit, Error> {
+    macro_rules! map_pass {
+        ($make:expr) => {
+            run_map_reduce(
+                circuit,
+                options.parallel,
+                num_chunks,
+                observer,
+                |chunk, _| {
+                    let pass = $make;
+                    Ok(Pass::run(&pass, chunk))
+                },
+            )
+        };
+    }
+
+    match name {
+        PassName::DecomposeToffoli => map_pass!(DecomposeToffoli),
+        PassName::DecomposeCz => map_pass!(DecomposeCz),
+        PassName::DecomposeRz => map_pass!(DecomposeRz {
+            epsilon: options.rz_epsilon,
+        }),
+        PassName::CancelGates => map_pass!(CancelGates),
+        PassName::PhaseFoldRand => map_pass!(PhaseFoldRand),
+        PassName::CnotMin => map_pass!(CnotMin::default()),
+        PassName::SuperOpt => {
+            let basis = options.superopt_gates.effective(circuit.gate_set());
+            if basis.is_empty() {
+                return Ok(circuit.clone());
+            }
+            if options.parallel {
+                initialize_superopt(options, Level::O1, basis, observer)?;
+            }
+            run_map_reduce(
+                circuit,
+                options.parallel,
+                num_chunks,
+                observer,
+                |chunk, chunk_observer| {
+                    let pass = initialize_superopt(options, Level::O1, basis, chunk_observer)?;
+                    Ok(Pass::run(&pass, chunk))
+                },
+            )
+        }
+    }
+}
+
+/// Run one sweep of an explicit pipeline, resolving stage-sensitive state at
+/// each pass boundary.
+fn run_explicit_sweep(
+    circuit: &Circuit,
+    names: &[PassName],
+    options: &Options,
+    num_chunks: usize,
+    observer: &dyn Observer,
+    round: Option<usize>,
+    baseline: Metrics,
+) -> Result<Circuit, Error> {
+    let mut current = circuit.clone();
+    if !options.parallel {
+        observer.progress_update(round, &current, baseline);
+    }
+    for &name in names {
+        current = run_explicit_pass(&current, name, options, num_chunks, observer)?;
+        if !options.parallel {
+            observer.progress_update(round, &current, baseline);
+        }
+    }
+    Ok(current)
+}
+
+/// Run the explicit [`Options::passes`] pipeline. Unlike the default preset,
+/// every pass boundary is semantically visible: a SuperOpt after a
+/// decomposition resolves `auto` from the decomposed circuit, and a later
+/// SuperOpt may therefore use a different MURM again.
 fn optimize_explicit(
     circuit: &Circuit,
     options: &Options,
+    num_chunks: usize,
     observer: &dyn Observer,
 ) -> Result<Circuit, Error> {
     let names = options
         .passes
         .as_ref()
         .expect("only called when `passes` is set");
-    let decompose_toffoli = DecomposeToffoli;
-    let decompose_cz = DecomposeCz;
-    let rz_decompose = DecomposeRz {
-        epsilon: options.rz_epsilon,
-    };
-    let cancel_pass = CancelGates;
-    let global = PhaseFoldRand;
-    let cnot_min_pass = CnotMin::default();
+    let baseline = Metrics::of(circuit);
+    if !options.parallel {
+        observer.progress_start(baseline);
+    }
 
-    let uses_superopt = names.iter().any(|p| matches!(p, PassName::SuperOpt));
-    let superopt_pass = match uses_superopt {
-        true => Some(initialize_superopt(options, Level::O1, observer)?),
-        false => None,
-    };
-
-    let passes: Vec<&dyn Pass> = names
-        .iter()
-        .map(|p| -> &dyn Pass {
-            match p {
-                PassName::DecomposeToffoli => &decompose_toffoli,
-                PassName::DecomposeCz => &decompose_cz,
-                PassName::DecomposeRz => &rz_decompose,
-                PassName::CancelGates => &cancel_pass,
-                PassName::SuperOpt => superopt_pass
-                    .as_ref()
-                    .expect("constructed when the pass is selected"),
-                PassName::PhaseFoldRand => &global,
-                PassName::CnotMin => &cnot_min_pass,
+    let mut current = circuit.clone();
+    if options.fixpoint {
+        let mut round = 0;
+        let converged = loop {
+            round += 1;
+            let before = current.gates.len();
+            current = run_explicit_sweep(
+                &current,
+                names,
+                options,
+                num_chunks,
+                observer,
+                Some(round),
+                baseline,
+            )?;
+            if current.gates.len() >= before {
+                break true;
             }
-        })
-        .collect();
-
-    Ok(if options.fixpoint {
-        run_to_fixpoint(circuit, &passes, None, observer, None)
+        };
+        observer.fixpoint_done(round, converged);
     } else {
-        run_pipeline(circuit, &passes, observer)
-    })
+        current = run_explicit_sweep(
+            &current, names, options, num_chunks, observer, None, baseline,
+        )?;
+    }
+
+    if !options.parallel {
+        observer.progress_end(baseline);
+    }
+    Ok(current)
 }
 
 /// Run the default pipeline for [`Options::level`] on `circuit`, constructing
@@ -789,11 +1012,9 @@ fn optimize_explicit(
 fn optimize_default(
     circuit: &Circuit,
     options: &Options,
+    superopt_basis: GateSet,
     observer: &dyn Observer,
 ) -> Result<Circuit, Error> {
-    let rz_decompose = DecomposeRz {
-        epsilon: options.rz_epsilon,
-    };
     let cancel_pass = CancelGates;
     let global = PhaseFoldRand;
     let cnot_min_pass = CnotMin::default();
@@ -803,51 +1024,90 @@ fn optimize_default(
         // Osuper are the "run it out fully" tiers; O2 is the cheap, bounded
         // one.
         let max_rounds = (options.level == Level::O2).then_some(2);
-        let superopt_pass = initialize_superopt(options, options.level, observer)?;
+        let superopt_pass = (!superopt_basis.is_empty())
+            .then(|| initialize_superopt(options, options.level, superopt_basis, observer))
+            .transpose()?;
         // CnotMin leads the sweep: it re-synthesizes whole CNOT-dihedral
         // blocks, which reshapes the circuit far more than the peephole
         // rewriter does, and the passes after it then work on the result.
-        let passes: Vec<&dyn Pass> = vec![&cnot_min_pass, &cancel_pass, &superopt_pass, &global];
-        let decompose: Option<&dyn Pass> = options.decompose_rz.then_some(&rz_decompose);
+        let mut passes: Vec<&dyn Pass> = vec![&cnot_min_pass, &cancel_pass];
+        if let Some(superopt_pass) = &superopt_pass {
+            passes.push(superopt_pass);
+        }
+        passes.push(&global);
         Ok(run_to_fixpoint(
-            circuit, &passes, decompose, observer, max_rounds,
+            circuit, &passes, None, observer, max_rounds,
         ))
     } else {
         let optimization_passes: Vec<&dyn Pass> = vec![&cancel_pass, &global];
-
-        // Optimize, then (for decompose_rz) decompose Rz and optimize the result
-        // again — so the selected optimization pipeline runs on both sides of gridsynth.
-        let mut passes = optimization_passes.clone();
-        if options.decompose_rz && circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
-            passes.push(&rz_decompose);
-            passes.extend(optimization_passes);
-        }
-
         Ok(if options.fixpoint {
-            run_to_fixpoint(circuit, &passes, None, observer, None)
+            run_to_fixpoint(circuit, &optimization_passes, None, observer, None)
         } else {
-            run_pipeline(circuit, &passes, observer)
+            run_pipeline(circuit, &optimization_passes, observer)
         })
     }
 }
 
+#[derive(Clone, Copy)]
+enum OptimizationStage {
+    Explicit,
+    Preset { forbidden: GateSet },
+}
+
+/// Execute one structured optimization stage. This is the single boundary at
+/// which whole-circuit gate inspection, MURM policy, parallel prewarming, and
+/// observer stage identity meet.
+fn run_optimization_stage(
+    circuit: &Circuit,
+    kind: StageKind,
+    stage: OptimizationStage,
+    options: &Options,
+    num_chunks: usize,
+    observer: &dyn Observer,
+) -> Result<Circuit, Error> {
+    observer.stage_start(kind);
+    match stage {
+        OptimizationStage::Explicit => optimize_explicit(circuit, options, num_chunks, observer),
+        OptimizationStage::Preset { forbidden } => {
+            let basis = options
+                .superopt_gates
+                .effective(circuit.gate_set())
+                .difference(forbidden);
+            if options.parallel && level_uses_superopt(options.level) && !basis.is_empty() {
+                initialize_superopt(options, options.level, basis, observer)?;
+            }
+            run_map_reduce(
+                circuit,
+                options.parallel,
+                num_chunks,
+                observer,
+                |chunk, chunk_observer| optimize_default(chunk, options, basis, chunk_observer),
+            )
+        }
+    }
+}
+
 /// Whether `level`'s pipeline includes a SuperOpt pass (and so pays for a
-/// synthesis table).
+/// MURM).
 fn level_uses_superopt(level: Level) -> bool {
     matches!(level, Level::O2 | Level::O3 | Level::Osuper)
 }
 
-/// Assert the driver's Rz invariants: optimization never introduces an Rz
-/// gate into a circuit that had none, and [`Options::decompose_rz`] always
-/// leaves none behind.
-fn check_rz_invariants(input: &Circuit, result: &Circuit, options: &Options) {
-    let input_has_rz = input.gates.iter().any(|g| matches!(g, Gate::rz(..)));
-    let output_has_rz = result.gates.iter().any(|g| matches!(g, Gate::rz(..)));
-    if output_has_rz && !input_has_rz {
+/// Assert output gate contracts independently of unitary equivalence. The
+/// latter cannot detect a decomposed gate being synthesized back into the
+/// output by a later optimizer stage.
+fn check_output_invariants(input: &Circuit, result: &Circuit, decomposed: GateSet) {
+    let input_gates = input.gate_set();
+    let output_gates = result.gate_set();
+    if output_gates.contains(GateKind::Rz) && !input_gates.contains(GateKind::Rz) {
         panic!("BUG: output contains Rz gates but input did not");
     }
-    if output_has_rz && options.decompose_rz {
-        panic!("BUG: output contains Rz gates after --decompose-rz");
+    for kind in decomposed.iter() {
+        assert!(
+            !output_gates.contains(kind),
+            "BUG: output contains {} gates after their requested decomposition",
+            kind.name()
+        );
     }
 }
 
@@ -868,14 +1128,11 @@ pub fn optimize(circuit: &Circuit, options: &Options) -> Result<(Circuit, Report
 
 /// Optimize `circuit`, reporting progress to `observer`.
 ///
-/// The default pipeline decomposes ccx/ccz (and optionally cz) over the whole
-/// circuit first, then runs [`Options::level`]'s cancel + phase-fold (+
-/// SuperOpt) pipeline. [`Options::passes`] overrides that with an explicit,
-/// user-ordered pipeline. Under [`Options::parallel`], the chosen pipeline
-/// runs map-reduce style (see [`run_map_reduce`]): the circuit is split into
-/// independent gate-contiguous chunks, each optimized start-to-finish on its
-/// own (own `SuperOpt` instance, no shared state), then the results are
-/// stitched back together in order.
+/// The default workflow optimizes the input circuit, applies requested
+/// CCX/CCZ, CZ, and Rz decompositions in that order, then optimizes again if
+/// any decomposition changed the circuit. [`Options::passes`] overrides that
+/// with an explicit, user-ordered pipeline. Under [`Options::parallel`], each
+/// optimization stage runs map-reduce style (see [`run_map_reduce`]).
 pub fn optimize_with(
     circuit: &Circuit,
     options: &Options,
@@ -885,22 +1142,21 @@ pub fn optimize_with(
     let num_chunks = num_par_chunks();
 
     // Explicit pipeline via `passes`: run exactly what the caller listed, in
-    // order — no eager decomposition, so the baseline is the input as-is.
+    // order, with the original input as the reporting baseline.
     if let Some(names) = &options.passes {
         let uses_rz = names.iter().any(|p| matches!(p, PassName::DecomposeRz));
-        let uses_superopt = names.iter().any(|p| matches!(p, PassName::SuperOpt));
         if options.parallel || uses_rz {
             init_global_pool();
         }
-        // Warm the (process-wide cached) synthesis table once, observed,
-        // before fanning out — each chunk's own SuperOpt build stays quiet.
-        if options.parallel && uses_superopt {
-            initialize_superopt(options, Level::O1, observer)?;
-        }
-        let result = run_map_reduce(circuit, options.parallel, num_chunks, observer, |c, obs| {
-            optimize_explicit(c, options, obs)
-        })?;
-        check_rz_invariants(circuit, &result, options);
+        let result = run_optimization_stage(
+            circuit,
+            StageKind::ExplicitPipeline,
+            OptimizationStage::Explicit,
+            options,
+            num_chunks,
+            observer,
+        )?;
+        check_output_invariants(circuit, &result, GateSet::EMPTY);
         let report = Report {
             input,
             baseline: input,
@@ -913,37 +1169,78 @@ pub fn optimize_with(
         init_global_pool();
     }
 
-    // Decompose CCX/CCZ eagerly, once, over the whole circuit — before any
-    // chunking — so post-decomp counts form the baseline.
-    let mut decomposed: Option<Circuit> = None;
-    if circuit.has_toffoli || circuit.has_ccz {
-        decomposed = Some(run_logged(&DecomposeToffoli, circuit, observer));
+    // Native optimization always comes first. Requested decompositions form
+    // an opt-in middle stage, followed by the same optimizer when any pass
+    // actually changed the circuit.
+    let native = run_optimization_stage(
+        circuit,
+        StageKind::InputOptimization,
+        OptimizationStage::Preset {
+            forbidden: GateSet::EMPTY,
+        },
+        options,
+        num_chunks,
+        observer,
+    )?;
+    let mut result = native;
+    let mut forbidden = GateSet::EMPTY;
+    if options.decompose_ccx {
+        forbidden = forbidden.union(GateSet::from_bits_const(
+            (1 << GateKind::Ccx as u8) | (1 << GateKind::Ccz as u8),
+        ));
     }
     if options.decompose_cz {
-        let source = decomposed.as_ref().unwrap_or(circuit);
-        if source.gates.iter().any(|g| matches!(g, Gate::cz { .. })) {
-            let next = run_logged(&DecomposeCz, source, observer);
-            decomposed = Some(next);
+        forbidden = forbidden.union(GateSet::singleton(GateKind::Cz));
+    }
+    if options.decompose_rz {
+        forbidden = forbidden.union(GateSet::singleton(GateKind::Rz));
+    }
+    let mut decomposed = false;
+
+    let decompositions: [(bool, GateSet, StageKind, &dyn Pass); 3] = [
+        (
+            options.decompose_ccx,
+            GateSet::from_bits_const((1 << GateKind::Ccx as u8) | (1 << GateKind::Ccz as u8)),
+            StageKind::DecomposeCcx,
+            &DecomposeToffoli,
+        ),
+        (
+            options.decompose_cz,
+            GateSet::singleton(GateKind::Cz),
+            StageKind::DecomposeCz,
+            &DecomposeCz,
+        ),
+        (
+            options.decompose_rz,
+            GateSet::singleton(GateKind::Rz),
+            StageKind::DecomposeRz,
+            &DecomposeRz {
+                epsilon: options.rz_epsilon,
+            },
+        ),
+    ];
+    for (requested, kinds, stage, pass) in decompositions {
+        if requested && !result.gate_set().intersection(kinds).is_empty() {
+            observer.stage_start(stage);
+            result = run_logged(pass, &result, observer);
+            decomposed = true;
         }
     }
-    let base = decomposed.as_ref().unwrap_or(circuit);
-
-    if options.parallel && level_uses_superopt(options.level) {
-        initialize_superopt(options, options.level, observer)?;
+    if decomposed {
+        result = run_optimization_stage(
+            &result,
+            StageKind::PostDecompositionOptimization,
+            OptimizationStage::Preset { forbidden },
+            options,
+            num_chunks,
+            observer,
+        )?;
     }
 
-    let result = run_map_reduce(base, options.parallel, num_chunks, observer, |c, obs| {
-        optimize_default(c, options, obs)
-    })?;
-    check_rz_invariants(base, &result, options);
+    check_output_invariants(circuit, &result, forbidden);
     let report = Report {
         input,
-        // Nothing was decomposed, so `base` *is* the input — no need to count
-        // a million-gate circuit twice.
-        baseline: match decomposed.is_some() {
-            true => Metrics::of(base),
-            false => input,
-        },
+        baseline: input,
         output: Metrics::of(&result),
     };
     Ok((result, report))
@@ -996,6 +1293,38 @@ mod tests {
         })
         .expect("no SuperOpt pass, so nothing can fail");
         assert!(out.gates.is_empty());
+    }
+
+    #[test]
+    fn parallel_fixpoint_reports_the_maximum_chunk_round() {
+        #[derive(Default)]
+        struct FixpointObserver(std::sync::Mutex<Vec<(usize, bool)>>);
+        impl Observer for FixpointObserver {
+            fn fixpoint_done(&self, rounds: usize, converged: bool) {
+                self.0.lock().unwrap().push((rounds, converged));
+            }
+        }
+
+        let mut circuit = Circuit::new(4);
+        for qubit in 0..4 {
+            circuit.apply(Gate::h(qubit));
+        }
+        let observer = FixpointObserver::default();
+        run_map_reduce(&circuit, true, 4, &observer, |chunk, chunk_observer| {
+            let qubit = match chunk.gates[0] {
+                Gate::h(qubit) => qubit,
+                _ => unreachable!(),
+            };
+            chunk_observer.fixpoint_done(qubit as usize + 1, qubit != 2);
+            Ok(chunk.clone())
+        })
+        .unwrap();
+
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec![(4, false)],
+            "parallel stages report one record: max rounds and all-chunks convergence"
+        );
     }
 
     /// The parallel progress numbers are derived from per-chunk deltas rather
@@ -1082,35 +1411,16 @@ mod tests {
         };
 
         let out = run_map_reduce(&c, true, 4, &Silent, |chunk, obs| {
-            optimize_default(chunk, &options, obs)
+            optimize_default(chunk, &options, BASE_GATE_SET, obs)
         })
-        .expect("the default SuperOpt table must build");
+        .expect("the default SuperOpt MURM must build");
         assert!(out.gates.len() <= c.gates.len());
     }
 
-    /// Rz synthesis must wait for the pre-synthesis sweeps to converge, so
-    /// gridsynth expands into the smallest circuit available. Regression
-    /// guard: a circuit whose Clifford+T body keeps shrinking for several
-    /// sweeps must reach synthesis already reduced, which is what makes the
-    /// default placement worth 2-22% T on cobble. Counted via the round at
-    /// which the Rz count drops to zero: synthesizing after the first sweep
-    /// would zero it in round 1, so holding it past round 1 is the observable
-    /// signature of the placement. Must hold at *every* SuperOpt level — O2's
-    /// round cap must not quietly degrade it back to synthesize-after-one-sweep.
+    /// Rz synthesis is an opt-in middle stage and its output is optimized
+    /// again at every SuperOpt level.
     #[test]
     fn rz_synthesis_waits_for_the_presynthesis_fixpoint_at_every_level() {
-        /// Records the round in which the observed circuit first has no Rz.
-        struct RzRound(std::sync::Mutex<Option<usize>>);
-        impl Observer for RzRound {
-            fn progress_update(&self, iteration: Option<usize>, c: &Circuit, _: Metrics) {
-                let has_rz = c.gates.iter().any(|g| matches!(g, Gate::rz(..)));
-                let mut first = self.0.lock().unwrap();
-                if !has_rz && first.is_none() {
-                    *first = iteration;
-                }
-            }
-        }
-
         // An H·H / CNOT·CNOT body (so sweep 1 finds real reduction and the
         // pre-synthesis phase runs past round 1) plus a single non-π/4 Rz for
         // gridsynth to synthesize.
@@ -1133,42 +1443,24 @@ mod tests {
             let options = Options {
                 level,
                 decompose_rz: true,
-                // Osuper's real bounds (5 qubits, 5M entries) would spend
-                // minutes building a table; the placement logic is
-                // bound-independent, so shrink them to the default preset and
-                // exercise the *level* cheaply.
-                superopt: SuperOptBounds {
-                    qubits: Some(DEFAULT_SUPEROPT_QUBITS),
-                    window_gates: Some(DEFAULT_SUPEROPT_WINDOW_GATES),
-                    table_entries: Some(DEFAULT_SUPEROPT_TABLE_ENTRIES),
-                },
+                rz_epsilon: 1e-3,
+                // The placement logic is bound-independent, so use the tiny
+                // CI MURM while still exercising each level's driver path.
+                superopt: tiny_superopt_bounds(),
                 ..Options::default()
             };
-            let observer = RzRound(std::sync::Mutex::new(None));
-            let out = optimize_default(&c, &options, &observer).expect("pipeline must run");
+            let (out, _) = optimize(&c, &options).expect("pipeline must run");
 
             assert!(
                 !out.gates.iter().any(|g| matches!(g, Gate::rz(..))),
                 "{level:?}: decompose_rz must leave no Rz behind"
             );
-            let round = observer
-                .0
-                .lock()
-                .unwrap()
-                .expect("Rz must reach zero at some round");
-            assert!(
-                round > 1,
-                "{level:?}: Rz synthesis must wait for the pre-synthesis sweeps \
-                 to converge, but Rz was gone by round {round}"
-            );
         }
     }
 
-    /// `optimize` must report the post-decomposition baseline, not the raw
-    /// input, as what the optimization passes worked against — a Toffoli
-    /// circuit's `input` and `baseline` gate counts therefore differ.
+    /// Native gates remain native unless their decomposition flag is set.
     #[test]
-    fn report_baseline_is_post_decomposition() {
+    fn ccx_decomposition_is_opt_in() {
         let mut c = Circuit::new(3);
         c.apply(Gate::ccx {
             control1: 0,
@@ -1180,11 +1472,20 @@ mod tests {
             level: Level::O1,
             ..Options::default()
         };
-        let (_, report) = optimize(&c, &options).expect("O1 builds no SuperOpt table");
+        let (native, report) = optimize(&c, &options).expect("O1 builds no MURM");
 
         assert_eq!(report.input.gates, 1);
-        assert!(report.baseline.gates > 1, "ccx must be decomposed first");
-        assert_eq!(report.baseline.t, 7, "the standard 7-T Toffoli");
+        assert_eq!(report.baseline, report.input);
+        assert!(native.gate_set().contains(GateKind::Ccx));
+
+        let options = Options {
+            level: Level::O1,
+            decompose_ccx: true,
+            ..Options::default()
+        };
+        let (decomposed, report) = optimize(&c, &options).expect("O1 builds no MURM");
+        assert!(!decomposed.gate_set().contains(GateKind::Ccx));
+        assert_eq!(report.baseline, report.input);
     }
 
     /// A circuit needing no decomposition reports `input == baseline`.
@@ -1198,10 +1499,644 @@ mod tests {
             level: Level::O1,
             ..Options::default()
         };
-        let (out, report) = optimize(&c, &options).expect("O1 builds no SuperOpt table");
+        let (out, report) = optimize(&c, &options).expect("O1 builds no SuperOpt MURM");
 
         assert_eq!(report.input, report.baseline);
         assert_eq!(out.gates.len(), 0, "HH must cancel");
         assert_eq!(report.output.gates, 0);
+    }
+
+    #[test]
+    fn every_explicit_superopt_basis_mask_round_trips() {
+        let candidates = [
+            GateKind::H,
+            GateKind::X,
+            GateKind::Z,
+            GateKind::S,
+            GateKind::Sdg,
+            GateKind::T,
+            GateKind::Tdg,
+            GateKind::Cx,
+            GateKind::Cz,
+            GateKind::Ccx,
+            GateKind::Ccz,
+        ];
+        assert!(SuperOptGates::parse("").is_err());
+        for mask in 1u16..1 << candidates.len() {
+            let expected = GateSet::from_kinds(
+                candidates
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(bit, kind)| (mask & (1 << bit) != 0).then_some(kind)),
+            );
+            let argument = expected.names().collect::<Vec<_>>().join(",");
+            assert_eq!(
+                SuperOptGates::parse(&argument).unwrap(),
+                SuperOptGates::Explicit(expected),
+                "mask {mask:#05x}"
+            );
+        }
+        assert_eq!(
+            SuperOptGates::parse("h,h,cz").unwrap(),
+            SuperOptGates::Explicit(GateSet::from_kinds([GateKind::H, GateKind::Cz]))
+        );
+        assert!(SuperOptGates::parse("rz").is_err());
+    }
+
+    #[test]
+    fn auto_superopt_basis_covers_all_native_gate_subsets() {
+        for mask in 0u8..8 {
+            let mut stage = GateSet::from_kinds([GateKind::H, GateKind::Rz]);
+            for (bit, kind) in OPTIONAL_GATE_KINDS.into_iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    stage.insert(kind);
+                }
+            }
+            let expected = BASE_GATE_SET.union(stage.intersection(OPTIONAL_GATE_SET));
+            assert_eq!(SuperOptGates::Auto.effective(stage), expected);
+            assert_eq!(SuperOptGates::Base.effective(stage), BASE_GATE_SET);
+        }
+    }
+
+    #[test]
+    fn all_native_and_decomposition_subsets_follow_the_staged_contract() {
+        use crate::unitary::circuits_equiv;
+
+        for native_mask in 0u8..8 {
+            let mut input = Circuit::new(3);
+            input.apply(Gate::h(0));
+            input.apply(Gate::rz(0.37, 2));
+            if native_mask & 1 != 0 {
+                input.apply(Gate::cz {
+                    control: 0,
+                    target: 1,
+                });
+            }
+            if native_mask & 2 != 0 {
+                input.apply(Gate::ccx {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                });
+            }
+            if native_mask & 4 != 0 {
+                input.apply(Gate::ccz {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                });
+            }
+
+            for decompose_mask in 0u8..8 {
+                let options = Options {
+                    level: Level::O1,
+                    decompose_ccx: decompose_mask & 1 != 0,
+                    decompose_cz: decompose_mask & 2 != 0,
+                    decompose_rz: decompose_mask & 4 != 0,
+                    rz_epsilon: 1e-3,
+                    ..Options::default()
+                };
+                let (output, _) = optimize(&input, &options).unwrap();
+                if options.decompose_ccx {
+                    assert!(!output.gate_set().contains(GateKind::Ccx));
+                    assert!(!output.gate_set().contains(GateKind::Ccz));
+                }
+                if options.decompose_cz {
+                    assert!(!output.gate_set().contains(GateKind::Cz));
+                }
+                if options.decompose_rz {
+                    assert!(!output.gate_set().contains(GateKind::Rz));
+                }
+                assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
+                assert!(
+                    circuits_equiv(&input, &output, 5e-3),
+                    "native mask {native_mask:#05b}, decomposition mask {decompose_mask:#05b}"
+                );
+            }
+        }
+    }
+
+    fn native_subset_circuit(mask: u8) -> Circuit {
+        let mut circuit = Circuit::new(3);
+        circuit.apply(Gate::h(0));
+        circuit.apply(Gate::t(1));
+        circuit.apply(Gate::cnot {
+            control: 0,
+            target: 2,
+        });
+        circuit.apply(Gate::rz(0.37, 2));
+        if mask & 1 != 0 {
+            circuit.apply(Gate::cz {
+                control: 0,
+                target: 1,
+            });
+        }
+        if mask & 2 != 0 {
+            circuit.apply(Gate::ccx {
+                control1: 0,
+                control2: 1,
+                target: 2,
+            });
+        }
+        if mask & 4 != 0 {
+            circuit.apply(Gate::ccz {
+                control1: 0,
+                control2: 1,
+                target: 2,
+            });
+        }
+        circuit
+    }
+
+    fn tiny_superopt_bounds() -> SuperOptBounds {
+        SuperOptBounds {
+            qubits: Some(3),
+            window_gates: Some(4),
+            murm_entries: Some(500),
+        }
+    }
+
+    #[derive(Default)]
+    struct BasisObserver(std::sync::Mutex<Vec<GateSet>>);
+
+    impl Observer for BasisObserver {
+        fn murm_load_done(&self, _cached: bool, basis: GateSet, _elapsed: Duration) {
+            self.0.lock().unwrap().push(basis);
+        }
+    }
+
+    #[derive(Default)]
+    struct StageBasisState {
+        current: Option<StageKind>,
+        loads: Vec<(StageKind, GateSet)>,
+    }
+
+    #[derive(Default)]
+    struct StageBasisObserver(std::sync::Mutex<StageBasisState>);
+
+    impl Observer for StageBasisObserver {
+        fn stage_start(&self, stage: StageKind) {
+            self.0.lock().unwrap().current = Some(stage);
+        }
+
+        fn murm_load_done(&self, _cached: bool, basis: GateSet, _elapsed: Duration) {
+            let mut state = self.0.lock().unwrap();
+            let stage = state.current.expect("MURM load belongs to a stage");
+            state.loads.push((stage, basis));
+        }
+    }
+
+    #[test]
+    fn auto_basis_is_recomputed_after_decomposition() {
+        let mut input = Circuit::new(3);
+        input.apply(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        let observer = StageBasisObserver::default();
+        let options = Options {
+            level: Level::O2,
+            decompose_ccx: true,
+            superopt: tiny_superopt_bounds(),
+            ..Options::default()
+        };
+
+        let (output, _) = optimize_with(&input, &options, &observer).unwrap();
+        assert!(!output.gate_set().contains(GateKind::Ccx));
+        assert_eq!(
+            observer.0.lock().unwrap().loads,
+            vec![
+                (
+                    StageKind::InputOptimization,
+                    BASE_GATE_SET.union(GateSet::singleton(GateKind::Ccx)),
+                ),
+                (StageKind::PostDecompositionOptimization, BASE_GATE_SET),
+            ]
+        );
+    }
+
+    #[test]
+    fn requested_decomposition_constrains_an_explicit_post_basis() {
+        for kind in [GateKind::Cz, GateKind::Ccx, GateKind::Ccz] {
+            let mut input = Circuit::new(3);
+            match kind {
+                GateKind::Cz => input.apply(Gate::cz {
+                    control: 0,
+                    target: 1,
+                }),
+                GateKind::Ccx => input.apply(Gate::ccx {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                }),
+                GateKind::Ccz => input.apply(Gate::ccz {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                }),
+                _ => unreachable!(),
+            }
+            let observer = StageBasisObserver::default();
+            let options = Options {
+                level: Level::O2,
+                decompose_ccx: matches!(kind, GateKind::Ccx | GateKind::Ccz),
+                decompose_cz: kind == GateKind::Cz,
+                superopt: tiny_superopt_bounds(),
+                superopt_gates: SuperOptGates::Explicit(GateSet::singleton(kind)),
+                ..Options::default()
+            };
+
+            let (output, _) = optimize_with(&input, &options, &observer).unwrap();
+            assert!(!output.gate_set().contains(kind), "{kind:?}");
+            assert_eq!(
+                observer.0.lock().unwrap().loads,
+                vec![(StageKind::InputOptimization, GateSet::singleton(kind))],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_requested_gate_is_still_forbidden_from_the_post_basis() {
+        let mut input = Circuit::new(3);
+        input.apply(Gate::cz {
+            control: 0,
+            target: 1,
+        });
+        let observer = StageBasisObserver::default();
+        let explicit = BASE_GATE_SET.union(GateSet::from_kinds([
+            GateKind::Cz,
+            GateKind::Ccx,
+            GateKind::Ccz,
+        ]));
+        let options = Options {
+            level: Level::O2,
+            decompose_ccx: true,
+            decompose_cz: true,
+            superopt: tiny_superopt_bounds(),
+            superopt_gates: SuperOptGates::Explicit(explicit),
+            ..Options::default()
+        };
+
+        let (output, _) = optimize_with(&input, &options, &observer).unwrap();
+        assert!(output.gate_set().intersection(OPTIONAL_GATE_SET).is_empty());
+        assert_eq!(
+            observer.0.lock().unwrap().loads,
+            vec![
+                (StageKind::InputOptimization, explicit),
+                (StageKind::PostDecompositionOptimization, BASE_GATE_SET),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_pipeline_recomputes_auto_at_every_superopt_boundary() {
+        let mut ccx = Circuit::new(3);
+        ccx.apply(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        let mut cz = Circuit::new(2);
+        cz.apply(Gate::cz {
+            control: 0,
+            target: 1,
+        });
+
+        let cases = [
+            (
+                &ccx,
+                vec![PassName::DecomposeToffoli, PassName::SuperOpt],
+                vec![BASE_GATE_SET],
+            ),
+            (
+                &cz,
+                vec![PassName::DecomposeCz, PassName::SuperOpt],
+                vec![BASE_GATE_SET],
+            ),
+            (
+                &ccx,
+                vec![
+                    PassName::SuperOpt,
+                    PassName::DecomposeToffoli,
+                    PassName::SuperOpt,
+                ],
+                vec![
+                    BASE_GATE_SET.union(GateSet::singleton(GateKind::Ccx)),
+                    BASE_GATE_SET,
+                ],
+            ),
+        ];
+
+        for parallel in [false, true] {
+            for (input, passes, expected) in &cases {
+                let observer = BasisObserver::default();
+                let options = Options {
+                    passes: Some(passes.clone()),
+                    parallel,
+                    superopt: tiny_superopt_bounds(),
+                    ..Options::default()
+                };
+                optimize_with(input, &options, &observer).unwrap();
+                assert_eq!(
+                    *observer.0.lock().unwrap(),
+                    *expected,
+                    "{passes:?}, {parallel}"
+                );
+            }
+        }
+    }
+
+    /// Eight input profiles × (`auto`, `base`, and eight explicit profiles).
+    #[test]
+    fn superopt_selection_matrix_covers_80_end_to_end_cases() {
+        use crate::unitary::circuits_equiv;
+
+        for input_mask in 0u8..8 {
+            let input = native_subset_circuit(input_mask);
+            let mut modes = vec![SuperOptGates::Auto, SuperOptGates::Base];
+            for explicit_mask in 0u8..8 {
+                let optional =
+                    GateSet::from_kinds(OPTIONAL_GATE_KINDS.into_iter().enumerate().filter_map(
+                        |(bit, kind)| (explicit_mask & (1 << bit) != 0).then_some(kind),
+                    ));
+                modes.push(SuperOptGates::Explicit(BASE_GATE_SET.union(optional)));
+            }
+
+            for (mode_index, mode) in modes.into_iter().enumerate() {
+                let expected_basis = mode.effective(input.gate_set());
+                let observer = BasisObserver::default();
+                let options = Options {
+                    level: Level::O2,
+                    superopt: tiny_superopt_bounds(),
+                    superopt_gates: mode,
+                    ..Options::default()
+                };
+                let (output, _) = optimize_with(&input, &options, &observer).unwrap();
+                assert_eq!(
+                    *observer.0.lock().unwrap(),
+                    vec![expected_basis],
+                    "input mask {input_mask:#05b}, mode {mode_index}"
+                );
+
+                // SuperOpt may preserve optional gates already in the input,
+                // or emit ones explicitly enabled by the basis, but cannot
+                // introduce any other optional native kind.
+                let allowed_optional = input
+                    .gate_set()
+                    .union(expected_basis)
+                    .intersection(OPTIONAL_GATE_SET);
+                assert!(
+                    output
+                        .gate_set()
+                        .intersection(OPTIONAL_GATE_SET)
+                        .is_subset(allowed_optional),
+                    "input mask {input_mask:#05b}, mode {mode_index}: {}",
+                    output.gate_set()
+                );
+                assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
+                assert!(
+                    circuits_equiv(&input, &output, 1e-9),
+                    "input mask {input_mask:#05b}, mode {mode_index}"
+                );
+            }
+        }
+    }
+
+    /// Four levels × all eight optional-native input profiles.
+    #[test]
+    fn optimization_level_matrix_covers_32_end_to_end_cases() {
+        use crate::unitary::circuits_equiv;
+
+        for level in [Level::O1, Level::O2, Level::O3, Level::Osuper] {
+            for native_mask in 0u8..8 {
+                let input = native_subset_circuit(native_mask);
+                let options = Options {
+                    level,
+                    superopt: tiny_superopt_bounds(),
+                    ..Options::default()
+                };
+                let (output, _) = optimize(&input, &options).unwrap();
+                assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
+                assert!(
+                    circuits_equiv(&input, &output, 1e-9),
+                    "level {level:?}, native mask {native_mask:#05b}"
+                );
+            }
+        }
+    }
+
+    /// Eight input profiles × auto/base/representative-explicit in parallel.
+    #[test]
+    fn parallel_superopt_matrix_covers_24_end_to_end_cases() {
+        use crate::unitary::circuits_equiv;
+
+        let explicit = SuperOptGates::Explicit(
+            BASE_GATE_SET.union(GateSet::from_kinds([GateKind::Cz, GateKind::Ccz])),
+        );
+        for native_mask in 0u8..8 {
+            let input = native_subset_circuit(native_mask);
+            for mode in [SuperOptGates::Auto, SuperOptGates::Base, explicit.clone()] {
+                let sequential = Options {
+                    level: Level::O2,
+                    superopt: tiny_superopt_bounds(),
+                    superopt_gates: mode.clone(),
+                    ..Options::default()
+                };
+                let parallel = Options {
+                    parallel: true,
+                    ..sequential.clone()
+                };
+                let (seq_output, _) = optimize(&input, &sequential).unwrap();
+                let (par_output, _) = optimize(&input, &parallel).unwrap();
+                assert!(circuits_equiv(&input, &seq_output, 1e-9));
+                assert!(circuits_equiv(&input, &par_output, 1e-9));
+                assert!(
+                    circuits_equiv(&seq_output, &par_output, 1e-9),
+                    "native mask {native_mask:#05b}, mode {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// Bounded deterministic fuzzing: every optional-native input subset and
+    /// every decomposition subset gets a reproducible random circuit, basis,
+    /// and execution mode. Failure messages include the seed for replay.
+    #[test]
+    fn bounded_native_pipeline_fuzz_covers_64_cross_feature_cases() {
+        use crate::pass::Pass;
+        use crate::unitary::circuits_equiv;
+
+        fn next(seed: &mut u64) -> u64 {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            *seed
+        }
+
+        let candidates = [
+            GateKind::H,
+            GateKind::X,
+            GateKind::Z,
+            GateKind::S,
+            GateKind::Sdg,
+            GateKind::T,
+            GateKind::Tdg,
+            GateKind::Cx,
+            GateKind::Cz,
+            GateKind::Ccx,
+            GateKind::Ccz,
+        ];
+
+        for native_mask in 0u8..8 {
+            for decompose_mask in 0u8..8 {
+                let replay_seed =
+                    0x4e41_5449_5645_0000u64 | ((native_mask as u64) << 8) | decompose_mask as u64;
+                let mut seed = replay_seed;
+                let mut input = native_subset_circuit(native_mask);
+                for _ in 0..24 {
+                    let q = (next(&mut seed) % 3) as u32;
+                    match next(&mut seed) % 12 {
+                        0 => input.apply(Gate::h(q)),
+                        1 => input.apply(Gate::x(q)),
+                        2 => input.apply(Gate::z(q)),
+                        3 => input.apply(Gate::s(q)),
+                        4 => input.apply(Gate::sdg(q)),
+                        5 => input.apply(Gate::t(q)),
+                        6 => input.apply(Gate::tdg(q)),
+                        7 => input.apply(Gate::rz((next(&mut seed) % 13 + 1) as f64 / 17.0, q)),
+                        8 => input.apply(Gate::cnot {
+                            control: q,
+                            target: (q + 1) % 3,
+                        }),
+                        9 if native_mask & 1 != 0 => input.apply(Gate::cz {
+                            control: q,
+                            target: (q + 1) % 3,
+                        }),
+                        10 if native_mask & 2 != 0 => input.apply(Gate::ccx {
+                            control1: q,
+                            control2: (q + 1) % 3,
+                            target: (q + 2) % 3,
+                        }),
+                        11 if native_mask & 4 != 0 => input.apply(Gate::ccz {
+                            control1: q,
+                            control2: (q + 1) % 3,
+                            target: (q + 2) % 3,
+                        }),
+                        _ => input.apply(Gate::h(q)),
+                    }
+                }
+
+                let mode = match next(&mut seed) % 3 {
+                    0 => SuperOptGates::Auto,
+                    1 => SuperOptGates::Base,
+                    _ => {
+                        let mask = (next(&mut seed) as u16) & 0x07ff;
+                        let nonempty = if mask == 0 { 1 } else { mask };
+                        SuperOptGates::Explicit(GateSet::from_kinds(
+                            candidates
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(bit, kind)| {
+                                    (nonempty & (1 << bit) != 0).then_some(kind)
+                                }),
+                        ))
+                    }
+                };
+                let options = Options {
+                    level: Level::O2,
+                    decompose_ccx: decompose_mask & 1 != 0,
+                    decompose_cz: decompose_mask & 2 != 0,
+                    decompose_rz: decompose_mask & 4 != 0,
+                    rz_epsilon: 1e-3,
+                    parallel: next(&mut seed) & 1 != 0,
+                    superopt: SuperOptBounds {
+                        qubits: Some(3),
+                        window_gates: Some(4),
+                        murm_entries: Some(128),
+                    },
+                    superopt_gates: mode,
+                    ..Options::default()
+                };
+                let (output, _) = optimize(&input, &options).unwrap();
+                assert!(
+                    circuits_equiv(&input, &output, 2e-2),
+                    "seed {replay_seed:#018x}, native {native_mask:#05b}, decomposition {decompose_mask:#05b}"
+                );
+                assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
+                if options.decompose_ccx {
+                    assert!(!output.gate_set().contains(GateKind::Ccx));
+                    assert!(!output.gate_set().contains(GateKind::Ccz));
+                }
+                if options.decompose_cz {
+                    assert!(!output.gate_set().contains(GateKind::Cz));
+                }
+                if options.decompose_rz {
+                    assert!(!output.gate_set().contains(GateKind::Rz));
+                }
+
+                let once = CancelGates.run(&output);
+                let twice = CancelGates.run(&once);
+                assert_eq!(
+                    once.gates, twice.gates,
+                    "CancelGates not idempotent for seed {replay_seed:#018x}"
+                );
+            }
+        }
+    }
+
+    /// The literal Cartesian product is intentionally manual/nightly: the
+    /// factored tests above cover the same axes cheaply in normal CI.
+    #[test]
+    #[ignore = "extended 5,120-case native-gate matrix"]
+    fn extended_full_native_configuration_matrix_has_5120_cases() {
+        use crate::unitary::circuits_equiv;
+
+        let mut cases = 0usize;
+        for input_mask in 0u8..8 {
+            let input = native_subset_circuit(input_mask);
+            let mut modes = vec![SuperOptGates::Auto, SuperOptGates::Base];
+            for explicit_mask in 0u8..8 {
+                let optional =
+                    GateSet::from_kinds(OPTIONAL_GATE_KINDS.into_iter().enumerate().filter_map(
+                        |(bit, kind)| (explicit_mask & (1 << bit) != 0).then_some(kind),
+                    ));
+                modes.push(SuperOptGates::Explicit(BASE_GATE_SET.union(optional)));
+            }
+            for mode in modes {
+                for decompose_mask in 0u8..8 {
+                    for level in [Level::O1, Level::O2, Level::O3, Level::Osuper] {
+                        for parallel in [false, true] {
+                            let options = Options {
+                                level,
+                                decompose_ccx: decompose_mask & 1 != 0,
+                                decompose_cz: decompose_mask & 2 != 0,
+                                decompose_rz: decompose_mask & 4 != 0,
+                                rz_epsilon: 1e-3,
+                                parallel,
+                                superopt: tiny_superopt_bounds(),
+                                superopt_gates: mode.clone(),
+                                ..Options::default()
+                            };
+                            let (output, _) = optimize(&input, &options).unwrap();
+                            assert!(circuits_equiv(&input, &output, 5e-3));
+                            if options.decompose_ccx {
+                                assert!(!output.gate_set().contains(GateKind::Ccx));
+                                assert!(!output.gate_set().contains(GateKind::Ccz));
+                            }
+                            if options.decompose_cz {
+                                assert!(!output.gate_set().contains(GateKind::Cz));
+                            }
+                            if options.decompose_rz {
+                                assert!(!output.gate_set().contains(GateKind::Rz));
+                            }
+                            cases += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 5_120);
     }
 }

@@ -10,7 +10,9 @@ use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 
 use crate::circuit::Circuit;
-use crate::optimize::{Level, Metrics, Options, PassName, Report, SuperOptBounds, optimize};
+use crate::optimize::{
+    Level, Metrics, Options, PassName, Report, SuperOptBounds, SuperOptGates, optimize,
+};
 
 create_exception!(_native, TzapError, PyException);
 create_exception!(_native, QasmError, TzapError);
@@ -95,11 +97,13 @@ fn positive_bound(value: Option<usize>, name: &str) -> PyResult<Option<usize>> {
     fixpoint = false,
     decompose_rz = false,
     decompose_cz = false,
+    decompose_ccx = false,
     rz_epsilon = crate::optimize::DEFAULT_RZ_EPSILON,
     parallel = false,
     superopt_qubits = None,
     superopt_window_gates = None,
-    superopt_table_entries = None,
+    superopt_murm_entries = None,
+    superopt_gates = "auto",
 ))]
 #[allow(clippy::too_many_arguments)]
 fn _optimize_qasm(
@@ -110,11 +114,13 @@ fn _optimize_qasm(
     fixpoint: bool,
     decompose_rz: bool,
     decompose_cz: bool,
+    decompose_ccx: bool,
     rz_epsilon: f64,
     parallel: bool,
     superopt_qubits: Option<usize>,
     superopt_window_gates: Option<usize>,
-    superopt_table_entries: Option<usize>,
+    superopt_murm_entries: Option<usize>,
+    superopt_gates: &str,
 ) -> PyResult<(String, RawReport)> {
     if !rz_epsilon.is_finite() || rz_epsilon <= 0.0 {
         return Err(PyValueError::new_err(
@@ -123,10 +129,9 @@ fn _optimize_qasm(
     }
 
     let passes = parse_passes(passes)?;
-    if passes.is_some() && (decompose_rz || decompose_cz) {
+    if passes.is_some() && (decompose_rz || decompose_cz || decompose_ccx) {
         return Err(PyValueError::new_err(
-            "passes cannot be combined with decompose_rz or decompose_cz; \
-             include DecomposeRz or DecomposeCz in passes instead",
+            "passes cannot be combined with decomposition options; include the decomposition passes instead",
         ));
     }
 
@@ -136,13 +141,15 @@ fn _optimize_qasm(
         fixpoint,
         decompose_rz,
         decompose_cz,
+        decompose_ccx,
         rz_epsilon,
         parallel,
         superopt: SuperOptBounds {
             qubits: positive_bound(superopt_qubits, "superopt_qubits")?,
             window_gates: positive_bound(superopt_window_gates, "superopt_window_gates")?,
-            table_entries: positive_bound(superopt_table_entries, "superopt_table_entries")?,
+            murm_entries: positive_bound(superopt_murm_entries, "superopt_murm_entries")?,
         },
+        superopt_gates: SuperOptGates::parse(superopt_gates).map_err(PyValueError::new_err)?,
     };
 
     let circuit = Circuit::from_qasm(qasm).map_err(QasmError::new_err)?;

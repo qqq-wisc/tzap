@@ -223,8 +223,8 @@ mod tests {
                 .iter()
                 .any(|g| matches!(g, Gate::ccx { .. } | Gate::ccz { .. }))
         );
-        assert!(!dec.has_toffoli);
-        assert!(!dec.has_ccz);
+        assert!(!dec.has_toffoli());
+        assert!(!dec.has_ccz());
         assert!(circuits_equiv(&c, &dec, 1e-10));
     }
 
@@ -305,7 +305,7 @@ mod tests {
         let dec = DecomposeToffoli.run(&c);
 
         assert_eq!(dec.num_cbits, 1);
-        assert!(dec.has_measurement);
+        assert!(dec.has_measurement());
         assert!(matches!(dec.gates.first(), Some(Gate::reset(0))));
         assert!(matches!(
             dec.gates.last(),
@@ -543,7 +543,7 @@ mod tests {
         c.apply(Gate::measure { qubit: 1, cbit: 0 });
         let dec = DecomposeCz.run(&c);
         assert_eq!(dec.num_cbits, 1);
-        assert!(dec.has_measurement);
+        assert!(dec.has_measurement());
         assert!(matches!(dec.gates[0], Gate::reset(0)));
         assert!(matches!(
             dec.gates.last(),
@@ -674,7 +674,7 @@ mod tests {
                 .any(|g| matches!(g, Gate::measure { qubit: 1, cbit: 0 }))
         );
         assert_eq!(dec.num_cbits, 1);
-        assert!(dec.has_measurement);
+        assert!(dec.has_measurement());
     }
 
     #[test]

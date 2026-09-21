@@ -119,8 +119,10 @@ Common keyword options are:
 | `fixpoint` | `False` | Run `O1` or an explicit pass pipeline until gate count stops decreasing |
 | `decompose_rz` | `False` | Approximate `RZ` operations with Clifford+T |
 | `decompose_cz` | `False` | Lower `CZ` to `Hadamard` + `CNOT` + `Hadamard` |
+| `decompose_ccx` | `False` | Lower both `Toffoli` and `CCZ` to Clifford+T |
 | `rz_epsilon` | `1e-10` | Approximation tolerance used by `decompose_rz` |
 | `parallel` | `False` | Enable the native parallel optimizer |
+| `superopt_gates` | `"auto"` | MURM basis: `auto`, `base`, or an exact comma-separated gate list |
 
 Explicit pass names are the same as the CLI's `--passes` values:
 `DecomposeToffoli`, `DecomposeCz`, `DecomposeRz`, `CancelGates`, `SuperOpt`,
@@ -136,11 +138,11 @@ optimized_qnode = optimize(
 )
 ```
 
-`Toffoli` and `CCZ` are decomposed by the standard optimization levels.
-`decompose_cz` and `decompose_rz` are opt-in.
+`Toffoli`, `CCZ`, `CZ`, and `RZ` remain native by default. Requested
+decompositions run between native and post-decomposition optimization stages.
 
-An explicit `passes` list cannot be combined with `decompose_rz` or
-`decompose_cz`; put the corresponding decomposition pass directly in the list
+An explicit `passes` list cannot be combined with `decompose_rz`,
+`decompose_cz`, or `decompose_ccx`; put the corresponding pass directly in the list
 instead. `O2` always runs two rounds, while `O3` and `Osuper` already run to a
 fixpoint, so `fixpoint` only changes `O1` or an explicit pipeline.
 

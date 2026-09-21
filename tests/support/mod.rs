@@ -9,7 +9,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 /// Every environment variable that can change where tzap looks for its cache.
 /// Cleared on every invocation so a developer's shell — an `XDG_CACHE_HOME`
@@ -92,6 +92,20 @@ impl Tzap {
             }
         };
         Run::from(output)
+    }
+
+    /// Start a command without waiting, for tests of cross-process races.
+    pub fn spawn(mut self) -> Child {
+        assert!(
+            self.stdin.is_none(),
+            "spawn does not support piped test input"
+        );
+        self.command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn tzap")
     }
 }
 

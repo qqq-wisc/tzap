@@ -122,7 +122,7 @@ def test_super_level_spelling_with_small_bounds():
         level="super",
         superopt_qubits=1,
         superopt_window_gates=3,
-        superopt_table_entries=64,
+        superopt_murm_entries=64,
     )
 
     assert result.report.output.gates == 0
@@ -154,7 +154,7 @@ def test_every_public_pass_name_is_accepted(pass_name):
         kwargs = {
             "superopt_qubits": 1,
             "superopt_window_gates": 3,
-            "superopt_table_entries": 64,
+            "superopt_murm_entries": 64,
         }
 
     result = tzap.optimize_qasm(make_qasm("x q[0];"), passes=[pass_name], **kwargs)
@@ -171,23 +171,33 @@ def test_explicit_pipeline_reports_input_as_baseline():
     assert "ccx q[0],q[1],q[2]" in result.qasm
 
 
-def test_default_pipeline_reports_post_toffoli_decomposition_baseline():
+def test_default_pipeline_preserves_native_toffoli_and_baseline():
     circuit = make_qasm("ccx q[0],q[1],q[2];", qubits=3)
 
     result = tzap.optimize_qasm(circuit, level="O1")
 
     assert result.report.input.gates == 1
-    assert result.report.baseline.gates == 15
+    assert result.report.baseline == result.report.input
+    assert "ccx q[0],q[1],q[2]" in result.qasm
+
+
+def test_decompose_ccx_removes_ccx_and_keeps_original_baseline():
+    circuit = make_qasm("ccx q[0],q[1],q[2];", qubits=3)
+
+    result = tzap.optimize_qasm(circuit, level="O1", decompose_ccx=True)
+
+    assert result.report.input.gates == 1
+    assert result.report.baseline == result.report.input
     assert "ccx " not in result.qasm
 
 
-def test_decompose_cz_changes_baseline_and_removes_cz():
+def test_decompose_cz_keeps_original_baseline_and_removes_cz():
     circuit = make_qasm("cz q[0],q[1];", qubits=2)
 
     result = tzap.optimize_qasm(circuit, level="O1", decompose_cz=True)
 
     assert result.report.input.gates == 1
-    assert result.report.baseline.gates == 3
+    assert result.report.baseline == result.report.input
     assert "cz " not in result.qasm
     assert "cx q[0],q[1]" in result.qasm
 
@@ -315,7 +325,7 @@ def test_unknown_pass_lists_available_passes():
         tzap.optimize_qasm(QASM, passes=["NotAPass"])
 
 
-@pytest.mark.parametrize("option", ["decompose_rz", "decompose_cz"])
+@pytest.mark.parametrize("option", ["decompose_rz", "decompose_cz", "decompose_ccx"])
 def test_explicit_passes_reject_conflicting_options(option):
     with pytest.raises(ValueError, match="passes cannot be combined"):
         tzap.optimize_qasm(QASM, passes=["CancelGates"], **{option: True})
@@ -332,12 +342,24 @@ def test_invalid_rz_epsilon_is_rejected(epsilon):
     [
         "superopt_qubits",
         "superopt_window_gates",
-        "superopt_table_entries",
+        "superopt_murm_entries",
     ],
 )
 def test_zero_superopt_bound_is_rejected(option):
     with pytest.raises(ValueError, match=option):
         tzap.optimize_qasm(QASM, level="O1", **{option: 0})
+
+
+@pytest.mark.parametrize("basis", ["", "rz", "h,nope"])
+def test_invalid_superopt_gate_basis_is_rejected(basis):
+    with pytest.raises(ValueError, match="superopt|SuperOpt|basis"):
+        tzap.optimize_qasm(QASM, level="O1", superopt_gates=basis)
+
+
+@pytest.mark.parametrize("basis", ["auto", "base", "h,h,t,cx,cz"])
+def test_superopt_gate_modes_are_accepted(basis):
+    result = tzap.optimize_qasm(QASM, level="O1", superopt_gates=basis)
+    assert result.report.output.gates == 1
 
 
 def test_non_string_qasm_is_rejected_by_binding_type_check():

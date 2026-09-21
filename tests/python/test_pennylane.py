@@ -418,7 +418,7 @@ def test_decompose_cz_option_reaches_native_optimizer():
     assert operation_names(transformed) == ["Hadamard", "CNOT", "Hadamard"]
 
 
-def test_default_pipeline_decomposes_toffoli_and_ccz():
+def test_default_pipeline_preserves_toffoli_and_ccz():
     tape = qml.tape.QuantumScript(
         [
             qml.Toffoli(wires=[0, 1, 2]),
@@ -427,6 +427,24 @@ def test_default_pipeline_decomposes_toffoli_and_ccz():
     )
 
     transformed, _ = transform_tape(tape, level="O1")
+
+    assert operation_names(transformed) == ["Toffoli", "CCZ"]
+
+
+def test_decompose_ccx_option_removes_toffoli_and_ccz():
+    tape = qml.tape.QuantumScript(
+        [
+            qml.Toffoli(wires=[0, 1, 2]),
+            qml.CCZ(wires=[0, 1, 2]),
+        ]
+    )
+
+    transformed, _ = transform_tape(
+        tape,
+        level="O1",
+        decompose_ccx=True,
+        superopt_gates="base",
+    )
 
     assert "Toffoli" not in operation_names(transformed)
     assert "CCZ" not in operation_names(transformed)
@@ -570,7 +588,7 @@ def test_laplacian_filter_matches_native_pipeline():
     assert _operation_signatures(transformed.operations) == _operation_signatures(
         native_operations
     )
-    assert len(transformed.operations) == 26_406
+    assert len(transformed.operations) == 26_402
 
 
 def _operation_signatures(operations):

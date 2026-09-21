@@ -3,7 +3,7 @@
 //! Two windows with the same gate kinds in the same order, acting on the
 //! same *support-local* qubit positions, have the same unitary — regardless
 //! of which physical qubits or circuit positions they sit on. Keying on that
-//! canonical shape lets one matrix construction and one synthesis-table
+//! canonical shape lets one matrix construction and one MURM
 //! probe serve every recurrence of a shape, across the whole circuit and
 //! across runs.
 //!
@@ -18,14 +18,14 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::circuit::{Circuit, Gate, Qubit};
+use crate::circuit::{Circuit, Gate, Qubit, canonical_ccx, canonical_pair, canonical_triple};
 
 use super::SuperOptError;
 use super::matrix::UnitaryMatrix;
-use super::table::UnitaryCircuitTable;
+use super::murm::Murm;
 
 /// Everything the pass knows about one canonical window shape: its unitary,
-/// and the smallest support-local replacement the synthesis table offered
+/// and the smallest support-local replacement the MURM offered
 /// (`None` caches the negative outcome, so misses are never retried).
 #[derive(Clone, Debug)]
 pub(super) struct CachedMatrix {
@@ -38,7 +38,7 @@ pub(super) struct CachedMatrix {
 /// the per-emission hot path never allocates on a cache hit.
 ///
 /// Both key forms use support-local qubit indices and each entry is resolved
-/// against the pass instance's fixed synthesis table, so entries are valid for
+/// against the pass instance's fixed MURM, so entries are valid for
 /// any window with the same shape — including windows in a different circuit.
 /// That is what makes carrying the store across runs of one pass instance
 /// sound (see [`MatrixStore::take_from`]).
@@ -109,7 +109,7 @@ impl MatrixStore {
         circuit: &Circuit,
         gate_indices: &[usize],
         qubits: &[Qubit],
-        table: Option<&UnitaryCircuitTable>,
+        murm: Option<&Murm>,
     ) -> Result<Option<u32>, SuperOptError> {
         let step = match (state, code) {
             (Some(state), Some(code)) => Some((u64::from(state) << 16) | u64::from(code)),
@@ -122,7 +122,7 @@ impl MatrixStore {
             return Ok(Some(next));
         }
 
-        let resolved = self.intern(circuit, gate_indices, qubits, table)?;
+        let resolved = self.intern(circuit, gate_indices, qubits, murm)?;
         if let (Some(step), Some(next)) = (step, resolved) {
             self.transitions.insert(step, next);
         }
@@ -143,7 +143,7 @@ impl MatrixStore {
         circuit: &Circuit,
         gate_indices: &[usize],
         qubits: &[Qubit],
-        table: Option<&UnitaryCircuitTable>,
+        murm: Option<&Murm>,
     ) -> Result<Option<u32>, SuperOptError> {
         let compact =
             compact_normalized_key_into(circuit, gate_indices, qubits, &mut self.scratch_key);
@@ -170,7 +170,7 @@ impl MatrixStore {
                 return Ok(None);
             }
         }
-        let synthesized_replacement = table.and_then(|table| table.synthesize(&matrix));
+        let synthesized_replacement = murm.and_then(|murm| murm.synthesize(&matrix));
         let entry_index = self.entries.len();
         self.entries.push(CachedMatrix {
             synthesized_replacement,
@@ -328,17 +328,26 @@ pub(super) fn gate_code(gate: &Gate) -> Option<GateCode> {
         Gate::t(q) => (5, [*q, 0, 0], 1),
         Gate::tdg(q) => (6, [*q, 0, 0], 1),
         Gate::cnot { control, target } => (7, [*control, *target, 0], 2),
-        Gate::cz { control, target } => (8, [*control, *target, 0], 2),
+        Gate::cz { control, target } => {
+            let (a, b) = canonical_pair(*control, *target);
+            (8, [a, b, 0], 2)
+        }
         Gate::ccx {
             control1,
             control2,
             target,
-        } => (9, [*control1, *control2, *target], 3),
+        } => {
+            let (a, b, target) = canonical_ccx(*control1, *control2, *target);
+            (9, [a, b, target], 3)
+        }
         Gate::ccz {
             control1,
             control2,
             target,
-        } => (10, [*control1, *control2, *target], 3),
+        } => {
+            let (a, b, c) = canonical_triple(*control1, *control2, *target);
+            (10, [a, b, c], 3)
+        }
         Gate::rz(..) => return None,
         Gate::measure { .. } | Gate::reset(_) => {
             unreachable!("measurement and reset are window barriers")
@@ -406,17 +415,28 @@ fn normalized_gate_key(
                 Gate::cnot { control, target } => {
                     NormalizedGate::Cnot(local(*control), local(*target))
                 }
-                Gate::cz { control, target } => NormalizedGate::Cz(local(*control), local(*target)),
+                Gate::cz { control, target } => {
+                    let (a, b) = canonical_pair(local(*control), local(*target));
+                    NormalizedGate::Cz(a, b)
+                }
                 Gate::ccx {
                     control1,
                     control2,
                     target,
-                } => NormalizedGate::Ccx(local(*control1), local(*control2), local(*target)),
+                } => {
+                    let (a, b, target) =
+                        canonical_ccx(local(*control1), local(*control2), local(*target));
+                    NormalizedGate::Ccx(a, b, target)
+                }
                 Gate::ccz {
                     control1,
                     control2,
                     target,
-                } => NormalizedGate::Ccz(local(*control1), local(*control2), local(*target)),
+                } => {
+                    let (a, b, c) =
+                        canonical_triple(local(*control1), local(*control2), local(*target));
+                    NormalizedGate::Ccz(a, b, c)
+                }
                 Gate::measure { .. } | Gate::reset(_) => {
                     unreachable!("measurement and reset are SuperOpt window barriers")
                 }

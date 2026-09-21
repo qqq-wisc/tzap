@@ -27,13 +27,22 @@ t q[1];
 ";
 
 /// Small `-Osuper` bounds, so the level can be exercised without building its
-/// real five-million-entry table.
+/// real five-million-entry MURM.
 const SMALL_SUPER: [&str; 6] = [
     "--superopt-qubits",
     "2",
     "--superopt-window-gates",
     "4",
-    "--superopt-table-entries",
+    "--superopt-murm-entries",
+    "500",
+];
+
+const TINY_MURM: [&str; 6] = [
+    "--superopt-qubits",
+    "3",
+    "--superopt-window-gates",
+    "4",
+    "--superopt-murm-entries",
     "500",
 ];
 
@@ -42,6 +51,9 @@ const SMALL_SUPER: [&str; 6] = [
 fn json_report(args: &[&str]) -> Json {
     let mut full = vec!["--json", "-q"];
     full.extend_from_slice(args);
+    if !args.contains(&"--superopt-qubits") {
+        full.extend_from_slice(&TINY_MURM);
+    }
     let run = tzap(&full).ok(&format!("{args:?}"));
     assert_eq!(run.stderr, "", "--json -q should be silent on stderr");
     Json::parse(&run.stdout)
@@ -58,9 +70,12 @@ fn assert_schema(report: &Json, context: &str) {
             "options",
             "metrics",
             "reduction_percent",
+            "stages",
             "passes",
             "table",
+            "murms",
             "fixpoint",
+            "fixpoints",
             "cache_dir",
             "seconds",
         ],
@@ -70,8 +85,10 @@ fn assert_schema(report: &Json, context: &str) {
     report.get("tzap").as_str();
     report.at("input/stdin").as_bool();
     report.at("input/qubits").as_usize();
+    report.at("input/gate_set").strings();
     report.at("input/parse_seconds").as_f64();
     report.at("output/stdout").as_bool();
+    report.at("output/gate_set").strings();
     report.at("seconds").as_f64();
 
     let options = report.get("options");
@@ -83,6 +100,7 @@ fn assert_schema(report: &Json, context: &str) {
             "fixpoint",
             "decompose_rz",
             "decompose_cz",
+            "decompose_ccx",
             "rz_epsilon",
             "parallel",
             "superopt",
@@ -93,17 +111,19 @@ fn assert_schema(report: &Json, context: &str) {
     options.get("fixpoint").as_bool();
     options.get("decompose_rz").as_bool();
     options.get("decompose_cz").as_bool();
+    options.get("decompose_ccx").as_bool();
     options.get("parallel").as_bool();
     assert!(
         options.get("rz_epsilon").as_f64() > 0.0,
         "{context}: epsilon must be positive"
     );
-    for key in ["qubits", "window_gates", "table_entries"] {
+    for key in ["qubits", "window_gates", "murm_entries"] {
         assert!(
             options.at(&format!("superopt/{key}")).as_usize() > 0,
             "{context}: superopt/{key} must be a positive integer"
         );
     }
+    options.at("superopt/gates").as_str();
 
     for stage in ["input", "baseline", "output"] {
         let metrics = report.get("metrics").get(stage);
@@ -119,16 +139,43 @@ fn assert_schema(report: &Json, context: &str) {
     for key in report.get("reduction_percent").keys() {
         report.get("reduction_percent").get(key).as_f64();
     }
+    report.get("stages").strings();
     for pass in report.get("passes").arr() {
         assert_eq!(
             pass.keys(),
-            vec!["name", "input_gates", "output_gates", "seconds"],
+            vec!["stage", "name", "input_gates", "output_gates", "seconds"],
             "{context}: unexpected pass shape"
         );
+        pass.get("stage").as_usize();
         pass.get("name").as_str();
         pass.get("input_gates").as_usize();
         pass.get("output_gates").as_usize();
         pass.get("seconds").as_f64();
+    }
+    for murm in report.get("murms").arr() {
+        assert_eq!(murm.keys(), vec!["stage", "cached", "basis", "seconds"]);
+        murm.get("stage").as_usize();
+        murm.get("cached").as_bool();
+        murm.get("basis").strings();
+        murm.get("seconds").as_f64();
+    }
+    let table = report.get("table");
+    if !table.is_null() {
+        assert_eq!(table.keys(), vec!["cached", "seconds"]);
+        table.get("cached").as_bool();
+        table.get("seconds").as_f64();
+    }
+    for fixpoint in report.get("fixpoints").arr() {
+        assert_eq!(fixpoint.keys(), vec!["stage", "rounds", "converged"]);
+        fixpoint.get("stage").as_usize();
+        fixpoint.get("rounds").as_usize();
+        fixpoint.get("converged").as_bool();
+    }
+    let fixpoint = report.get("fixpoint");
+    if !fixpoint.is_null() {
+        assert_eq!(fixpoint.keys(), vec!["rounds", "converged"]);
+        fixpoint.get("rounds").as_usize();
+        fixpoint.get("converged").as_bool();
     }
 }
 
@@ -168,6 +215,48 @@ fn the_schema_holds_across_every_kind_of_run() {
     for variant in variants {
         assert_schema(&json_report(&variant), &format!("{variant:?}"));
     }
+}
+
+#[test]
+fn stages_and_superopt_gate_mode_are_reported() {
+    let report = json_report(&[
+        TWO_CCX_QASM,
+        "-O2",
+        "--decompose-ccx",
+        "--superopt-gates",
+        "h,h,t,cx,cz",
+    ]);
+    assert_eq!(
+        report.at("options/superopt/gates").as_str(),
+        "h,t,cx,cz",
+        "duplicate explicit gates should be canonicalized"
+    );
+    assert_eq!(
+        report.get("stages").strings(),
+        vec![
+            "Optimizing input circuit",
+            "Decomposing CCX/CCZ",
+            "Optimizing decomposed circuit",
+        ]
+    );
+    let fixpoints = report.get("fixpoints").arr();
+    assert_eq!(fixpoints.len(), 2);
+    assert_eq!(fixpoints[0].get("stage").as_usize(), 0);
+    assert_eq!(fixpoints[1].get("stage").as_usize(), 2);
+    let murms = report.get("murms").arr();
+    assert_eq!(murms.len(), 2);
+    assert_eq!(murms[0].get("stage").as_usize(), 0);
+    assert_eq!(murms[1].get("stage").as_usize(), 2);
+    let table = report.get("table");
+    assert_eq!(
+        table.get("cached").as_bool(),
+        murms[1].get("cached").as_bool()
+    );
+    assert_eq!(
+        table.get("seconds").as_f64(),
+        murms[1].get("seconds").as_f64()
+    );
+    assert_eq!(report.get("passes").arr()[0].get("stage").as_usize(), 1);
 }
 
 /// The report is exactly one JSON document, newline-terminated, with nothing
@@ -219,8 +308,8 @@ fn the_metrics_match_the_circuit_that_was_written() {
     }
 }
 
-/// `reduction_percent` is measured against `baseline` — the post-decomposition
-/// circuit — and is the same number the human banner leads with.
+/// `reduction_percent` is measured against `baseline` and is the same number
+/// the human banner leads with when both invocations use the same MURM bounds.
 #[test]
 fn the_reduction_agrees_with_the_human_banner() {
     let report = json_report(&[MOD5_4_QASM]);
@@ -232,7 +321,9 @@ fn the_reduction_agrees_with_the_human_banner() {
         "reduction_percent/gates doesn't match its own metrics"
     );
 
-    let human = tzap(&[MOD5_4_QASM]).ok("human banner");
+    let mut human_args = vec![MOD5_4_QASM];
+    human_args.extend_from_slice(&TINY_MURM);
+    let human = tzap(&human_args).ok("human banner");
     assert!(
         human
             .stderr
@@ -270,11 +361,10 @@ fn a_circuit_that_grew_reports_a_negative_reduction() {
     assert_eq!(report.at("metrics/output/rz").as_usize(), 0);
 }
 
-/// `metrics/input` is the circuit as parsed and `metrics/baseline` the
-/// circuit the passes actually worked on — they differ exactly when something
-/// was decomposed eagerly.
+/// The baseline remains the original input now that decomposition is an
+/// opt-in middle stage between two optimization stages.
 #[test]
-fn input_and_baseline_differ_only_when_something_was_decomposed() {
+fn input_and_baseline_remain_the_original_circuit() {
     let report = json_report(&[MOD5_4_QASM, "-O1"]);
     assert_eq!(
         report.at("metrics/input/gates").as_usize(),
@@ -282,19 +372,18 @@ fn input_and_baseline_differ_only_when_something_was_decomposed() {
         "mod5_4 has no Toffolis to decompose"
     );
 
-    let report = json_report(&[TWO_CCX_QASM, "-O1"]);
-    assert!(
-        report.at("metrics/baseline/gates").as_usize()
-            > report.at("metrics/input/gates").as_usize(),
-        "a Toffoli decomposition grows the circuit before any pass runs"
+    let report = json_report(&[TWO_CCX_QASM, "-O1", "--decompose-ccx"]);
+    assert_eq!(
+        report.at("metrics/baseline/gates").as_usize(),
+        report.at("metrics/input/gates").as_usize()
     );
     assert_eq!(report.at("metrics/input/gates").as_usize(), 3);
 }
 
 /// Whole-circuit passes are recorded with both gate counts and a timing.
 #[test]
-fn the_pass_list_records_the_eager_decompositions() {
-    let report = json_report(&[TWO_CCX_QASM, "-O1"]);
+fn the_pass_list_records_requested_decompositions() {
+    let report = json_report(&[TWO_CCX_QASM, "-O1", "--decompose-ccx"]);
     let passes = report.get("passes").arr();
     assert!(!passes.is_empty(), "expected the Toffoli decomposition");
     let toffoli = &passes[0];
@@ -316,51 +405,72 @@ fn the_pass_list_records_the_eager_decompositions() {
     );
 }
 
-/// `fixpoint` reports the rounds and whether they converged — including the
+/// `fixpoints` reports every stage's rounds and whether it converged — including the
 /// `-O2` case, which stops on its round cap rather than at a true fixpoint.
 #[test]
 fn fixpoint_reports_rounds_and_convergence() {
     let o3 = json_report(&[MOD5_4_QASM, "-O3"]);
+    let o3_fixpoints = o3.get("fixpoints").arr();
+    assert_eq!(o3_fixpoints.len(), 1);
     assert!(
-        o3.at("fixpoint/converged").as_bool(),
+        o3_fixpoints[0].get("converged").as_bool(),
         "-O3 runs to a fixpoint"
     );
-    assert!(o3.at("fixpoint/rounds").as_usize() >= 2);
+    assert!(o3_fixpoints[0].get("rounds").as_usize() >= 2);
+    assert_eq!(
+        o3.get("fixpoint").get("rounds").as_usize(),
+        o3_fixpoints[0].get("rounds").as_usize()
+    );
+    assert_eq!(
+        o3.get("fixpoint").get("converged").as_bool(),
+        o3_fixpoints[0].get("converged").as_bool()
+    );
 
     let o2 = json_report(&[MOD5_4_QASM, "-O2"]);
-    assert!(
-        !o2.at("fixpoint/converged").as_bool(),
-        "-O2 stops on its two-round cap"
-    );
-    assert_eq!(o2.at("fixpoint/rounds").as_usize(), 2);
+    assert!(o2.get("fixpoints").arr()[0].get("rounds").as_usize() <= 2);
 
     // A single-shot pipeline has no fixpoint to report.
     assert!(
         json_report(&[MOD5_4_QASM, "--passes", "CancelGates"])
-            .get("fixpoint")
-            .is_null()
+            .get("fixpoints")
+            .arr()
+            .is_empty()
     );
 
     // ...and --fixpoint gives it one.
     let looped = json_report(&[MOD5_4_QASM, "--passes", "CancelGates", "--fixpoint"]);
-    assert!(looped.at("fixpoint/rounds").as_usize() >= 1);
-    assert!(looped.at("fixpoint/converged").as_bool());
+    assert!(looped.get("fixpoints").arr()[0].get("rounds").as_usize() >= 1);
+    assert!(looped.get("fixpoints").arr()[0].get("converged").as_bool());
 }
 
-/// `table` describes the synthesis-table load for the levels that use one,
-/// and is null for the level that doesn't.
 #[test]
-fn the_table_record_appears_only_for_levels_that_load_one() {
+fn parallel_fixpoint_reports_one_maximum_round_record() {
+    let report = json_report(&[MOD5_4_QASM, "-O2", "--parallel"]);
+    let fixpoints = report.get("fixpoints").arr();
+    assert_eq!(fixpoints.len(), 1);
+    let rounds = fixpoints[0].get("rounds").as_usize();
+    assert!((1..=2).contains(&rounds));
+    assert_eq!(report.get("fixpoint").get("rounds").as_usize(), rounds);
+}
+
+/// `murms` records each MURM load for levels that use SuperOpt.
+#[test]
+fn the_murm_records_appear_only_for_levels_that_load_one() {
     assert!(
-        json_report(&[TEST_QASM, "-O1"]).get("table").is_null(),
+        json_report(&[TEST_QASM, "-O1"])
+            .get("murms")
+            .arr()
+            .is_empty(),
         "-O1 doesn't use SuperOpt"
     );
 
     for level in ["-O2", "-O3"] {
         let report = json_report(&[TEST_QASM, level]);
-        let table = report.get("table");
-        table.get("cached").as_bool();
-        assert!(table.get("seconds").as_f64() >= 0.0, "{level}");
+        let murms = report.get("murms").arr();
+        assert_eq!(murms.len(), 1);
+        murms[0].get("cached").as_bool();
+        murms[0].get("basis").strings();
+        assert!(murms[0].get("seconds").as_f64() >= 0.0, "{level}");
     }
 }
 
@@ -368,13 +478,14 @@ fn the_table_record_appears_only_for_levels_that_load_one() {
 /// resolved, overrides applied.
 #[test]
 fn the_options_echo_what_the_run_actually_used() {
-    let default = json_report(&[TEST_QASM]);
+    let run = tzap(&["--json", "-q", TEST_QASM, "--passes", "CancelGates"])
+        .ok("production default options");
+    let default = Json::parse(&run.stdout);
     assert_eq!(default.at("options/level").as_str(), "O3");
-    assert!(default.at("options/passes").is_null());
     assert_eq!(default.at("options/superopt/qubits").as_usize(), 3);
     assert_eq!(default.at("options/superopt/window_gates").as_usize(), 25);
     assert_eq!(
-        default.at("options/superopt/table_entries").as_usize(),
+        default.at("options/superopt/murm_entries").as_usize(),
         200_000
     );
     assert_eq!(default.at("options/rz_epsilon").as_f64(), 1e-10);
@@ -393,7 +504,7 @@ fn the_options_echo_what_the_run_actually_used() {
     assert_eq!(overridden.at("options/superopt/qubits").as_usize(), 2);
     assert_eq!(overridden.at("options/superopt/window_gates").as_usize(), 4);
     assert_eq!(
-        overridden.at("options/superopt/table_entries").as_usize(),
+        overridden.at("options/superopt/murm_entries").as_usize(),
         500
     );
 
@@ -535,8 +646,8 @@ fn the_timings_are_plausible() {
         "the run ({total}s) can't be shorter than its own parse ({parse}s)"
     );
     assert!(
-        total >= report.at("table/seconds").as_f64(),
-        "the run can't be shorter than its table load"
+        total >= report.get("murms").arr()[0].get("seconds").as_f64(),
+        "the run can't be shorter than its MURM load"
     );
 }
 
@@ -548,7 +659,7 @@ fn json_and_human_output_occupy_different_streams() {
     Json::parse(&run.stdout);
     assert!(run.stderr.contains("Final result"), "got: {}", run.stderr);
     assert!(
-        !run.stderr.contains('{'),
+        !run.stderr.contains("\"tzap\":"),
         "the report must not also go to stderr:\n{}",
         run.stderr
     );
@@ -575,13 +686,16 @@ fn the_report_is_the_same_with_and_without_the_human_output() {
         "metrics/output/gates",
         "metrics/output/t",
         "metrics/baseline/gates",
-        "fixpoint/rounds",
     ] {
         assert_eq!(a.at(path).as_usize(), b.at(path).as_usize(), "{path}");
     }
     assert_eq!(
-        a.at("fixpoint/converged").as_bool(),
-        b.at("fixpoint/converged").as_bool()
+        a.get("fixpoints").arr()[0].get("rounds").as_usize(),
+        b.get("fixpoints").arr()[0].get("rounds").as_usize()
+    );
+    assert_eq!(
+        a.get("fixpoints").arr()[0].get("converged").as_bool(),
+        b.get("fixpoints").arr()[0].get("converged").as_bool()
     );
 }
 

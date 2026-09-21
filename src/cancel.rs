@@ -1,6 +1,8 @@
 //! The `CancelGates` pass: removes adjacent self-inverse gate pairs.
 
-use crate::circuit::{Circuit, Gate, Qubit, qubit_operands};
+use crate::circuit::{
+    Circuit, Gate, Qubit, canonical_ccx, canonical_pair, canonical_triple, qubit_operands,
+};
 use crate::pass::Pass;
 use crate::phase_fold_rand::classify_quarter_pi;
 
@@ -191,7 +193,7 @@ fn gates_equal(a: &Gate, b: &Gate) -> bool {
                 control: bc,
                 target: bt,
             },
-        ) => (ac == bc && at == bt) || (ac == bt && at == bc),
+        ) => canonical_pair(*ac, *at) == canonical_pair(*bc, *bt),
         (
             Gate::ccx {
                 control1: a1,
@@ -203,7 +205,7 @@ fn gates_equal(a: &Gate, b: &Gate) -> bool {
                 control2: b2,
                 target: bt,
             },
-        ) => a1 == b1 && a2 == b2 && at == bt,
+        ) => canonical_ccx(*a1, *a2, *at) == canonical_ccx(*b1, *b2, *bt),
         (
             Gate::ccz {
                 control1: a1,
@@ -215,13 +217,7 @@ fn gates_equal(a: &Gate, b: &Gate) -> bool {
                 control2: b2,
                 target: b3,
             },
-        ) => {
-            let mut a = [*a1, *a2, *a3];
-            let mut b = [*b1, *b2, *b3];
-            a.sort_unstable();
-            b.sort_unstable();
-            a == b
-        }
+        ) => canonical_triple(*a1, *a2, *a3) == canonical_triple(*b1, *b2, *b3),
         _ => false,
     }
 }
@@ -403,20 +399,42 @@ fn reduce_hadamards_pass(gates: &[Gate], scratch: &mut Scratch) -> Option<Vec<Ga
 enum CommutingPair {
     Cnot(Qubit, Qubit),
     Cz(Qubit, Qubit),
+    Ccx(Qubit, Qubit, Qubit),
+    Ccz(Qubit, Qubit, Qubit),
 }
 
 impl CommutingPair {
     fn from_gate(gate: &Gate) -> Option<Self> {
         match gate {
             Gate::cnot { control, target } => Some(Self::Cnot(*control, *target)),
-            Gate::cz { control, target } => Some(Self::Cz(*control, *target)),
+            Gate::cz { control, target } => {
+                let (a, b) = canonical_pair(*control, *target);
+                Some(Self::Cz(a, b))
+            }
+            Gate::ccx {
+                control1,
+                control2,
+                target,
+            } => {
+                let (a, b, target) = canonical_ccx(*control1, *control2, *target);
+                Some(Self::Ccx(a, b, target))
+            }
+            Gate::ccz {
+                control1,
+                control2,
+                target,
+            } => {
+                let (a, b, c) = canonical_triple(*control1, *control2, *target);
+                Some(Self::Ccz(a, b, c))
+            }
             _ => None,
         }
     }
 
-    fn operands(self) -> (Qubit, Qubit) {
+    fn operands(self) -> (usize, [Qubit; 3]) {
         match self {
-            Self::Cnot(a, b) | Self::Cz(a, b) => (a, b),
+            Self::Cnot(a, b) | Self::Cz(a, b) => (2, [a, b, 0]),
+            Self::Ccx(a, b, c) | Self::Ccz(a, b, c) => (3, [a, b, c]),
         }
     }
 
@@ -426,7 +444,17 @@ impl CommutingPair {
                 matches!(gate, Gate::cnot { control, target } if *control == c && *target == t)
             }
             Self::Cz(a, b) => matches!(gate, Gate::cz { control, target }
-                if (*control == a && *target == b) || (*control == b && *target == a)),
+                if canonical_pair(*control, *target) == (a, b)),
+            Self::Ccx(a, b, t) => matches!(gate, Gate::ccx { control1, control2, target }
+                if canonical_ccx(*control1, *control2, *target) == (a, b, t)),
+            Self::Ccz(a, b, c) => match gate {
+                Gate::ccz {
+                    control1,
+                    control2,
+                    target,
+                } => canonical_triple(*control1, *control2, *target) == (a, b, c),
+                _ => false,
+            },
         }
     }
 
@@ -434,6 +462,8 @@ impl CommutingPair {
         match self {
             Self::Cnot(c, t) => commutes_past_cnot(gate, c, t),
             Self::Cz(a, b) => commutes_past_cz(gate, a, b),
+            Self::Ccx(a, b, t) => commutes_past_ccx(gate, a, b, t),
+            Self::Ccz(a, b, c) => commutes_past_ccz(gate, a, b, c),
         }
     }
 }
@@ -467,34 +497,28 @@ fn cancel_commuting_pairs_pass(gates: &[Gate], scratch: &mut Scratch) -> Option<
             Some(pair) => pair,
             _ => continue,
         };
-        let (a, b) = pair.operands();
-        let (a, b) = (a as usize, b as usize);
-
-        let pa_start = tracks[a]
-            .binary_search(&i)
-            .expect("gate missing from first track");
-        let pb_start = tracks[b]
-            .binary_search(&i)
-            .expect("gate missing from second track");
-
-        let mut pa = pa_start + 1;
-        let mut pb = pb_start + 1;
+        let (arity, operands) = pair.operands();
+        let mut cursors = [0usize; 3];
+        for operand in 0..arity {
+            let track = &tracks[operands[operand] as usize];
+            cursors[operand] = track
+                .binary_search(&i)
+                .expect("gate missing from operand track")
+                + 1;
+        }
         let mut cancel_at: Option<usize> = None;
 
         loop {
-            while pa < tracks[a].len() && delete[tracks[a][pa]] == stamp {
-                pa += 1;
+            let mut next = [None; 3];
+            for operand in 0..arity {
+                let track = &tracks[operands[operand] as usize];
+                while cursors[operand] < track.len() && delete[track[cursors[operand]]] == stamp {
+                    cursors[operand] += 1;
+                }
+                next[operand] = track.get(cursors[operand]).copied();
             }
-            while pb < tracks[b].len() && delete[tracks[b][pb]] == stamp {
-                pb += 1;
-            }
-            let na_idx = tracks[a].get(pa).copied();
-            let nb_idx = tracks[b].get(pb).copied();
-            let j = match (na_idx, nb_idx) {
-                (None, None) => break,
-                (Some(a), None) => a,
-                (None, Some(b)) => b,
-                (Some(a), Some(b)) => a.min(b),
+            let Some(j) = next[..arity].iter().flatten().copied().min() else {
+                break;
             };
 
             if pair.matches(&gates[j]) {
@@ -504,11 +528,10 @@ fn cancel_commuting_pairs_pass(gates: &[Gate], scratch: &mut Scratch) -> Option<
             if !pair.commutes_with(&gates[j]) {
                 break;
             }
-            if na_idx == Some(j) {
-                pa += 1;
-            }
-            if nb_idx == Some(j) {
-                pb += 1;
+            for operand in 0..arity {
+                if next[operand] == Some(j) {
+                    cursors[operand] += 1;
+                }
             }
         }
 
@@ -598,6 +621,54 @@ fn commutes_past_cz(g: &Gate, a: Qubit, b: Qubit) -> bool {
     }
 }
 
+/// True when `g` commutes with CCX(a, b, t). These rules follow the
+/// classical dependency graph: neither operation may modify the other's
+/// controls. Diagonal gates commute only on CCX controls, and X commutes on
+/// the CCX target.
+fn commutes_past_ccx(g: &Gate, a: Qubit, b: Qubit, t: Qubit) -> bool {
+    let touched = |q| q == a || q == b || q == t;
+    match g {
+        Gate::x(q) => *q == t || !touched(*q),
+        Gate::h(q) => !touched(*q),
+        Gate::s(q) | Gate::sdg(q) | Gate::z(q) | Gate::t(q) | Gate::tdg(q) | Gate::rz(_, q) => {
+            *q != t
+        }
+        Gate::cnot { control, target } => *target != a && *target != b && *control != t,
+        Gate::cz { control, target } => *control != t && *target != t,
+        Gate::ccx {
+            control1,
+            control2,
+            target,
+        } => *target != a && *target != b && *control1 != t && *control2 != t,
+        Gate::ccz {
+            control1,
+            control2,
+            target,
+        } => ![*control1, *control2, *target].contains(&t),
+        Gate::measure { qubit, .. } => !touched(*qubit),
+        Gate::reset(q) => !touched(*q),
+    }
+}
+
+/// True when `g` commutes with the diagonal CCZ on `{a,b,c}`.
+fn commutes_past_ccz(g: &Gate, a: Qubit, b: Qubit, c: Qubit) -> bool {
+    let touched = |q| q == a || q == b || q == c;
+    match g {
+        Gate::x(q) | Gate::h(q) => !touched(*q),
+        Gate::s(_)
+        | Gate::sdg(_)
+        | Gate::z(_)
+        | Gate::t(_)
+        | Gate::tdg(_)
+        | Gate::rz(..)
+        | Gate::cz { .. }
+        | Gate::ccz { .. } => true,
+        Gate::cnot { target, .. } | Gate::ccx { target, .. } => !touched(*target),
+        Gate::measure { qubit, .. } => !touched(*qubit),
+        Gate::reset(q) => !touched(*q),
+    }
+}
+
 /// Removes adjacent self-inverse gate pairs (HH, XX, CNOT-CNOT, etc.),
 /// commuting gates past non-overlapping operands to expose more pairs.
 pub struct CancelGates;
@@ -628,19 +699,11 @@ impl Pass for CancelGates {
                 break;
             }
         }
-        let has_toffoli = gates.iter().any(|g| matches!(g, Gate::ccx { .. }));
-        let has_ccz = gates.iter().any(|g| matches!(g, Gate::ccz { .. }));
-        let has_measurement = gates
-            .iter()
-            .any(|g| matches!(g, Gate::measure { .. } | Gate::reset(_)));
-        Circuit {
-            num_qubits: circuit.num_qubits,
-            num_cbits: circuit.num_cbits,
-            gates,
-            has_toffoli,
-            has_ccz,
-            has_measurement,
+        let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+        for gate in gates {
+            output.apply(gate);
         }
+        output
     }
 }
 
@@ -1298,8 +1361,8 @@ mod tests {
         let r = CancelGates.run(&c);
 
         assert!(r.gates.is_empty());
-        assert!(!r.has_toffoli);
-        assert!(!r.has_ccz);
+        assert!(!r.has_toffoli());
+        assert!(!r.has_ccz());
         assert!(circuits_equiv(&c, &r, 1e-10));
     }
 
@@ -1326,7 +1389,7 @@ mod tests {
             let r = CancelGates.run(&c);
 
             assert_eq!(r.gates.len(), 3, "blocker q{blocker}");
-            assert!(r.has_ccz, "blocker q{blocker}");
+            assert!(r.has_ccz(), "blocker q{blocker}");
             assert!(circuits_equiv(&c, &r, 1e-10), "blocker q{blocker}");
         }
     }
@@ -1353,7 +1416,7 @@ mod tests {
         let r = CancelGates.run(&c);
 
         assert!(matches!(r.gates.as_slice(), [Gate::t(3)]));
-        assert!(!r.has_ccz);
+        assert!(!r.has_ccz());
         assert!(circuits_equiv(&c, &r, 1e-10));
     }
 
@@ -2118,7 +2181,7 @@ mod tests {
         );
         let r = CancelGates.run(&c);
         assert_eq!(r.gates.len(), 1);
-        assert!(r.has_toffoli);
+        assert!(r.has_toffoli());
         assert!(circuits_equiv(&c, &r, 1e-10));
     }
 
@@ -2141,7 +2204,7 @@ mod tests {
         );
         let r = CancelGates.run(&c);
         assert_eq!(r.gates.len(), 0);
-        assert!(!r.has_toffoli);
+        assert!(!r.has_toffoli());
         assert!(circuits_equiv(&c, &r, 1e-10));
     }
 
@@ -2321,7 +2384,7 @@ mod tests {
         );
         let r = CancelGates.run(&c);
         assert_eq!(r.gates.len(), 3);
-        assert!(r.has_measurement);
+        assert!(r.has_measurement());
         assert_eq!(r.num_cbits, 1);
     }
 
@@ -2330,7 +2393,7 @@ mod tests {
         let c = make_circuit(1, vec![Gate::h(0), Gate::reset(0), Gate::h(0)]);
         let r = CancelGates.run(&c);
         assert_eq!(r.gates.len(), 3);
-        assert!(r.has_measurement);
+        assert!(r.has_measurement());
     }
 
     #[test]
@@ -2872,7 +2935,7 @@ mod tests {
         });
         let r = CancelGates.run(&c);
         assert_eq!(r.gates.len(), 3);
-        assert!(r.has_measurement);
+        assert!(r.has_measurement());
     }
 
     #[test]
@@ -2893,7 +2956,7 @@ mod tests {
         );
         let r = CancelGates.run(&c);
         assert_eq!(r.gates.len(), 3);
-        assert!(r.has_measurement);
+        assert!(r.has_measurement());
     }
 
     #[test]
@@ -2996,7 +3059,7 @@ mod tests {
             r.gates.as_slice(),
             [Gate::measure { qubit: 2, cbit: 0 }]
         ));
-        assert!(r.has_measurement);
+        assert!(r.has_measurement());
         assert_eq!(r.num_cbits, 1);
     }
 
@@ -3018,7 +3081,7 @@ mod tests {
         );
         let r = CancelGates.run(&c);
         assert!(matches!(r.gates.as_slice(), [Gate::reset(2)]));
-        assert!(r.has_measurement);
+        assert!(r.has_measurement());
     }
 
     #[test]
@@ -3113,5 +3176,146 @@ mod tests {
         let twice = CancelGates.run(&once);
         assert_eq!(once.to_qasm(), twice.to_qasm());
         assert!(circuits_equiv(&c, &twice, 1e-10));
+    }
+
+    #[test]
+    fn ccx_swapped_controls_cancel_across_commuting_control_phase() {
+        let c = make_circuit(
+            3,
+            vec![
+                Gate::ccx {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                },
+                Gate::t(0),
+                Gate::ccx {
+                    control1: 1,
+                    control2: 0,
+                    target: 2,
+                },
+            ],
+        );
+        let result = CancelGates.run(&c);
+        assert_eq!(result.gates, vec![Gate::t(0)]);
+        assert!(circuits_equiv(&c, &result, 1e-10));
+    }
+
+    #[test]
+    fn ccx_lookahead_is_blocked_by_a_target_phase() {
+        let c = make_circuit(
+            3,
+            vec![
+                Gate::ccx {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                },
+                Gate::t(2),
+                Gate::ccx {
+                    control1: 1,
+                    control2: 0,
+                    target: 2,
+                },
+            ],
+        );
+        assert_eq!(CancelGates.run(&c).gates.len(), 3);
+    }
+
+    #[test]
+    fn ccz_lookahead_cancels_across_diagonal_gates() {
+        let c = make_circuit(
+            3,
+            vec![
+                Gate::ccz {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                },
+                Gate::rz(0.37, 1),
+                Gate::ccz {
+                    control1: 2,
+                    control2: 0,
+                    target: 1,
+                },
+            ],
+        );
+        let result = CancelGates.run(&c);
+        assert_eq!(result.gates, vec![Gate::rz(0.37, 1)]);
+        assert!(circuits_equiv(&c, &result, 1e-10));
+    }
+
+    #[test]
+    fn every_positive_ccx_and_ccz_commutation_rule_is_unitary_sound() {
+        let mut candidates = Vec::new();
+        for q in 0..4 {
+            candidates.extend([
+                Gate::x(q),
+                Gate::h(q),
+                Gate::s(q),
+                Gate::sdg(q),
+                Gate::z(q),
+                Gate::t(q),
+                Gate::tdg(q),
+                Gate::rz(0.37, q),
+            ]);
+        }
+        for a in 0..4 {
+            for b in 0..4 {
+                if a == b {
+                    continue;
+                }
+                candidates.push(Gate::cnot {
+                    control: a,
+                    target: b,
+                });
+                candidates.push(Gate::cz {
+                    control: a,
+                    target: b,
+                });
+                for c in 0..4 {
+                    if c == a || c == b {
+                        continue;
+                    }
+                    candidates.push(Gate::ccx {
+                        control1: a,
+                        control2: b,
+                        target: c,
+                    });
+                    candidates.push(Gate::ccz {
+                        control1: a,
+                        control2: b,
+                        target: c,
+                    });
+                }
+            }
+        }
+
+        let ccx = Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        };
+        let ccz = Gate::ccz {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        };
+        for gate in candidates {
+            for (native, commutes) in [
+                (&ccx, commutes_past_ccx(&gate, 0, 1, 2)),
+                (&ccz, commutes_past_ccz(&gate, 0, 1, 2)),
+            ] {
+                if !commutes {
+                    continue;
+                }
+                let left = make_circuit(4, vec![native.clone(), gate.clone()]);
+                let right = make_circuit(4, vec![gate.clone(), native.clone()]);
+                assert!(
+                    circuits_equiv(&left, &right, 1e-10),
+                    "unsound commutation: {native:?} across {gate:?}"
+                );
+            }
+        }
     }
 }

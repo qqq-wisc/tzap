@@ -2,10 +2,10 @@
 //!
 //! The pass makes one forward scan over the circuit, carves out small
 //! *windows* — causally connected groups of gates on a few qubits — computes
-//! each window's unitary matrix, and asks a precomputed synthesis table
-//! (`table.rs`) whether the same unitary is reachable with fewer gates. Where
+//! each window's unitary matrix, and asks a precomputed minimal unitary
+//! representative map (MURM) whether the same unitary is reachable with fewer gates. Where
 //! it is, the window is replaced. Because replacement is by matrix
-//! equivalence rather than by syntactic rule, any identity the table can
+//! equivalence rather than by syntactic rule, any identity the MURM can
 //! express is discovered without ever being written down.
 //!
 //! # Windows
@@ -44,9 +44,9 @@
 //!
 //! Three layers keep repeated work off the hot path:
 //!
-//! 1. The synthesis table is built once per configuration and shared
-//!    process-wide (`table::shared_synthesis_table`), and persisted to disk
-//!    (under `~/.tzap/superopt-tables/`, one file per distinct config) so
+//! 1. The MURM is built once per configuration and shared process-wide
+//!    (`murm::shared_murm`), and persisted to disk
+//!    (under the `murm/` cache subdirectory, one file per distinct config) so
 //!    later processes load it instead of rebuilding it.
 //! 2. The matrix store (`MatrixStore`) interns each canonical window shape
 //!    with its matrix and synthesis outcome — including the negative one —
@@ -65,7 +65,7 @@ use std::sync::Arc;
 
 use smallvec::{SmallVec, smallvec};
 
-use crate::circuit::{Circuit, Gate, Qubit};
+use crate::circuit::{Circuit, Gate, GateKind, GateSet, Qubit};
 use crate::pass::Pass;
 
 /// Inline storage for a window's qubit support (bounded by `max_qubits`, at most
@@ -79,35 +79,55 @@ mod error;
 mod incremental;
 mod matrix;
 mod matrix_cache;
+mod murm;
 mod synthesis_arena;
-mod table;
 
-pub use config::SuperOptTableConfig;
+pub use config::MurmConfig;
 pub use error::SuperOptError;
+
+/// Ordinary SuperOpt synthesis library.
+pub const BASE_GATE_SET: GateSet = GateSet::from_bits_const(
+    (1 << GateKind::H as u8)
+        | (1 << GateKind::X as u8)
+        | (1 << GateKind::Z as u8)
+        | (1 << GateKind::S as u8)
+        | (1 << GateKind::Sdg as u8)
+        | (1 << GateKind::T as u8)
+        | (1 << GateKind::Tdg as u8)
+        | (1 << GateKind::Cx as u8),
+);
+
+/// Native controlled gates SuperOpt may add to its base library.
+pub const OPTIONAL_GATE_KINDS: [GateKind; 3] = [GateKind::Cz, GateKind::Ccx, GateKind::Ccz];
+pub const OPTIONAL_GATE_SET: GateSet = GateSet::from_bits_const(
+    (1 << GateKind::Cz as u8) | (1 << GateKind::Ccx as u8) | (1 << GateKind::Ccz as u8),
+);
+pub const SUPPORTED_GATE_SET: GateSet =
+    GateSet::from_bits_const(BASE_GATE_SET.bits() | OPTIONAL_GATE_SET.bits());
 
 use matrix::UnitaryMatrix;
 #[cfg(test)]
 use matrix_cache::compact_normalized_key;
 use matrix_cache::{CachedMatrix, GateCode, MatrixStore, gate_code};
-use table::{UnitaryCircuitTable, shared_synthesis_table};
+use murm::{Murm, shared_murm};
 
-/// Whether a synthesis table matching `config` is already cached on disk —
+/// Whether a MURM matching `config` is already cached on disk —
 /// a hint for callers wanting to report whether the next `SuperOpt::new`
 /// call will be a fast cache load or a fresh, slow build. Purely
 /// informational: `SuperOpt::new` re-validates independently, so this is
 /// never load-bearing for correctness.
-pub fn table_is_cached(config: SuperOptTableConfig) -> bool {
-    table::disk_cache_exists(config)
+pub fn murm_is_cached(config: MurmConfig) -> bool {
+    murm::disk_cache_exists(config)
 }
 
-/// Size in bytes of the on-disk synthesis-table cache for `config`, if one
-/// exists — a reporting aid alongside `table_is_cached`, never load-bearing
+/// Size in bytes of the on-disk MURM cache for `config`, if one
+/// exists — a reporting aid alongside `murm_is_cached`, never load-bearing
 /// for correctness.
-pub fn table_cache_size_bytes(config: SuperOptTableConfig) -> Option<u64> {
-    table::disk_cache_size_bytes(config)
+pub fn murm_cache_size_bytes(config: MurmConfig) -> Option<u64> {
+    murm::disk_cache_size_bytes(config)
 }
 
-/// One synthesis table cached on disk: where it lives and how big it is.
+/// One MURM cached on disk: where it lives and how big it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheEntry {
     pub path: std::path::PathBuf,
@@ -117,10 +137,10 @@ pub struct CacheEntry {
 /// Point tzap's on-disk caches at `dir` for the rest of the process,
 /// overriding `$TZAP_CACHE_DIR` and the XDG lookup. Returns `Err` with the
 /// root already in force if one was installed earlier: this must be called
-/// once, before any table is built or loaded, or a single run could read
-/// half its tables from one directory and half from another.
+/// once, before any MURM is built or loaded, or a single run could read
+/// half its MURMs from one directory and half from another.
 pub fn set_cache_dir(dir: std::path::PathBuf) -> Result<(), std::path::PathBuf> {
-    table::set_cache_root(dir)
+    murm::set_cache_root(dir)
 }
 
 /// The cache root currently in force — `--cache-dir`, `$TZAP_CACHE_DIR`,
@@ -128,15 +148,15 @@ pub fn set_cache_dir(dir: std::path::PathBuf) -> Result<(), std::path::PathBuf> 
 /// `%USERPROFILE%\.cache\tzap`, in that order. `None` when none of them
 /// resolve, in which case tzap simply doesn't cache to disk.
 pub fn cache_dir() -> Option<std::path::PathBuf> {
-    table::cache_root()
+    murm::cache_root()
 }
 
-/// The synthesis tables currently cached on disk, oldest name first. An
+/// The MURMs currently cached on disk, oldest name first. An
 /// unreadable or absent cache directory reads as empty rather than as an
 /// error: a cache nobody can list is, for every purpose tzap has, a cache
 /// with nothing in it.
 pub fn cache_entries() -> Vec<CacheEntry> {
-    let Some(dir) = table::cache_dir() else {
+    let Some(dir) = murm::cache_dir() else {
         return Vec::new();
     };
     let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -157,8 +177,8 @@ pub fn cache_entries() -> Vec<CacheEntry> {
     entries
 }
 
-/// Delete every cached synthesis table, returning the entries removed.
-/// Only the table files themselves are touched — never the directory, and
+/// Delete every cached MURM, returning the entries removed.
+/// Only the MURM files themselves are touched — never the directory, and
 /// never anything else inside it — so a cache root shared with other tools
 /// (`$XDG_CACHE_HOME/tzap`, say) can't lose data that isn't tzap's to
 /// delete. The first failure stops the walk and is returned, with the
@@ -217,7 +237,7 @@ pub struct SuperOpt {
     pub window_gates: usize,
     collect_subcircuits: bool,
     incremental: bool,
-    synthesis_table: Option<Arc<UnitaryCircuitTable>>,
+    murm: Option<Arc<Murm>>,
     /// Matrix cache carried across runs of this pass instance (and its
     /// clones), so repeated fixpoint sweeps skip re-deriving recurring window
     /// shapes. Reuse returns exactly what a cold run would recompute; see
@@ -389,34 +409,33 @@ impl WindowArena {
 }
 
 impl SuperOpt {
-    /// An optimizing pass: windows are checked against a synthesis table
-    /// (built on first use per `table_config`, then shared process-wide) and
+    /// An optimizing pass: windows are checked against a MURM
+    /// (built on first use per `murm_config`, then shared process-wide) and
     /// rewritten when a smaller equivalent exists.
     pub fn new(
         max_qubits: usize,
         window_gates: usize,
-        table_config: SuperOptTableConfig,
+        murm_config: MurmConfig,
     ) -> Result<Self, SuperOptError> {
-        Ok(Self::analyzer(max_qubits, window_gates)
-            .with_synthesis_table(shared_synthesis_table(table_config)?))
+        Ok(Self::analyzer(max_qubits, window_gates).with_murm(shared_murm(murm_config)?))
     }
 
     /// An analysis-only instance: windows and their matrices are reported in
-    /// `result.subcircuits`, but with no synthesis table nothing is rewritten.
+    /// `result.subcircuits`, but with no MURM nothing is rewritten.
     pub fn analyzer(max_qubits: usize, window_gates: usize) -> Self {
         Self {
             max_qubits,
             window_gates,
             collect_subcircuits: true,
             incremental: false,
-            synthesis_table: None,
+            murm: None,
             store: Rc::default(),
             prev_input: Rc::default(),
         }
     }
 
-    fn with_synthesis_table(mut self, table: Arc<UnitaryCircuitTable>) -> Self {
-        self.synthesis_table = Some(table);
+    fn with_murm(mut self, murm: Arc<Murm>) -> Self {
+        self.murm = Some(murm);
         self
     }
 
@@ -673,7 +692,7 @@ impl SuperOpt {
             circuit,
             &window.gate_indices,
             &window.qubits,
-            self.synthesis_table.as_deref(),
+            self.murm.as_deref(),
         )?;
         window.state = resolved;
         let Some(entry_index) = resolved else {

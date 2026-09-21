@@ -164,11 +164,13 @@ class TzapPass(TransformationPass):
         fixpoint: bool = False,
         decompose_rz: bool = False,
         decompose_cz: bool = False,
+        decompose_ccx: bool = False,
         rz_epsilon: float = 1e-10,
         parallel: bool = False,
         superopt_qubits: int | None = None,
         superopt_window_gates: int | None = None,
-        superopt_table_entries: int | None = None,
+        superopt_murm_entries: int | None = None,
+        superopt_gates: str = "auto",
     ) -> None:
         super().__init__()
         self._options: dict[str, Any] = {
@@ -177,11 +179,13 @@ class TzapPass(TransformationPass):
             "fixpoint": fixpoint,
             "decompose_rz": decompose_rz,
             "decompose_cz": decompose_cz,
+            "decompose_ccx": decompose_ccx,
             "rz_epsilon": rz_epsilon,
             "parallel": parallel,
             "superopt_qubits": superopt_qubits,
             "superopt_window_gates": superopt_window_gates,
-            "superopt_table_entries": superopt_table_entries,
+            "superopt_murm_entries": superopt_murm_entries,
+            "superopt_gates": superopt_gates,
         }
 
     def run(self, dag: DAGCircuit) -> DAGCircuit:

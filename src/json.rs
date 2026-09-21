@@ -13,6 +13,7 @@
 //! `seconds` as a JSON number; every count is an integer; a value that
 //! doesn't apply to this run is `null` rather than absent.
 
+use tzap::circuit::GateSet;
 use tzap::optimize::{Level, Metrics, Options, PassName, Report};
 
 /// A value that renders itself as JSON. Only the shapes this report needs.
@@ -120,20 +121,24 @@ fn write_string(out: &mut String, s: &str) {
 
 /// One completed whole-circuit pass, as `--json` reports it.
 pub(crate) struct PassRecord {
+    pub(crate) stage: Option<usize>,
     pub(crate) name: String,
     pub(crate) input_gates: usize,
     pub(crate) output_gates: usize,
     pub(crate) seconds: f64,
 }
 
-/// One SuperOpt synthesis-table load or build.
-pub(crate) struct TableRecord {
+/// One SuperOpt MURM load or build.
+pub(crate) struct MurmRecord {
+    pub(crate) stage: Option<usize>,
     pub(crate) cached: bool,
+    pub(crate) basis: GateSet,
     pub(crate) seconds: f64,
 }
 
 /// How a fixpoint pipeline terminated.
 pub(crate) struct FixpointRecord {
+    pub(crate) stage: Option<usize>,
     pub(crate) rounds: usize,
     pub(crate) converged: bool,
 }
@@ -142,9 +147,16 @@ pub(crate) struct FixpointRecord {
 /// by the CLI's observer as events arrive.
 #[derive(Default)]
 pub(crate) struct Recording {
+    pub(crate) stages: Vec<String>,
     pub(crate) passes: Vec<PassRecord>,
-    pub(crate) table: Option<TableRecord>,
-    pub(crate) fixpoint: Option<FixpointRecord>,
+    pub(crate) murms: Vec<MurmRecord>,
+    pub(crate) fixpoints: Vec<FixpointRecord>,
+}
+
+impl Recording {
+    pub(crate) fn current_stage(&self) -> Option<usize> {
+        self.stages.len().checked_sub(1)
+    }
 }
 
 /// What the CLI knows about a run that the optimizer doesn't: where the
@@ -154,10 +166,12 @@ pub(crate) struct RunInfo<'a> {
     pub(crate) input_path: Option<&'a str>,
     pub(crate) input_bytes: Option<u64>,
     pub(crate) input_qubits: usize,
+    pub(crate) input_gate_set: GateSet,
     pub(crate) parse_seconds: f64,
     /// The output destination as named on the command line: a path, `"-"`
     /// for stdout, or `None` when the circuit was discarded.
     pub(crate) output_path: Option<&'a str>,
+    pub(crate) output_gate_set: GateSet,
     pub(crate) seconds: f64,
 }
 
@@ -169,6 +183,10 @@ fn metrics_value(m: Metrics) -> Value {
         ("rz", Value::Int(m.rz)),
         ("depth", Value::Int(m.depth)),
     ])
+}
+
+fn gate_set_value(gates: GateSet) -> Value {
+    Value::Array(gates.names().map(Value::str).collect())
 }
 
 /// Percentage reduction from `before` to `after`, matching the human
@@ -188,7 +206,7 @@ fn options_value(options: &Options) -> Value {
         Level::O3 => "O3",
         Level::Osuper => "Osuper",
     };
-    let (qubits, window_gates, table_entries) = options.superopt.resolved(options.level);
+    let (qubits, window_gates, murm_entries) = options.superopt.resolved(options.level);
     Value::Object(vec![
         ("level", Value::str(level)),
         (
@@ -205,6 +223,7 @@ fn options_value(options: &Options) -> Value {
         ("fixpoint", Value::Bool(options.fixpoint)),
         ("decompose_rz", Value::Bool(options.decompose_rz)),
         ("decompose_cz", Value::Bool(options.decompose_cz)),
+        ("decompose_ccx", Value::Bool(options.decompose_ccx)),
         ("rz_epsilon", Value::Float(options.rz_epsilon)),
         ("parallel", Value::Bool(options.parallel)),
         (
@@ -214,7 +233,8 @@ fn options_value(options: &Options) -> Value {
             Value::Object(vec![
                 ("qubits", Value::Int(qubits)),
                 ("window_gates", Value::Int(window_gates)),
-                ("table_entries", Value::Int(table_entries)),
+                ("murm_entries", Value::Int(murm_entries)),
+                ("gates", Value::str(options.superopt_gates.as_argument())),
             ]),
         ),
     ])
@@ -249,6 +269,7 @@ pub(crate) fn render(
                     Value::some(run.input_bytes, |bytes| Value::Int(bytes as usize)),
                 ),
                 ("qubits", Value::Int(run.input_qubits)),
+                ("gate_set", gate_set_value(run.input_gate_set)),
                 ("parse_seconds", Value::Float(run.parse_seconds)),
             ]),
         ),
@@ -257,6 +278,7 @@ pub(crate) fn render(
             Value::Object(vec![
                 ("path", Value::some(run.output_path, Value::str)),
                 ("stdout", Value::Bool(run.output_path == Some("-"))),
+                ("gate_set", gate_set_value(run.output_gate_set)),
             ]),
         ),
         ("options", options_value(options)),
@@ -269,9 +291,9 @@ pub(crate) fn render(
             ]),
         ),
         (
-            // Against `baseline`, not `input` — the same comparison the human
-            // banner makes, and the honest one: an eager decomposition grows
-            // the circuit before any pass has run.
+            // Against `baseline`, not `input` — currently the two are equal,
+            // preserving the original circuit as the stable comparison point
+            // across the native and post-decomposition stages.
             "reduction_percent",
             Value::Object(vec![
                 (
@@ -291,6 +313,10 @@ pub(crate) fn render(
             ]),
         ),
         (
+            "stages",
+            Value::Array(recording.stages.iter().cloned().map(Value::str).collect()),
+        ),
+        (
             "passes",
             Value::Array(
                 recording
@@ -298,6 +324,7 @@ pub(crate) fn render(
                     .iter()
                     .map(|pass| {
                         Value::Object(vec![
+                            ("stage", Value::some(pass.stage, Value::Int)),
                             ("name", Value::str(pass.name.clone())),
                             ("input_gates", Value::Int(pass.input_gates)),
                             ("output_gates", Value::Int(pass.output_gates)),
@@ -308,22 +335,59 @@ pub(crate) fn render(
             ),
         ),
         (
+            // Deprecated compatibility view: before stage-aware reporting,
+            // only the last SuperOpt load was retained under `table`.
             "table",
-            Value::some(recording.table.as_ref(), |table| {
+            Value::some(recording.murms.last(), |murm| {
                 Value::Object(vec![
-                    ("cached", Value::Bool(table.cached)),
-                    ("seconds", Value::Float(table.seconds)),
+                    ("cached", Value::Bool(murm.cached)),
+                    ("seconds", Value::Float(murm.seconds)),
                 ])
             }),
         ),
         (
+            "murms",
+            Value::Array(
+                recording
+                    .murms
+                    .iter()
+                    .map(|murm| {
+                        Value::Object(vec![
+                            ("stage", Value::some(murm.stage, Value::Int)),
+                            ("cached", Value::Bool(murm.cached)),
+                            ("basis", gate_set_value(murm.basis)),
+                            ("seconds", Value::Float(murm.seconds)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            // Deprecated compatibility view: preserve the old last-fixpoint
+            // object while `fixpoints` carries every stage-aware record.
             "fixpoint",
-            Value::some(recording.fixpoint.as_ref(), |fixpoint| {
+            Value::some(recording.fixpoints.last(), |fixpoint| {
                 Value::Object(vec![
                     ("rounds", Value::Int(fixpoint.rounds)),
                     ("converged", Value::Bool(fixpoint.converged)),
                 ])
             }),
+        ),
+        (
+            "fixpoints",
+            Value::Array(
+                recording
+                    .fixpoints
+                    .iter()
+                    .map(|fixpoint| {
+                        Value::Object(vec![
+                            ("stage", Value::some(fixpoint.stage, Value::Int)),
+                            ("rounds", Value::Int(fixpoint.rounds)),
+                            ("converged", Value::Bool(fixpoint.converged)),
+                        ])
+                    })
+                    .collect(),
+            ),
         ),
         (
             "cache_dir",
@@ -338,6 +402,19 @@ pub(crate) fn render(
 
 /// Render the `--cache-info` listing as JSON.
 pub(crate) fn render_cache_info(entries: &[tzap::super_opt::CacheEntry]) -> String {
+    let entries_value = || {
+        Value::Array(
+            entries
+                .iter()
+                .map(|entry| {
+                    Value::Object(vec![
+                        ("path", Value::str(entry.path.display().to_string())),
+                        ("bytes", Value::Int(entry.bytes as usize)),
+                    ])
+                })
+                .collect(),
+        )
+    };
     Value::Object(vec![
         ("tzap", Value::str(env!("CARGO_PKG_VERSION"))),
         (
@@ -346,20 +423,9 @@ pub(crate) fn render_cache_info(entries: &[tzap::super_opt::CacheEntry]) -> Stri
                 Value::str(dir.display().to_string())
             }),
         ),
-        (
-            "tables",
-            Value::Array(
-                entries
-                    .iter()
-                    .map(|entry| {
-                        Value::Object(vec![
-                            ("path", Value::str(entry.path.display().to_string())),
-                            ("bytes", Value::Int(entry.bytes as usize)),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
+        // `tables` is the pre-MURM name and remains as a compatibility alias.
+        ("tables", entries_value()),
+        ("murms", entries_value()),
         (
             "total_bytes",
             Value::Int(entries.iter().map(|entry| entry.bytes as usize).sum()),

@@ -7,26 +7,55 @@ use rustc_hash::FxHashMap;
 use crate::circuit::{Circuit, Gate, Qubit};
 use crate::pass::Pass;
 
-/// Random tag representing a qubit's parity (XOR of variable set).
-/// NOT is bitwise complement (!h), XOR is bitwise xor (a ^ b).
-type ParityHash = u128;
-
-fn fresh_parity() -> ParityHash {
-    let hi = RandomState::new().build_hasher().finish() as u128;
-    let lo = RandomState::new().build_hasher().finish() as u128;
-    (hi << 64) | lo
+/// A random evaluation of a Boolean polynomial in GF(2^128), together with
+/// an upper bound on its total degree. Addition is XOR; multiplication is
+/// carry-less multiplication modulo x^128 + x^7 + x^2 + x + 1.
+#[derive(Clone, Copy)]
+struct Fingerprint {
+    value: u128,
+    degree: u64,
 }
 
-fn canonical_parity(parity: ParityHash) -> (ParityHash, bool) {
-    let complement = !parity;
-    if parity <= complement {
-        (parity, false)
+const FIELD_ONE: u128 = 1;
+/// Keeps the Schwartz–Zippel false-match bound at or below 2^-96 for each
+/// comparison in the 128-bit field.
+const MAX_TRACKED_DEGREE: u64 = 1 << 32;
+
+fn fresh_fingerprint() -> Fingerprint {
+    let hi = RandomState::new().build_hasher().finish() as u128;
+    let lo = RandomState::new().build_hasher().finish() as u128;
+    Fingerprint {
+        value: (hi << 64) | lo,
+        degree: 1,
+    }
+}
+
+fn canonical_fingerprint(value: u128) -> (u128, bool) {
+    let complement = value ^ FIELD_ONE;
+    if value <= complement {
+        (value, false)
     } else {
         (complement, true)
     }
 }
 
-/// Accumulated phase for a parity group.
+fn field_mul(mut left: u128, mut right: u128) -> u128 {
+    let mut product = 0;
+    while right != 0 {
+        if right & 1 != 0 {
+            product ^= left;
+        }
+        right >>= 1;
+        let carry = left >> 127;
+        left <<= 1;
+        if carry != 0 {
+            left ^= 0x87;
+        }
+    }
+    product
+}
+
+/// Accumulated phase for one Boolean-polynomial fingerprint group.
 /// `int_part` counts π/4 steps mod 8 (Clifford+T gates land here exclusively).
 /// `float_part` holds leftover rotation for rz gates whose angle is not a π/4 multiple.
 /// Pure Clifford+T circuits only ever touch `int_part`.
@@ -35,14 +64,17 @@ struct LivePhase {
     qubit: Qubit,
     current_idx: usize,
     float_part: f64,
-    /// True when `current_idx` sits on the complement of the group's canonical parity.
+    /// True when `current_idx` sits on the complement of the group's canonical value.
     /// On emission, the accumulated rotation is negated to compensate.
     current_sign: bool,
 }
 
-/// Merges T/Rz gates that act on the same linear parity of qubits, tracking
-/// parities as random 128-bit tags (linear-time, O(1) expected-false-positive
-/// rate) rather than exact symbolic expressions.
+/// Merges T/Rz gates that act on the same Boolean polynomial using random
+/// 128-bit field evaluations rather than exact symbolic expressions. CNOT
+/// remains linear; CCX multiplies its control fingerprints and introduces
+/// nonlinear terms. The tracked degree bounds a false match by
+/// `degree / 2^128`; tracking restarts conservatively before that bound becomes
+/// too weak.
 pub struct PhaseFoldRand;
 
 impl Pass for PhaseFoldRand {
@@ -57,11 +89,10 @@ impl Pass for PhaseFoldRand {
 /// Free-function form of [`PhaseFoldRand`], for use outside a [`Pass`] pipeline.
 pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
     let n = circuit.num_qubits;
-    let fresh = || fresh_parity();
-    let mut qubits: Vec<ParityHash> = (0..n).map(|_| fresh()).collect();
+    let mut qubits: Vec<Fingerprint> = (0..n).map(|_| fresh_fingerprint()).collect();
 
     let mut live: Vec<LivePhase> = Vec::new();
-    let mut parity_to_group: FxHashMap<ParityHash, usize> = FxHashMap::default();
+    let mut fingerprint_to_group: FxHashMap<u128, usize> = FxHashMap::default();
     let mut skip = vec![false; circuit.gates.len()];
     let mut emit_at: Vec<Option<(Qubit, u8, f64)>> = vec![None; circuit.gates.len()];
 
@@ -73,7 +104,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 1,
                 idx,
                 &mut live,
-                &mut parity_to_group,
+                &mut fingerprint_to_group,
                 &mut skip,
             ),
             Gate::tdg(q) => record_int(
@@ -82,7 +113,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 7,
                 idx,
                 &mut live,
-                &mut parity_to_group,
+                &mut fingerprint_to_group,
                 &mut skip,
             ),
             Gate::s(q) => record_int(
@@ -91,7 +122,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 2,
                 idx,
                 &mut live,
-                &mut parity_to_group,
+                &mut fingerprint_to_group,
                 &mut skip,
             ),
             Gate::sdg(q) => record_int(
@@ -100,7 +131,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 6,
                 idx,
                 &mut live,
-                &mut parity_to_group,
+                &mut fingerprint_to_group,
                 &mut skip,
             ),
             Gate::z(q) => record_int(
@@ -109,7 +140,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 4,
                 idx,
                 &mut live,
-                &mut parity_to_group,
+                &mut fingerprint_to_group,
                 &mut skip,
             ),
             Gate::rz(theta, q) => match classify_quarter_pi(*theta) {
@@ -119,7 +150,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                     k,
                     idx,
                     &mut live,
-                    &mut parity_to_group,
+                    &mut fingerprint_to_group,
                     &mut skip,
                 ),
                 None => record_float(
@@ -128,18 +159,21 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                     *theta,
                     idx,
                     &mut live,
-                    &mut parity_to_group,
+                    &mut fingerprint_to_group,
                     &mut skip,
                 ),
             },
             Gate::h(q) => {
-                qubits[*q as usize] = fresh();
+                qubits[*q as usize] = fresh_fingerprint();
             }
             Gate::x(q) => {
-                qubits[*q as usize] = !qubits[*q as usize];
+                qubits[*q as usize].value ^= FIELD_ONE;
             }
             Gate::cnot { control, target } => {
-                qubits[*target as usize] ^= qubits[*control as usize];
+                let control = qubits[*control as usize];
+                let target = &mut qubits[*target as usize];
+                target.value ^= control.value;
+                target.degree = target.degree.max(control.degree);
             }
             Gate::cz { .. } | Gate::ccz { .. } => {
                 // CZ and CCZ are diagonal: they change phase but leave the tracked
@@ -147,12 +181,25 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 // in the reconstructed circuit.
             }
             Gate::ccx {
-                control1: _,
-                control2: _,
+                control1,
+                control2,
                 target,
             } => {
-                // AND-based parity — opaque, just refresh the target.
-                qubits[*target as usize] = fresh();
+                let left = qubits[*control1 as usize];
+                let right = qubits[*control2 as usize];
+                let target_state = qubits[*target as usize];
+                qubits[*target as usize] = match left.degree.checked_add(right.degree) {
+                    Some(product_degree) if product_degree <= MAX_TRACKED_DEGREE => Fingerprint {
+                        value: target_state.value ^ field_mul(left.value, right.value),
+                        degree: target_state.degree.max(product_degree),
+                    },
+                    // At extreme degree the Schwartz–Zippel collision bound is
+                    // no longer useful. Treat the target's current Boolean
+                    // function as a new opaque variable: subsequent equalities
+                    // remain sound, while relationships to its old value are
+                    // deliberately forgotten.
+                    _ => fresh_fingerprint(),
+                };
             }
             Gate::measure { .. } => {
                 // Computational-basis measurement preserves the measured basis
@@ -162,7 +209,10 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
             }
             Gate::reset(qubit) => {
                 // Reset overwrites the computational-basis value with |0⟩.
-                qubits[*qubit as usize] = 0;
+                qubits[*qubit as usize] = Fingerprint {
+                    value: 0,
+                    degree: 0,
+                };
             }
         }
     }
@@ -210,24 +260,24 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
 }
 
 fn record_int(
-    qubits: &[ParityHash],
+    qubits: &[Fingerprint],
     q: Qubit,
     k: u8,
     idx: usize,
     live: &mut Vec<LivePhase>,
-    parity_to_group: &mut FxHashMap<ParityHash, usize>,
+    fingerprint_to_group: &mut FxHashMap<u128, usize>,
     skip: &mut [bool],
 ) {
-    let parity = qubits[q as usize];
-    if parity == 0 || parity == ParityHash::MAX {
+    let value = qubits[q as usize].value;
+    if value == 0 || value == FIELD_ONE {
         // A rotation conditioned on a known |0⟩ is the identity; on a known
         // |1⟩ it contributes only a global phase. Neither needs to be emitted.
         skip[idx] = true;
         return;
     }
-    let (key, is_complement) = canonical_parity(parity);
+    let (key, is_complement) = canonical_fingerprint(value);
 
-    if let Some(&gi) = parity_to_group.get(&key) {
+    if let Some(&gi) = fingerprint_to_group.get(&key) {
         skip[live[gi].current_idx] = true;
         if is_complement {
             // RZ(θ) on ¬p ≡ RZ(−θ) on p up to global phase.
@@ -254,28 +304,28 @@ fn record_int(
         qubit: q,
         current_sign: is_complement,
     });
-    parity_to_group.insert(key, gi);
+    fingerprint_to_group.insert(key, gi);
 }
 
 fn record_float(
-    qubits: &[ParityHash],
+    qubits: &[Fingerprint],
     q: Qubit,
     theta: f64,
     idx: usize,
     live: &mut Vec<LivePhase>,
-    parity_to_group: &mut FxHashMap<ParityHash, usize>,
+    fingerprint_to_group: &mut FxHashMap<u128, usize>,
     skip: &mut [bool],
 ) {
-    let parity = qubits[q as usize];
-    if parity == 0 || parity == ParityHash::MAX {
+    let value = qubits[q as usize].value;
+    if value == 0 || value == FIELD_ONE {
         // See record_int: rotations on known computational-basis constants are
         // observationally irrelevant.
         skip[idx] = true;
         return;
     }
-    let (key, is_complement) = canonical_parity(parity);
+    let (key, is_complement) = canonical_fingerprint(value);
 
-    if let Some(&gi) = parity_to_group.get(&key) {
+    if let Some(&gi) = fingerprint_to_group.get(&key) {
         skip[live[gi].current_idx] = true;
         if is_complement {
             live[gi].float_part -= theta;
@@ -297,7 +347,7 @@ fn record_float(
         qubit: q,
         current_sign: is_complement,
     });
-    parity_to_group.insert(key, gi);
+    fingerprint_to_group.insert(key, gi);
 }
 
 /// Returns Some(k) if theta ≈ k · π/4 (mod 2π) within 1e-9, else None.
@@ -1319,6 +1369,146 @@ mod tests {
         let opt = phase_fold_rand(&dec);
         assert!(circuits_equiv(&c, &opt, 1e-10));
         assert_eq!(count_t_gates(&opt), 12);
+    }
+
+    #[test]
+    fn nonlinear_ccx_fingerprint_recovers_after_inverse_pair() {
+        let mut circuit = Circuit::new(3);
+        circuit.apply(Gate::t(2));
+        circuit.apply(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        circuit.apply(Gate::ccx {
+            control1: 1,
+            control2: 0,
+            target: 2,
+        });
+        circuit.apply(Gate::tdg(2));
+
+        let folded = phase_fold_rand(&circuit);
+        assert_eq!(
+            folded.gates,
+            vec![
+                Gate::ccx {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                },
+                Gate::ccx {
+                    control1: 1,
+                    control2: 0,
+                    target: 2,
+                },
+            ]
+        );
+        assert!(circuits_equiv(&circuit, &folded, 1e-10));
+    }
+
+    #[test]
+    fn gf128_multiplication_obeys_field_identities() {
+        let samples = [0, 1, 0x1234_5678_9abc_def0, u128::MAX, 1 << 127];
+        for &a in &samples {
+            assert_eq!(field_mul(a, 0), 0);
+            assert_eq!(field_mul(a, 1), a);
+            for &b in &samples {
+                assert_eq!(field_mul(a, b), field_mul(b, a));
+                for &c in &samples {
+                    assert_eq!(field_mul(a, b ^ c), field_mul(a, b) ^ field_mul(a, c));
+                }
+            }
+        }
+        assert_eq!(field_mul(1 << 127, 2), 0x87);
+    }
+
+    #[test]
+    fn nonlinear_shared_control_dependencies_remain_equivalent() {
+        let mut circuit = Circuit::new(3);
+        circuit.apply(Gate::t(2));
+        circuit.apply(Gate::cnot {
+            control: 0,
+            target: 1,
+        });
+        circuit.apply(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        circuit.apply(Gate::cnot {
+            control: 0,
+            target: 1,
+        });
+        circuit.apply(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        circuit.apply(Gate::cnot {
+            control: 0,
+            target: 2,
+        });
+        circuit.apply(Gate::tdg(2));
+
+        let folded = phase_fold_rand(&circuit);
+        assert!(circuits_equiv(&circuit, &folded, 1e-10));
+    }
+
+    #[test]
+    fn extreme_polynomial_degree_conservatively_stops_phase_folding() {
+        // Repeatedly update the lowest-degree wire from the other two. The
+        // degree bounds then grow like Fibonacci numbers, crossing 2^32 in
+        // fewer than 64 CCX gates without needing an enormous circuit.
+        let mut circuit = Circuit::new(3);
+        let mut degrees = [1u64; 3];
+        let mut growth_gates = 0;
+        let (control1, control2, target, overflow_degree) = loop {
+            let target = (0..3).min_by_key(|&qubit| degrees[qubit]).unwrap();
+            let controls: Vec<_> = (0..3).filter(|&qubit| qubit != target).collect();
+            let product_degree = degrees[controls[0]] + degrees[controls[1]];
+            if product_degree > MAX_TRACKED_DEGREE {
+                break (
+                    controls[0] as Qubit,
+                    controls[1] as Qubit,
+                    target as Qubit,
+                    product_degree,
+                );
+            }
+            circuit.apply(Gate::ccx {
+                control1: controls[0] as Qubit,
+                control2: controls[1] as Qubit,
+                target: target as Qubit,
+            });
+            degrees[target] = degrees[target].max(product_degree);
+            growth_gates += 1;
+        };
+
+        assert!(growth_gates < 64);
+        assert!(overflow_degree > MAX_TRACKED_DEGREE);
+        assert!(degrees.iter().all(|&degree| degree <= MAX_TRACKED_DEGREE));
+
+        // The identical pair is logically the identity, so exact tracking
+        // could cancel T/Tdg across it. Both CCXs exceed the safe degree bound,
+        // however, and each refreshes the target fingerprint. Keeping both
+        // phase gates is the required conservative result; removing them here
+        // would mean the cutoff was not being used.
+        circuit.apply(Gate::t(target));
+        circuit.apply(Gate::ccx {
+            control1,
+            control2,
+            target,
+        });
+        circuit.apply(Gate::ccx {
+            control1,
+            control2,
+            target,
+        });
+        circuit.apply(Gate::tdg(target));
+
+        let folded = phase_fold_rand(&circuit);
+        assert_eq!(count_phase_gates(&folded), 2);
+        assert_eq!(folded.gates, circuit.gates);
+        assert!(circuits_equiv(&circuit, &folded, 1e-10));
     }
 
     #[test]
@@ -2707,7 +2897,7 @@ mod tests {
     #[test]
     fn mixed_int_float_across_cnot() {
         // Route parity X (q0's initial) onto q1 via two cnots, so a rz(0.3)
-        // on q1 merges with an earlier T on q0 (same parity group → one
+        // on q1 merges with an earlier T on q0 (same fingerprint group → one
         // LivePhase with int_part=1, float_part=0.3).
         let mut c = Circuit::new(2);
         c.apply(Gate::t(0)); // parity X, int=1
@@ -2801,7 +2991,7 @@ mod tests {
             opt.gates.as_slice(),
             [Gate::measure { qubit: 0, cbit: 0 }, Gate::s(0)]
         ));
-        assert!(opt.has_measurement);
+        assert!(opt.has_measurement());
     }
 
     #[test]
@@ -2875,7 +3065,7 @@ mod tests {
         let opt = phase_fold_rand(&c);
         assert_eq!(opt.gates.len(), 4);
         assert_eq!(opt.num_cbits, 2);
-        assert!(opt.has_measurement);
+        assert!(opt.has_measurement());
     }
 
     #[test]

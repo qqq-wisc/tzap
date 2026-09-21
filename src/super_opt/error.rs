@@ -8,8 +8,8 @@ use crate::circuit::Qubit;
 pub enum SuperOptError {
     /// `window_gates` was zero.
     ZeroWindowGates,
-    /// The requested [`crate::super_opt::SuperOptTableConfig`] is unusable.
-    InvalidTableConfig { reason: String },
+    /// The requested [`crate::super_opt::MurmConfig`] is unusable.
+    InvalidMurmConfig { reason: String },
     /// A gate in the input circuit references a qubit outside its declared range.
     InvalidQubit {
         gate_index: usize,
@@ -24,8 +24,8 @@ impl fmt::Display for SuperOptError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroWindowGates => write!(f, "window_gates must be greater than zero"),
-            Self::InvalidTableConfig { reason } => {
-                write!(f, "invalid SuperOpt table config: {reason}")
+            Self::InvalidMurmConfig { reason } => {
+                write!(f, "invalid SuperOpt MURM config: {reason}")
             }
             Self::InvalidQubit {
                 gate_index,

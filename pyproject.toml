@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tzap"
-description = "A super fast, Rust-based optimizer for large Clifford+T circuits"
+description = "A super fast, Rust-based optimizer for large Clifford+T/Rz circuits"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Aws Albarghouthi" }]

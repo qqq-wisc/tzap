@@ -714,13 +714,39 @@ fn optimization_levels_mutually_exclusive_all_pairs() {
 }
 
 #[test]
-fn passes_conflicts_with_decompose_rz_and_cz() {
+fn passes_conflicts_with_decomposition_flags() {
     let dir = tempfile::tempdir().unwrap();
     let input = write_qasm(dir.path(), "in.qasm", TRIVIAL_QASM);
-    for flag in ["--decompose-rz", "--decompose-cz"] {
+    for flag in ["--decompose-rz", "--decompose-cz", "--decompose-ccx"] {
         let out = tzap_run(&[input.to_str().unwrap(), "--passes", "CancelGates", flag]);
         let stderr = assert_clear_error(&out, &format!("--passes + {flag}"));
         assert!(stderr.contains("cannot be combined"), "got: {stderr}");
+    }
+}
+
+#[test]
+fn superopt_gates_rejects_missing_empty_and_unsupported_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_qasm(dir.path(), "in.qasm", TRIVIAL_QASM);
+    let input = input.to_str().unwrap();
+    for (args, expected) in [
+        (vec![input, "--superopt-gates"], "--superopt-gates requires"),
+        (
+            vec![input, "--superopt-gates="],
+            "--superopt-gates requires",
+        ),
+        (
+            vec![input, "--superopt-gates", "rz"],
+            "cannot be emitted by SuperOpt",
+        ),
+        (
+            vec![input, "--superopt-gates", "h,nope"],
+            "unsupported SuperOpt gate",
+        ),
+    ] {
+        let out = tzap_run(&args);
+        let stderr = assert_clear_error(&out, &format!("{args:?}"));
+        assert!(stderr.contains(expected), "got: {stderr}");
     }
 }
 
@@ -801,18 +827,18 @@ fn superopt_qubits_zero_is_rejected() {
 }
 
 #[test]
-fn superopt_table_entries_zero_is_rejected() {
+fn superopt_murm_entries_zero_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let input = write_qasm(dir.path(), "in.qasm", TRIVIAL_QASM);
     let out = tzap_run(&[
         input.to_str().unwrap(),
         "-O2",
-        "--superopt-table-entries",
+        "--superopt-murm-entries",
         "0",
     ]);
-    let stderr = assert_clear_error(&out, "--superopt-table-entries 0");
+    let stderr = assert_clear_error(&out, "--superopt-murm-entries 0");
     assert!(
-        stderr.contains("--superopt-table-entries requires a positive integer, got 0"),
+        stderr.contains("--superopt-murm-entries requires a positive integer, got 0"),
         "got: {stderr}"
     );
 }
@@ -890,7 +916,7 @@ fn bulk_sweep_of_malformed_qasm_never_panics() {
 
     for (name, qasm) in cases {
         let path = write_qasm(dir.path(), &format!("{name}.qasm"), qasm);
-        let out = tzap_run(&[path.to_str().unwrap()]);
+        let out = tzap_run(&[path.to_str().unwrap(), "-O1"]);
         assert_clear_error(&out, name);
     }
 }

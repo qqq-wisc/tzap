@@ -19,11 +19,13 @@ def _optimize_qasm(
     fixpoint: bool = False,
     decompose_rz: bool = False,
     decompose_cz: bool = False,
+    decompose_ccx: bool = False,
     rz_epsilon: float = ...,
     parallel: bool = False,
     superopt_qubits: int | None = None,
     superopt_window_gates: int | None = None,
-    superopt_table_entries: int | None = None,
+    superopt_murm_entries: int | None = None,
+    superopt_gates: str = "auto",
 ) -> tuple[
     str,
     tuple[

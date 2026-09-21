@@ -1,9 +1,8 @@
 use super::matrix::{IDENTITY_TOLERANCE, UnitaryMatrix, unitary_fingerprint};
 use super::matrix_cache::COMPACT_KEY_MAX_GATES;
-use super::table::{
-    LibraryGate, UnitaryCircuitTable, library_circuit_matrix, library_gates, shared_synthesis_table,
-};
+use super::murm::{LibraryGate, Murm, library_circuit_matrix, library_gates, shared_murm};
 use super::*;
+use crate::circuit::{GateKind, GateSet};
 use crate::unitary::C as OracleScalar;
 
 struct TestRng(u64);
@@ -458,12 +457,13 @@ fn compact_key_rejects_supports_wider_than_operand_encoding() {
     assert!(compact_normalized_key(&circuit, &[0], &[0, 1, 2, 3, 4]).is_none());
 }
 
-fn synthesis_table(max_qubits: usize, max_gates: usize) -> Arc<UnitaryCircuitTable> {
+fn murm(max_qubits: usize, max_gates: usize) -> Arc<Murm> {
     Arc::new(
-        UnitaryCircuitTable::build(SuperOptTableConfig {
+        Murm::build(MurmConfig {
             max_qubits,
             max_gates,
             max_entries_per_qubit: 20_000,
+            basis: BASE_GATE_SET,
         })
         .unwrap(),
     )
@@ -636,6 +636,53 @@ fn compact_keys_distinguish_ccx_from_ccz() {
 }
 
 #[test]
+fn compact_keys_canonicalize_symmetric_native_operands() {
+    let key = |gate| {
+        let mut circuit = Circuit::new(3);
+        circuit.apply(gate);
+        compact_normalized_key(&circuit, &[0], &[0, 1, 2]).unwrap()
+    };
+
+    assert_eq!(
+        key(Gate::cz {
+            control: 0,
+            target: 2,
+        }),
+        key(Gate::cz {
+            control: 2,
+            target: 0,
+        })
+    );
+    assert_eq!(
+        key(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        }),
+        key(Gate::ccx {
+            control1: 1,
+            control2: 0,
+            target: 2,
+        })
+    );
+    let canonical = key(Gate::ccz {
+        control1: 0,
+        control2: 1,
+        target: 2,
+    });
+    for [a, b, c] in [[0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        assert_eq!(
+            canonical,
+            key(Gate::ccz {
+                control1: a,
+                control2: b,
+                target: c,
+            })
+        );
+    }
+}
+
+#[test]
 fn oversized_matrix_request_errors_instead_of_allocating() {
     for num_qubits in [40, 64, 200] {
         assert_eq!(
@@ -707,17 +754,177 @@ fn library_gate_disjointness() {
 
 #[test]
 fn library_gate_counts_per_width() {
-    // 7n singles + n(n-1) cnot. Toffoli and CZ are intentionally excluded.
-    assert_eq!(library_gates(1).len(), 7);
-    assert_eq!(library_gates(2).len(), 16);
-    assert_eq!(library_gates(3).len(), 27);
-    assert_eq!(library_gates(4).len(), 40);
+    // 7n singles + n(n-1) CNOT in the base basis.
+    assert_eq!(library_gates(1, BASE_GATE_SET).len(), 7);
+    assert_eq!(library_gates(2, BASE_GATE_SET).len(), 16);
+    assert_eq!(library_gates(3, BASE_GATE_SET).len(), 27);
+    assert_eq!(library_gates(4, BASE_GATE_SET).len(), 40);
+}
+
+#[test]
+fn native_library_generators_are_canonical_and_complete() {
+    let gates = library_gates(3, SUPPORTED_GATE_SET);
+    assert_eq!(gates.len(), 34);
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| matches!(gate, LibraryGate::Cz(..)))
+            .count(),
+        3
+    );
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| matches!(gate, LibraryGate::Ccx(..)))
+            .count(),
+        3
+    );
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| matches!(gate, LibraryGate::Ccz(..)))
+            .count(),
+        1
+    );
+    assert!(gates.iter().all(|gate| match gate {
+        LibraryGate::Cz(a, b) => a < b,
+        LibraryGate::Ccx(a, b, target) => a < b && target != a && target != b,
+        LibraryGate::Ccz(a, b, c) => a < b && b < c,
+        _ => true,
+    }));
+}
+
+#[test]
+fn native_library_gates_round_trip_the_four_byte_encoding() {
+    for gate in [
+        LibraryGate::Cz(1, 4),
+        LibraryGate::Ccx(0, 2, 1),
+        LibraryGate::Ccz(0, 1, 2),
+    ] {
+        assert_eq!(LibraryGate::from_bytes(gate.to_bytes()), Some(gate));
+    }
+}
+
+#[test]
+fn native_murms_synthesize_native_representatives() {
+    for (kind, gate) in [
+        (
+            GateKind::Cz,
+            Gate::cz {
+                control: 0,
+                target: 1,
+            },
+        ),
+        (
+            GateKind::Ccx,
+            Gate::ccx {
+                control1: 0,
+                control2: 1,
+                target: 2,
+            },
+        ),
+        (
+            GateKind::Ccz,
+            Gate::ccz {
+                control1: 0,
+                control2: 1,
+                target: 2,
+            },
+        ),
+    ] {
+        let basis = GateSet::singleton(kind);
+        let murm = Murm::build(MurmConfig::new(3, 1, 100).with_basis(basis)).unwrap();
+        let mut matrix = UnitaryMatrix::identity(3).unwrap();
+        matrix.apply_gate_left(&gate, &[0, 1, 2]).unwrap();
+        assert_eq!(murm.synthesize(&matrix), Some(vec![gate]));
+    }
+}
+
+#[test]
+fn explicit_cz_murm_rewrites_h_cx_h_to_native_cz() {
+    let config = MurmConfig::new(2, 1, 64).with_basis(GateSet::singleton(GateKind::Cz));
+    let pass = SuperOpt::new(2, 3, config).unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.apply(Gate::h(1));
+    circuit.apply(Gate::cnot {
+        control: 0,
+        target: 1,
+    });
+    circuit.apply(Gate::h(1));
+
+    let result = pass.run(&circuit).unwrap().circuit;
+    assert_eq!(
+        result.gates,
+        vec![Gate::cz {
+            control: 0,
+            target: 1,
+        }]
+    );
+    assert!(crate::unitary::circuits_equiv(
+        &circuit,
+        &result,
+        IDENTITY_TOLERANCE,
+    ));
+}
+
+#[test]
+fn every_native_mask_builds_and_round_trips_its_own_murm() {
+    let dir = tempfile::tempdir().unwrap();
+    for mask in 0u8..8 {
+        let optional = GateSet::from_kinds(
+            OPTIONAL_GATE_KINDS
+                .into_iter()
+                .enumerate()
+                .filter_map(|(bit, kind)| (mask & (1 << bit) != 0).then_some(kind)),
+        );
+        let config = MurmConfig::new(3, 1, 256).with_basis(BASE_GATE_SET.union(optional));
+        let cold = Murm::build(config).unwrap();
+        let path = dir.path().join(format!("murm-{mask}.bin"));
+        cold.write_to_disk(&path, config).unwrap();
+        let warm = Murm::read_from_disk(&path, config).unwrap();
+        for width in 1..=3 {
+            assert_eq!(cold.entry_count(width), warm.entry_count(width));
+            assert_eq!(cold.completed_depth(width), warm.completed_depth(width));
+        }
+    }
+}
+
+#[test]
+fn actual_murms_cover_every_single_gate_exclusion_and_mixed_basis() {
+    let candidates = [
+        GateKind::H,
+        GateKind::X,
+        GateKind::Z,
+        GateKind::S,
+        GateKind::Sdg,
+        GateKind::T,
+        GateKind::Tdg,
+        GateKind::Cx,
+        GateKind::Cz,
+        GateKind::Ccx,
+        GateKind::Ccz,
+    ];
+    for excluded in candidates {
+        let basis = GateSet::from_kinds(
+            candidates
+                .into_iter()
+                .filter(|candidate| *candidate != excluded),
+        );
+        Murm::build(MurmConfig::new(3, 1, 256).with_basis(basis)).unwrap();
+    }
+    for basis in [
+        GateSet::from_kinds([GateKind::H, GateKind::Cz, GateKind::Ccx]),
+        GateSet::from_kinds([GateKind::T, GateKind::Tdg, GateKind::Ccz]),
+        GateSet::from_kinds([GateKind::Cx, GateKind::Cz]),
+    ] {
+        Murm::build(MurmConfig::new(3, 2, 256).with_basis(basis)).unwrap();
+    }
 }
 
 #[test]
 fn library_never_enumerates_toffoli_or_cz() {
     for num_qubits in 1..=4 {
-        for gate in library_gates(num_qubits) {
+        for gate in library_gates(num_qubits, BASE_GATE_SET) {
             assert!(
                 !matches!(gate.to_gate(), Gate::ccx { .. } | Gate::cz { .. }),
                 "library must not contain Toffoli or CZ: {gate:?}"
@@ -727,10 +934,10 @@ fn library_never_enumerates_toffoli_or_cz() {
 }
 
 #[test]
-fn table_does_not_synthesize_a_toffoli_representative() {
+fn murm_does_not_synthesize_a_toffoli_representative() {
     // A Toffoli's unitary has no Clifford+T representative within the small gate
     // bound and Toffoli itself is not in the library, so it must not be found.
-    let table = synthesis_table(3, 5);
+    let murm = murm(3, 5);
     let mut toffoli = UnitaryMatrix::identity(3).unwrap();
     toffoli
         .apply_gate_left(
@@ -742,53 +949,53 @@ fn table_does_not_synthesize_a_toffoli_representative() {
             &[0, 1, 2],
         )
         .unwrap();
-    assert!(table.synthesize(&toffoli).is_none());
+    assert!(murm.synthesize(&toffoli).is_none());
 }
 
 #[test]
-fn one_qubit_depth_one_table_has_eight_distinct_entries() {
-    let table = synthesis_table(1, 1);
+fn one_qubit_depth_one_murm_has_eight_distinct_entries() {
+    let murm = murm(1, 1);
     // Identity plus X, H, S, Sdg, Z, T, Tdg — all distinct up to phase.
-    assert_eq!(table.entry_count(1), 8);
-    assert_eq!(table.completed_depth(1), 1);
-    assert!(!table.is_saturated(1));
+    assert_eq!(murm.entry_count(1), 8);
+    assert_eq!(murm.completed_depth(1), 1);
+    assert!(!murm.is_saturated(1));
 }
 
 #[test]
 fn synthesize_returns_empty_circuit_for_identity() {
-    let table = synthesis_table(1, 1);
+    let murm = murm(1, 1);
     let identity = UnitaryMatrix::identity(1).unwrap();
-    assert!(table.synthesize(&identity).unwrap().is_empty());
+    assert!(murm.synthesize(&identity).unwrap().is_empty());
 }
 
 #[test]
 fn synthesize_returns_none_for_unknown_width_or_depth() {
-    let table = synthesis_table(1, 1);
+    let murm = murm(1, 1);
     let three_qubit_identity = UnitaryMatrix::identity(3).unwrap();
-    assert!(table.synthesize(&three_qubit_identity).is_none());
+    assert!(murm.synthesize(&three_qubit_identity).is_none());
     // H then T is not reachable within one gate.
     let deep = single_qubit_matrix(&[Gate::h(0), Gate::t(0)]);
-    assert!(table.synthesize(&deep).is_none());
+    assert!(murm.synthesize(&deep).is_none());
 }
 
 #[test]
 fn synthesis_rejects_a_forced_fingerprint_collision() {
-    let mut table = UnitaryCircuitTable::build(SuperOptTableConfig::new(1, 1, 100)).unwrap();
+    let mut murm = Murm::build(MurmConfig::new(1, 1, 100)).unwrap();
     let query = single_qubit_matrix(&[Gate::s(0)]);
     let wrong_candidate = single_qubit_matrix(&[Gate::x(0)]);
-    table.inject_fingerprint_alias(&query, &wrong_candidate);
+    murm.inject_fingerprint_alias(&query, &wrong_candidate);
 
     assert!(
-        table.synthesize(&query).is_none(),
+        murm.synthesize(&query).is_none(),
         "the exact matrix guard must reject a fingerprint hit for the wrong circuit"
     );
 }
 
 #[test]
 fn hzh_synthesizes_to_x() {
-    let table = synthesis_table(1, 1);
+    let murm = murm(1, 1);
     let hzh = single_qubit_matrix(&[Gate::h(0), Gate::z(0), Gate::h(0)]);
-    let replacement = table.synthesize(&hzh).unwrap();
+    let replacement = murm.synthesize(&hzh).unwrap();
     assert_eq!(replacement.len(), 1);
     assert!(matches!(replacement[0], Gate::x(0)));
 }
@@ -797,7 +1004,7 @@ fn hzh_synthesizes_to_x() {
 fn cz_unitary_synthesizes_without_emitting_cz() {
     // The CZ unitary must resolve to an H/CX-basis representative (H·CX·H),
     // never to a literal cz gate — cz is excluded from the library.
-    let table = synthesis_table(2, 3);
+    let murm = murm(2, 3);
     let mut matrix = UnitaryMatrix::identity(2).unwrap();
     matrix
         .apply_gate_left(
@@ -808,7 +1015,7 @@ fn cz_unitary_synthesizes_without_emitting_cz() {
             &[0, 1],
         )
         .unwrap();
-    let replacement = table.synthesize(&matrix).unwrap();
+    let replacement = murm.synthesize(&matrix).unwrap();
     assert!(
         !replacement.iter().any(|g| matches!(g, Gate::cz { .. })),
         "synthesis must not emit cz: {replacement:?}"
@@ -818,17 +1025,17 @@ fn cz_unitary_synthesizes_without_emitting_cz() {
 
 #[test]
 fn random_short_library_circuits_never_synthesize_longer() {
-    let table = synthesis_table(2, 4);
-    assert!(!table.is_saturated(2));
-    let gates = library_gates(2);
+    let murm = murm(2, 4);
+    assert!(!murm.is_saturated(2));
+    let gates = library_gates(2, BASE_GATE_SET);
     let mut rng = TestRng(0x7ab1_e000_c0ff_ee00);
     for _ in 0..200 {
         let length = 1 + rng.next(4);
         let circuit: Vec<_> = (0..length).map(|_| gates[rng.next(gates.len())]).collect();
         let matrix = library_circuit_matrix(2, &circuit).unwrap().unwrap();
-        let replacement = table
+        let replacement = murm
             .synthesize(&matrix)
-            .expect("depth-4 two-qubit table is complete");
+            .expect("depth-4 two-qubit MURM is complete");
         assert!(replacement.len() <= length);
     }
 }
@@ -866,23 +1073,23 @@ fn toffoli_metadata_tracks_surviving_and_removed_gates() {
     let mut surviving = Circuit::new(3);
     surviving.apply(ccx.clone());
     let surviving = SuperOpt::analyzer(3, 2).run(&surviving).unwrap().circuit;
-    assert!(surviving.has_toffoli);
+    assert!(surviving.has_toffoli());
 
     let mut cancelling = Circuit::new(3);
     cancelling.apply(ccx.clone());
     cancelling.apply(ccx);
     let removed = SuperOpt::analyzer(3, 2)
-        .with_synthesis_table(synthesis_table(3, 0))
+        .with_murm(murm(3, 0))
         .run(&cancelling)
         .unwrap()
         .circuit;
     assert!(removed.gates.is_empty());
-    assert!(!removed.has_toffoli);
+    assert!(!removed.has_toffoli());
 }
 
 #[test]
 fn rz_windows_are_rejected_without_matrix_lookup() {
-    let table = synthesis_table(1, 0);
+    let murm = murm(1, 0);
     for angles in [
         vec![0.37],
         vec![0.37, -0.37],
@@ -894,7 +1101,7 @@ fn rz_windows_are_rejected_without_matrix_lookup() {
             circuit.apply(Gate::rz(angle, 0));
         }
         let result = SuperOpt::analyzer(1, circuit.gates.len())
-            .with_synthesis_table(Arc::clone(&table))
+            .with_murm(Arc::clone(&murm))
             .without_subcircuits()
             .run(&circuit)
             .unwrap();
@@ -939,7 +1146,7 @@ fn equal_length_synthesis_is_not_applied() {
     let mut circuit = Circuit::new(1);
     circuit.apply(Gate::x(0));
     circuit.apply(Gate::h(0));
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 2));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 2));
     let result = pass.run(&circuit).unwrap();
     assert!(result.rewrites.is_empty());
     assert_eq!(result.circuit.gates.len(), 2);
@@ -950,7 +1157,7 @@ fn identity_removal_wins_over_synthesis() {
     let mut circuit = Circuit::new(1);
     circuit.apply(Gate::h(0));
     circuit.apply(Gate::h(0));
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 2));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 2));
     let result = pass.run(&circuit).unwrap();
     assert!(result.circuit.gates.is_empty());
     assert_eq!(removed_indices(&result), vec![vec![0, 1]]);
@@ -963,7 +1170,7 @@ fn consecutive_synth_rewrites_do_not_double_claim() {
     for _ in 0..4 {
         circuit.apply(Gate::s(0));
     }
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 1));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 1));
     let result = pass.run(&circuit).unwrap();
     assert_eq!(result.rewrites.len(), 2);
     assert_eq!(result.circuit.gates.len(), 2);
@@ -980,7 +1187,7 @@ fn a_second_superopt_pass_can_expose_a_new_rewrite() {
     for _ in 0..4 {
         circuit.apply(Gate::s(0));
     }
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 1));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 1));
     let first = pass.run(&circuit).unwrap().circuit;
     assert_eq!(first.gates.len(), 2);
     assert!(first.gates.iter().all(|gate| matches!(gate, Gate::z(0))));
@@ -1005,7 +1212,7 @@ fn optimizes_unitary_regions_around_measure_and_reset() {
     circuit.apply(Gate::h(0));
 
     let result = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 2))
+        .with_murm(murm(1, 2))
         .run(&circuit)
         .unwrap();
     assert_eq!(result.circuit.gates.len(), 2);
@@ -1043,14 +1250,14 @@ fn pass_trait_optimizes_unitary_regions_in_mixed_circuit() {
     circuit.apply(Gate::h(0));
     circuit.apply(Gate::measure { qubit: 1, cbit: 0 });
     circuit.apply(Gate::h(0));
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 2));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 2));
     let optimized = Pass::run(&pass, &circuit);
 
     assert_eq!(optimized.gates.len(), 1);
     assert!(matches!(optimized.gates[0], Gate::measure { .. }));
     assert_eq!(optimized.num_qubits, circuit.num_qubits);
     assert_eq!(optimized.num_cbits, circuit.num_cbits);
-    assert!(optimized.has_measurement);
+    assert!(optimized.has_measurement());
 }
 
 #[test]
@@ -1075,7 +1282,7 @@ fn measurement_blocks_a_later_bridge_into_its_qubit() {
 #[test]
 fn measure_and_reset_each_block_same_qubit_windows() {
     let barriers = [Gate::measure { qubit: 0, cbit: 0 }, Gate::reset(0)];
-    let table = synthesis_table(1, 2);
+    let murm = murm(1, 2);
 
     for barrier in barriers {
         let mut circuit = Circuit::with_cbits(1, 1);
@@ -1084,7 +1291,7 @@ fn measure_and_reset_each_block_same_qubit_windows() {
         circuit.apply(Gate::h(0));
 
         let result = SuperOpt::analyzer(1, 3)
-            .with_synthesis_table(Arc::clone(&table))
+            .with_murm(Arc::clone(&murm))
             .run(&circuit)
             .unwrap();
         assert!(result.rewrites.is_empty());
@@ -1113,7 +1320,7 @@ fn disjoint_measure_and_reset_do_not_block_unitary_window() {
     circuit.apply(Gate::h(0));
 
     let result = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 2))
+        .with_murm(murm(1, 2))
         .run(&circuit)
         .unwrap();
     assert_eq!(removed_indices(&result), vec![vec![0, 3]]);
@@ -1192,7 +1399,7 @@ fn mixed_circuit_rewrites_preserve_the_full_quantum_classical_channel() {
     circuit.apply(Gate::x(1));
 
     let optimized = SuperOpt::analyzer(2, 2)
-        .with_synthesis_table(synthesis_table(2, 2))
+        .with_murm(murm(2, 2))
         .run(&circuit)
         .unwrap()
         .circuit;
@@ -1205,7 +1412,7 @@ fn mixed_circuit_rewrites_preserve_the_full_quantum_classical_channel() {
     disjoint.apply(Gate::measure { qubit: 1, cbit: 0 });
     disjoint.apply(Gate::h(0));
     let optimized = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 2))
+        .with_murm(murm(1, 2))
         .run(&disjoint)
         .unwrap()
         .circuit;
@@ -1223,7 +1430,7 @@ fn circuit_containing_only_measure_and_reset_is_unchanged() {
     let result = SuperOpt::analyzer(2, 8).run(&circuit).unwrap();
     assert_eq!(result.circuit.to_qasm(), circuit.to_qasm());
     assert_eq!(result.circuit.num_cbits, 2);
-    assert!(result.circuit.has_measurement);
+    assert!(result.circuit.has_measurement());
     assert!(result.subcircuits.is_empty());
     assert!(result.rewrites.is_empty());
     assert_eq!(result.cache_hits + result.cache_misses, 0);
@@ -1254,7 +1461,7 @@ fn mixed_circuit_without_subcircuits_still_rewrites_unitary_windows() {
     circuit.apply(Gate::h(0));
 
     let result = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 2))
+        .with_murm(murm(1, 2))
         .without_subcircuits()
         .run(&circuit)
         .unwrap();
@@ -1280,15 +1487,15 @@ fn error_messages_name_the_offending_values() {
 }
 
 #[test]
-fn constructor_rejects_invalid_table_config() {
-    let error = SuperOpt::new(4, 8, SuperOptTableConfig::new(0, 8, 1_000)).unwrap_err();
-    assert!(matches!(error, SuperOptError::InvalidTableConfig { .. }));
+fn constructor_rejects_invalid_murm_config() {
+    let error = SuperOpt::new(4, 8, MurmConfig::new(0, 8, 1_000)).unwrap_err();
+    assert!(matches!(error, SuperOptError::InvalidMurmConfig { .. }));
 
-    let error = SuperOpt::new(4, 8, SuperOptTableConfig::new(6, 8, 1_000)).unwrap_err();
-    assert!(matches!(error, SuperOptError::InvalidTableConfig { .. }));
+    let error = SuperOpt::new(4, 8, MurmConfig::new(6, 8, 1_000)).unwrap_err();
+    assert!(matches!(error, SuperOptError::InvalidMurmConfig { .. }));
 
-    let error = SuperOpt::new(4, 8, SuperOptTableConfig::new(4, 8, 0)).unwrap_err();
-    assert!(matches!(error, SuperOptError::InvalidTableConfig { .. }));
+    let error = SuperOpt::new(4, 8, MurmConfig::new(4, 8, 0)).unwrap_err();
+    assert!(matches!(error, SuperOptError::InvalidMurmConfig { .. }));
 }
 
 #[test]
@@ -1349,13 +1556,13 @@ fn without_subcircuits_matches_collected_run() {
     circuit.apply(Gate::s(1));
     circuit.apply(Gate::s(1));
 
-    let table = synthesis_table(2, 2);
+    let murm = murm(2, 2);
     let collected = SuperOpt::analyzer(2, 4)
-        .with_synthesis_table(Arc::clone(&table))
+        .with_murm(Arc::clone(&murm))
         .run(&circuit)
         .unwrap();
     let skipped = SuperOpt::analyzer(2, 4)
-        .with_synthesis_table(table)
+        .with_murm(murm)
         .without_subcircuits()
         .run(&circuit)
         .unwrap();
@@ -1386,7 +1593,7 @@ fn window_bound_counts_gates_not_index_span() {
     circuit.apply(Gate::x(1));
     circuit.apply(Gate::h(0));
     let result = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 0))
+        .with_murm(murm(1, 0))
         .run(&circuit)
         .unwrap();
     assert!(removed_indices(&result).contains(&vec![0, 3]));
@@ -1397,7 +1604,7 @@ fn window_bound_counts_gates_not_index_span() {
 #[test]
 fn library_enumeration_excludes_rotation_gates() {
     for num_qubits in 1..=4 {
-        for gate in library_gates(num_qubits) {
+        for gate in library_gates(num_qubits, BASE_GATE_SET) {
             assert!(
                 !matches!(gate.to_gate(), Gate::rz(..)),
                 "enumeration must stay discrete: {gate:?}"
@@ -1407,17 +1614,17 @@ fn library_enumeration_excludes_rotation_gates() {
 }
 
 #[test]
-fn synthesis_table_keeps_a_smallest_circuit() {
-    let table = synthesis_table(1, 2);
+fn murm_keeps_a_smallest_circuit() {
+    let murm = murm(1, 2);
     let mut circuit = Circuit::new(1);
     circuit.apply(Gate::s(0));
     circuit.apply(Gate::s(0));
     let matrix = naive_matrix(&circuit, &[0, 1], &[0]);
 
-    let replacement = table.synthesize(&matrix).unwrap();
+    let replacement = murm.synthesize(&matrix).unwrap();
     assert_eq!(replacement.len(), 1);
     assert!(matches!(replacement[0], Gate::z(0)));
-    assert!(!table.is_saturated(1));
+    assert!(!murm.is_saturated(1));
 }
 
 #[test]
@@ -1428,7 +1635,7 @@ fn replaces_subcircuit_with_shorter_synthesized_circuit() {
     circuit.apply(Gate::x(2));
     circuit.apply(Gate::h(2));
 
-    let pass = SuperOpt::analyzer(1, 3).with_synthesis_table(synthesis_table(1, 1));
+    let pass = SuperOpt::analyzer(1, 3).with_murm(murm(1, 1));
     let result = pass.run(&circuit).unwrap();
 
     assert_eq!(result.rewrites.len(), 1);
@@ -1457,7 +1664,7 @@ fn h_cnot_h_window_is_not_rewritten_to_cz() {
     });
     circuit.apply(Gate::h(3));
 
-    let pass = SuperOpt::analyzer(2, 3).with_synthesis_table(synthesis_table(2, 3));
+    let pass = SuperOpt::analyzer(2, 3).with_murm(murm(2, 3));
     let result = pass.run(&circuit).unwrap();
 
     assert!(
@@ -1477,7 +1684,7 @@ fn synthesized_cnot_preserves_direction_on_sparse_physical_qubits() {
         circuit.apply(Gate::h(target));
 
         let result = SuperOpt::analyzer(2, 3)
-            .with_synthesis_table(synthesis_table(2, 1))
+            .with_murm(murm(2, 1))
             .run(&circuit)
             .unwrap();
         assert_eq!(result.circuit.gates.len(), 1);
@@ -1503,7 +1710,7 @@ fn overlapping_synthesized_rewrites_are_not_both_applied() {
     circuit.apply(Gate::s(0));
     circuit.apply(Gate::s(0));
 
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 1));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 1));
     let result = pass.run(&circuit).unwrap();
 
     assert_eq!(result.rewrites.len(), 1);
@@ -1518,20 +1725,21 @@ fn overlapping_synthesized_rewrites_are_not_both_applied() {
 }
 
 #[test]
-fn synthesis_table_reports_entry_cap() {
-    let table = UnitaryCircuitTable::build(SuperOptTableConfig {
+fn murm_reports_entry_cap() {
+    let murm = Murm::build(MurmConfig {
         max_qubits: 4,
         max_gates: 6,
         max_entries_per_qubit: 100,
+        basis: BASE_GATE_SET,
     })
     .unwrap();
-    assert_eq!(table.entry_count(4), 100);
-    assert!(table.is_saturated(4));
+    assert_eq!(murm.entry_count(4), 100);
+    assert!(murm.is_saturated(4));
 }
 
 #[test]
-fn synthesis_table_handles_identity_only_and_layer_boundary_caps() {
-    let identity_only = UnitaryCircuitTable::build(SuperOptTableConfig::new(2, 3, 1)).unwrap();
+fn murm_handles_identity_only_and_layer_boundary_caps() {
+    let identity_only = Murm::build(MurmConfig::new(2, 3, 1)).unwrap();
     for width in 1..=2 {
         assert_eq!(identity_only.entry_count(width), 1);
         assert!(identity_only.is_saturated(width));
@@ -1539,8 +1747,7 @@ fn synthesis_table_handles_identity_only_and_layer_boundary_caps() {
     }
 
     // One-qubit depth one contains identity plus all seven library gates.
-    let complete_first_layer =
-        UnitaryCircuitTable::build(SuperOptTableConfig::new(1, 2, 8)).unwrap();
+    let complete_first_layer = Murm::build(MurmConfig::new(1, 2, 8)).unwrap();
     assert_eq!(complete_first_layer.entry_count(1), 8);
     assert!(complete_first_layer.is_saturated(1));
     assert_eq!(complete_first_layer.completed_depth(1), 1);
@@ -1548,13 +1755,13 @@ fn synthesis_table_handles_identity_only_and_layer_boundary_caps() {
 
 #[test]
 fn disk_round_trip_reproduces_the_built_table() {
-    let config = SuperOptTableConfig::new(3, 6, 5_000);
-    let built = UnitaryCircuitTable::build(config).unwrap();
+    let config = MurmConfig::new(3, 6, 5_000);
+    let built = Murm::build(config).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("table.bin");
+    let path = dir.path().join("murm.bin");
     built.write_to_disk(&path, config).unwrap();
-    let loaded = UnitaryCircuitTable::read_from_disk(&path, config).unwrap();
+    let loaded = Murm::read_from_disk(&path, config).unwrap();
 
     for width in 1..=3 {
         assert_eq!(built.entry_count(width), loaded.entry_count(width));
@@ -1562,12 +1769,12 @@ fn disk_round_trip_reproduces_the_built_table() {
         assert_eq!(built.completed_depth(width), loaded.completed_depth(width));
     }
 
-    // Every matrix the built table can synthesize, the loaded table
+    // Every matrix the built MURM can synthesize, the loaded MURM
     // synthesizes identically (same replacement circuit, not just "a" match).
     let mut checked = 0;
     for num_qubits in 1..=3 {
         let support: Vec<Qubit> = (0..num_qubits as Qubit).collect();
-        for gate in library_gates(num_qubits) {
+        for gate in library_gates(num_qubits, BASE_GATE_SET) {
             let mut matrix = UnitaryMatrix::identity(num_qubits).unwrap();
             matrix.apply_gate_left(&gate.to_gate(), &support).unwrap();
             assert_eq!(built.synthesize(&matrix), loaded.synthesize(&matrix));
@@ -1579,27 +1786,31 @@ fn disk_round_trip_reproduces_the_built_table() {
 
 #[test]
 fn disk_read_rejects_a_mismatched_config() {
-    let config = SuperOptTableConfig::new(2, 4, 1_000);
-    let built = UnitaryCircuitTable::build(config).unwrap();
+    let config = MurmConfig::new(2, 4, 1_000);
+    let built = Murm::build(config).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("table.bin");
+    let path = dir.path().join("murm.bin");
     built.write_to_disk(&path, config).unwrap();
 
-    let different_entries = SuperOptTableConfig::new(2, 4, 2_000);
-    assert!(UnitaryCircuitTable::read_from_disk(&path, different_entries).is_err());
+    let different_entries = MurmConfig::new(2, 4, 2_000);
+    assert!(Murm::read_from_disk(&path, different_entries).is_err());
 
-    let different_qubits = SuperOptTableConfig::new(1, 4, 1_000);
-    assert!(UnitaryCircuitTable::read_from_disk(&path, different_qubits).is_err());
+    let different_qubits = MurmConfig::new(1, 4, 1_000);
+    assert!(Murm::read_from_disk(&path, different_qubits).is_err());
+
+    let different_basis = MurmConfig::new(2, 4, 1_000)
+        .with_basis(BASE_GATE_SET.union(GateSet::singleton(GateKind::Cz)));
+    assert!(Murm::read_from_disk(&path, different_basis).is_err());
 }
 
 #[test]
 fn disk_read_rejects_a_different_crate_version() {
-    let config = SuperOptTableConfig::new(1, 2, 100);
-    let built = UnitaryCircuitTable::build(config).unwrap();
+    let config = MurmConfig::new(1, 2, 100);
+    let built = Murm::build(config).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("table.bin");
+    let path = dir.path().join("murm.bin");
     built.write_to_disk(&path, config).unwrap();
 
     // Corrupt the length-prefixed crate-version string right after the
@@ -1612,30 +1823,104 @@ fn disk_read_rejects_a_different_crate_version() {
     *last_byte = last_byte.wrapping_add(1);
     std::fs::write(&path, &bytes).unwrap();
 
-    assert!(UnitaryCircuitTable::read_from_disk(&path, config).is_err());
+    assert!(Murm::read_from_disk(&path, config).is_err());
 }
 
 #[test]
 fn disk_read_rejects_a_missing_or_corrupt_file() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does-not-exist.bin");
-    let config = SuperOptTableConfig::new(1, 2, 100);
-    assert!(UnitaryCircuitTable::read_from_disk(&missing, config).is_err());
+    let config = MurmConfig::new(1, 2, 100);
+    assert!(Murm::read_from_disk(&missing, config).is_err());
 
     let corrupt = dir.path().join("corrupt.bin");
-    std::fs::write(&corrupt, b"not a table cache").unwrap();
-    assert!(UnitaryCircuitTable::read_from_disk(&corrupt, config).is_err());
+    std::fs::write(&corrupt, b"not a MURM cache").unwrap();
+    assert!(Murm::read_from_disk(&corrupt, config).is_err());
+}
+
+fn murm_cache_body_offset(bytes: &[u8]) -> usize {
+    // magic + format + version-length byte + version + qubits + gates +
+    // entry cap + basis
+    27 + usize::from(bytes[8])
 }
 
 #[test]
-fn parallel_table_build_is_deterministic_across_thread_counts() {
-    let config = SuperOptTableConfig::new(2, 3, 20_000);
+fn disk_read_rejects_structurally_corrupt_bodies_before_using_their_lengths() {
+    let config = MurmConfig::new(2, 2, 100);
+    let built = Murm::build(config).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("murm.bin");
+    built.write_to_disk(&path, config).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let body = murm_cache_body_offset(&original);
+
+    let reject = |bytes: &[u8], expected: &str| {
+        std::fs::write(&path, bytes).unwrap();
+        let error = Murm::read_from_disk(&path, config).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    };
+
+    let mut huge_width_count = original.clone();
+    huge_width_count[body..body + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    reject(&huge_width_count, "width count");
+
+    // The width-zero table length immediately follows the width count. Its
+    // configured bound is zero, so this must fail before any allocation.
+    let mut huge_table = original.clone();
+    huge_table[body + 4..body + 12].copy_from_slice(&u64::MAX.to_le_bytes());
+    reject(&huge_table, "configured or file-size bound");
+
+    // width 0: 8-byte zero length. width 1: 8-byte length, then a 16-byte
+    // identity root and its first child. A child may only point backward.
+    let width_one_child = body + 4 + 8 + 8 + 16;
+    let mut cyclic_parent = original.clone();
+    cyclic_parent[width_one_child + 8..width_one_child + 12].copy_from_slice(&1u32.to_le_bytes());
+    reject(&cyclic_parent, "parent must precede");
+
+    let mut invalid_gate = original.clone();
+    invalid_gate[width_one_child + 12..width_one_child + 16].copy_from_slice(&[7, 0, 0, 0]);
+    reject(&invalid_gate, "outside its width or synthesis basis");
+}
+
+#[test]
+fn disk_read_rejects_checksum_mismatches_and_trailing_bytes() {
+    let config = MurmConfig::new(1, 2, 100);
+    let built = Murm::build(config).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("murm.bin");
+    built.write_to_disk(&path, config).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let body = murm_cache_body_offset(&original);
+
+    // Change a non-root node's fingerprint while leaving the structure valid;
+    // the body checksum must catch corruption that shape checks cannot.
+    let width_one_child = body + 4 + 8 + 8 + 16;
+    let mut changed_fingerprint = original.clone();
+    changed_fingerprint[width_one_child] ^= 0x80;
+    std::fs::write(&path, changed_fingerprint).unwrap();
+    let error = Murm::read_from_disk(&path, config).unwrap_err();
+    assert!(error.to_string().contains("checksum mismatch"), "{error}");
+
+    let mut trailing = original;
+    trailing.push(0);
+    std::fs::write(&path, trailing).unwrap();
+    let error = Murm::read_from_disk(&path, config).unwrap_err();
+    assert!(error.to_string().contains("trailing bytes"), "{error}");
+}
+
+#[test]
+fn parallel_murm_build_is_deterministic_across_thread_counts() {
+    let config = MurmConfig::new(2, 3, 20_000);
     let build = |threads| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap()
-            .install(|| UnitaryCircuitTable::build(config).unwrap())
+            .install(|| Murm::build(config).unwrap())
     };
     let sequential = build(1);
     let parallel = build(4);
@@ -1648,7 +1933,7 @@ fn parallel_table_build_is_deterministic_across_thread_counts() {
         );
     }
 
-    let gates = library_gates(2);
+    let gates = library_gates(2, BASE_GATE_SET);
     for &first in &gates {
         for &second in &gates {
             for &third in &gates {
@@ -1664,32 +1949,28 @@ fn parallel_table_build_is_deterministic_across_thread_counts() {
 }
 
 #[test]
-fn shared_table_cache_returns_one_arc_under_concurrency() {
-    let config = SuperOptTableConfig::new(1, 2, 97);
+fn shared_murm_cache_returns_one_arc_under_concurrency() {
+    let config = MurmConfig::new(1, 2, 97);
     let barrier = Arc::new(std::sync::Barrier::new(8));
     let handles: Vec<_> = (0..8)
         .map(|_| {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                shared_synthesis_table(config).unwrap()
+                shared_murm(config).unwrap()
             })
         })
         .collect();
-    let tables: Vec<_> = handles
+    let murms: Vec<_> = handles
         .into_iter()
         .map(|handle| handle.join().unwrap())
         .collect();
-    assert!(
-        tables[1..]
-            .iter()
-            .all(|table| Arc::ptr_eq(&tables[0], table))
-    );
+    assert!(murms[1..].iter().all(|murm| Arc::ptr_eq(&murms[0], murm)));
 }
 
 #[test]
 fn randomized_synthesized_rewrites_preserve_unitary() {
-    let table = synthesis_table(3, 2);
+    let murm = murm(3, 2);
     let mut rng = TestRng(0x51a7_4e51_5eed_cafe);
     for _ in 0..25 {
         let mut circuit = Circuit::new(3);
@@ -1714,7 +1995,7 @@ fn randomized_synthesized_rewrites_preserve_unitary() {
             circuit.apply(gate);
         }
 
-        let pass = SuperOpt::analyzer(3, 4).with_synthesis_table(Arc::clone(&table));
+        let pass = SuperOpt::analyzer(3, 4).with_murm(Arc::clone(&murm));
         let optimized = pass.run(&circuit).unwrap().circuit;
         assert!(crate::unitary::circuits_equiv(
             &circuit,
@@ -1783,11 +2064,12 @@ fn audit_rewrites(circuit: &Circuit, result: &SuperOptResult) {
 
 #[test]
 fn randomized_production_config_rewrites_are_sound() {
-    let table = Arc::new(
-        UnitaryCircuitTable::build(SuperOptTableConfig {
+    let murm = Arc::new(
+        Murm::build(MurmConfig {
             max_qubits: 4,
             max_gates: 3,
             max_entries_per_qubit: 2_000,
+            basis: BASE_GATE_SET,
         })
         .unwrap(),
     );
@@ -1827,7 +2109,7 @@ fn randomized_production_config_rewrites_are_sound() {
             circuit.apply(gate);
         }
 
-        let pass = SuperOpt::analyzer(4, 8).with_synthesis_table(Arc::clone(&table));
+        let pass = SuperOpt::analyzer(4, 8).with_murm(Arc::clone(&murm));
         let result = pass.run(&circuit).unwrap();
         audit_rewrites(&circuit, &result);
         assert!(result.circuit.gates.len() <= circuit.gates.len());
@@ -1847,7 +2129,7 @@ fn removes_noncontiguous_identity_subcircuit_from_circuit() {
     circuit.apply(Gate::h(0));
 
     let result = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 0))
+        .with_murm(murm(1, 0))
         .run(&circuit)
         .unwrap();
     assert_eq!(removed_indices(&result), vec![vec![0, 2]]);
@@ -1867,7 +2149,7 @@ fn checks_identity_windows_shorter_than_gate_limit() {
     circuit.apply(Gate::h(0));
 
     let result = SuperOpt::analyzer(1, 8)
-        .with_synthesis_table(synthesis_table(1, 0))
+        .with_murm(murm(1, 0))
         .run(&circuit)
         .unwrap();
     assert_eq!(removed_indices(&result), vec![vec![0, 1]]);
@@ -1895,7 +2177,7 @@ fn removes_identity_up_to_global_phase() {
     circuit.apply(Gate::z(0));
 
     let result = SuperOpt::analyzer(1, 4)
-        .with_synthesis_table(synthesis_table(1, 0))
+        .with_murm(murm(1, 0))
         .run(&circuit)
         .unwrap();
     assert_eq!(removed_indices(&result), vec![vec![0, 1, 2, 3]]);
@@ -1915,7 +2197,7 @@ fn overlapping_identity_windows_are_not_both_removed() {
     circuit.apply(Gate::x(0));
 
     let result = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 0))
+        .with_murm(murm(1, 0))
         .run(&circuit)
         .unwrap();
     assert_eq!(removed_indices(&result), vec![vec![0, 1]]);
@@ -1945,7 +2227,7 @@ fn implements_optimization_pass_interface() {
     circuit.apply(Gate::h(0));
     circuit.apply(Gate::h(0));
 
-    let pass = SuperOpt::analyzer(1, 2).with_synthesis_table(synthesis_table(1, 0));
+    let pass = SuperOpt::analyzer(1, 2).with_murm(murm(1, 0));
     let optimized = Pass::run(&pass, &circuit);
     assert!(optimized.gates.is_empty());
 }
@@ -2047,28 +2329,28 @@ fn rejects_zero_gate_window() {
     assert_eq!(error, SuperOptError::ZeroWindowGates);
 }
 
-fn load_optimizer_profile_table() -> Arc<UnitaryCircuitTable> {
+fn load_optimizer_profile_murm() -> Arc<Murm> {
     use std::time::Instant;
 
     let start = Instant::now();
-    let table = shared_synthesis_table(SuperOptTableConfig::default()).unwrap();
+    let murm = shared_murm(MurmConfig::default()).unwrap();
     println!(
-        "initialized optimizer synthesis table in {:.3} s: entries {:?}, complete depths {:?}",
+        "initialized optimizer MURM in {:.3} s: entries {:?}, complete depths {:?}",
         start.elapsed().as_secs_f64(),
         (1..=4)
-            .map(|num_qubits| table.entry_count(num_qubits))
+            .map(|num_qubits| murm.entry_count(num_qubits))
             .collect::<Vec<_>>(),
         (1..=4)
-            .map(|num_qubits| table.completed_depth(num_qubits))
+            .map(|num_qubits| murm.completed_depth(num_qubits))
             .collect::<Vec<_>>(),
     );
-    table
+    murm
 }
 
 #[test]
 #[ignore = "manual release-mode equivalence check on small benchmarks"]
 fn verify_small_benchmarks_preserve_unitary() {
-    let table = load_optimizer_profile_table();
+    let murm = load_optimizer_profile_murm();
     for name in ["tof_3", "barenco_tof_3", "mod5_4", "hwb6"] {
         let path = format!(
             "{}/benchmarks/feynman/{name}.qasm",
@@ -2076,7 +2358,7 @@ fn verify_small_benchmarks_preserve_unitary() {
         );
         let circuit = crate::qasm::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let pass = SuperOpt::analyzer(4, 8)
-            .with_synthesis_table(Arc::clone(&table))
+            .with_murm(Arc::clone(&murm))
             .without_subcircuits();
         let result = pass.run(&circuit).unwrap();
         assert!(
@@ -2105,7 +2387,7 @@ fn verify_small_benchmarks_preserve_unitary() {
 #[test]
 #[ignore = "manual release-mode randomized fuzz with guaranteed rewrites"]
 fn fuzz_subcircuit_rewrites_change_circuit_and_preserve_unitary() {
-    let table = load_optimizer_profile_table();
+    let murm = load_optimizer_profile_murm();
     let mut rng = TestRng(0xdeed_beef_5eed_0001);
     let num_cases = 10_000;
     for round in 0..num_cases {
@@ -2206,7 +2488,7 @@ fn fuzz_subcircuit_rewrites_change_circuit_and_preserve_unitary() {
             circuit.apply(gate);
         }
 
-        let pass = SuperOpt::analyzer(4, 8).with_synthesis_table(Arc::clone(&table));
+        let pass = SuperOpt::analyzer(4, 8).with_murm(Arc::clone(&murm));
         let result = pass.run(&circuit).unwrap();
         assert!(!result.rewrites.is_empty(), "round {round} made no rewrite");
         assert!(
@@ -2245,8 +2527,8 @@ fn audit_all_benchmark_rewrites() {
     }
     paths.sort();
 
-    let table = load_optimizer_profile_table();
-    let pass = SuperOpt::analyzer(4, 8).with_synthesis_table(Arc::clone(&table));
+    let murm = load_optimizer_profile_murm();
+    let pass = SuperOpt::analyzer(4, 8).with_murm(Arc::clone(&murm));
 
     let mut total_rewrites = 0;
     for path in paths {
@@ -2281,7 +2563,7 @@ fn warm_store_reproduces_cold_run() {
     });
     circuit.apply(Gate::t(1));
 
-    let pass = SuperOpt::analyzer(2, 3).with_synthesis_table(synthesis_table(2, 3));
+    let pass = SuperOpt::analyzer(2, 3).with_murm(murm(2, 3));
     let cold = pass.run(&circuit).unwrap();
     let warm = pass.run(&circuit).unwrap();
 
@@ -2305,7 +2587,7 @@ fn incremental_skips_unchanged_circuit_entirely() {
     circuit.apply(Gate::h(0));
 
     let pass = SuperOpt::analyzer(1, 3)
-        .with_synthesis_table(synthesis_table(1, 3))
+        .with_murm(murm(1, 3))
         .without_subcircuits()
         .incremental();
     let first = pass.run(&circuit).unwrap();
@@ -2330,7 +2612,7 @@ fn incremental_finds_rewrites_exposed_by_deletion() {
     after.apply(Gate::h(0));
 
     let pass = SuperOpt::analyzer(1, 2)
-        .with_synthesis_table(synthesis_table(1, 2))
+        .with_murm(murm(1, 2))
         .without_subcircuits()
         .incremental();
     assert!(pass.run(&before).unwrap().rewrites.is_empty());
@@ -2343,13 +2625,13 @@ fn incremental_matches_full_sweeps_on_random_circuits() {
     use crate::cancel::CancelGates;
 
     let mut rng = TestRng(0x1acf_1e90_b5e5_5ed1);
-    let table = synthesis_table(2, 4);
+    let murm = murm(2, 4);
     let incremental = SuperOpt::analyzer(2, 4)
-        .with_synthesis_table(Arc::clone(&table))
+        .with_murm(Arc::clone(&murm))
         .without_subcircuits()
         .incremental();
     let full = SuperOpt::analyzer(2, 4)
-        .with_synthesis_table(Arc::clone(&table))
+        .with_murm(Arc::clone(&murm))
         .without_subcircuits();
 
     for _ in 0..20 {
