@@ -104,53 +104,11 @@ tzap benchmarks/feynman/hwb12.qasm -O1 -o optimized.qasm
 
 **Optional decomposition**
 
-CCX, CCZ, CZ, and Rz stay native by default. Decomposition flags run after a
-input optimization stage, then tzap optimizes the decomposed circuit again:
+CCX, CCZ, CZ, and Rz stay native by default. To decompose them, use:
 
-```text
-native input → optimize → requested decompositions → optimize → output
-```
-
-Use `--decompose-ccx` to lower both CCX and CCZ, `--decompose-cz` for
-`H`+`CX`+`H`, and `--decompose-rz` when the target backend only accepts
-Clifford+T. Rz synthesis uses [gridsynth](https://crates.io/crates/rsgridsynth);
-`--epsilon` trades approximation accuracy for circuit size (default `1e-10`;
-larger is coarser).
-
-```bash
-tzap input.qasm -o output.qasm --decompose-rz --epsilon 1e-6
-```
-
-Requested decompositions run in the fixed order CCX/CCZ, CZ, then Rz.
-
-**SuperOpt synthesis basis**
-
-SuperOpt queries a MURM (minimal unitary representative map). Its base basis
-is `{h, x, z, s, sdg, t, tdg, cx}`. In the default `auto` mode it also adds
-any of `{cz, ccx, ccz}` present in the current optimization stage.
-
-```bash
-tzap input.qasm --superopt-gates auto
-tzap input.qasm --superopt-gates base
-tzap input.qasm --superopt-gates h,x,z,s,sdg,t,tdg,cx,cz
-```
-
-An explicit list is exact and affects only gates SuperOpt may emit. During the
-post-decomposition optimization stage, gates explicitly requested for
-decomposition are removed from that basis so optimization cannot synthesize
-them back into the output. The option does not restrict parsing or other
-optimization passes.
-
-**Custom pipeline**
-
-`--passes` runs an explicit, ordered sequence of passes in place of the default pipeline.
-In `auto` mode, every SuperOpt occurrence resolves its basis from the circuit
-produced by the preceding passes.
-
-```bash
-tzap input.qasm -o output.qasm --passes CancelGates,PhaseFoldRand
-tzap input.qasm -o output.qasm --passes DecomposeCz,CancelGates,PhaseFoldRand
-```
+- `--decompose-ccx` for CCX and CCZ
+- `--decompose-cz` for CZ
+- `--decompose-rz` for Rz
 
 ## Circuit support
 
