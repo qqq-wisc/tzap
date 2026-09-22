@@ -13,7 +13,7 @@
 A super fast, Rust-based optimizer for large Clifford+T circuits.
 - tzap is state-of-the-art in *speed*, *scalability*, and *gate-count reduction*.
 - tzap **minimizes T-count** with a new linear-time phase folding algorithm, based on [this paper](https://arxiv.org/abs/2605.13929).
-- tzap implements a new and fast **superoptimization** pass.
+- tzap implements a new and fast **superoptimization** pass, based on [this paper](https://ia.cr/2026/2115).
 - A **formally verified** Lean port of tzap is available in [`lean`](lean/).
 
 tzap is **multiple orders of magnitude** faster than other optimizers&mdash;and **linearly** **scales** to **millions** of gates!
@@ -137,7 +137,7 @@ Toffoli (`ccx`) and doubly controlled-Z (`ccz`) are auto-decomposed into Cliffor
 
 ## Citation
 
-If you use tzap in your research, please cite:
+If you use tzap in your research, please cite the following papers:
 
 ```bibtex
 @misc{albarghouthi2026tzap,
@@ -148,5 +148,15 @@ If you use tzap in your research, please cite:
       archivePrefix={arXiv},
       primaryClass={cs.PL},
       url={https://arxiv.org/abs/2605.13929}, 
+}
+```
+
+```bibtex
+@misc{cryptoeprint:2026/2115,
+      author = {Aws Albarghouthi},
+      title = {Fast Quantum-Circuit Superoptimization},
+      howpublished = {Cryptology {ePrint} Archive, Paper 2026/2115},
+      year = {2026},
+      url = {https://eprint.iacr.org/2026/2115}
 }
 ```
