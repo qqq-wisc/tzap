@@ -33,6 +33,8 @@ smallvec = "1"
 python = ["dep:pyo3"]
 
 [dev-dependencies]
+num-bigint = "0.4"
+num-rational = "0.4"
 tempfile = "3"
 rand = "0.8"
 
