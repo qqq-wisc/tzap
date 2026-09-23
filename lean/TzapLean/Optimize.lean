@@ -1,7 +1,8 @@
 import TzapLean.SuperOptProof
 import TzapLean.PhaseFoldRand
+import TzapLean.GF128Bridge
 import TzapLean.Qasm
-import TzapLean.TableCache
+import TzapLean.MurmCache
 import TzapLean.Pipeline
 
 /-!
@@ -11,15 +12,14 @@ A port of the parts of `src/optimize.rs` this development can support: the optim
 levels, the pass names selectable by `--passes`, the fixpoint loop, and the metrics the CLI
 reports.
 
-The three deterministic passes are `Pass`es and carry unconditional proofs. Phase folding is
+The deterministic passes are `Pass`es and carry unconditional proofs. Phase folding is
 executed with fresh 128-bit tags, like Rust, and is modelled by `RandPass`: its probability of
 failure is machine-checked under ideal independent uniform sampling. `ExecutableRandPass`
 keeps the OS entropy boundary explicit; no theorem here claims that the platform RNG itself is
 uniform.
 
-Not ported: `DecomposeToffoli`, `DecomposeCz`, `DecomposeRz` (gridsynth), `CliffordResynth`,
-and parallel chunking. `Level.O3` is therefore `O2` run to a true fixpoint, without Rust's
-one-shot Clifford re-synthesis at the end.
+Rz decomposition, Clifford re-synthesis, and parallel chunking are not ported. `Level.O3` is
+therefore `O2` run to a true fixpoint, without Rust's one-shot Clifford re-synthesis at the end.
 -/
 
 namespace TzapLean
@@ -83,13 +83,17 @@ deriving Repr, DecidableEq, Inhabited
 
 /-- A pass selectable by name in `--passes`. -/
 inductive PassName where
+  /-- Lower CCX and CCZ exactly to Clifford+T. -/
+  | DecomposeToffoli
+  /-- Lower CZ exactly to H/CX/H. -/
+  | DecomposeCz
   /-- Cancel adjacent self-inverse pairs and reduce Hadamards. -/
   | CancelGates
   /-- Re-synthesize CNOT-dihedral blocks. -/
   | CnotMin
-  /-- Peephole superoptimization against the synthesis table. -/
+  /-- Peephole superoptimization against a MURM. -/
   | SuperOpt
-  /-- Randomized phase folding with fresh 128-bit parity tags. -/
+  /-- Randomized nonlinear phase folding with fresh 128-bit field tags. -/
   | PhaseFoldRand
 deriving Repr, DecidableEq, Inhabited
 
@@ -97,14 +101,18 @@ namespace PassName
 
 /-- All passes — name, variant, and what it carries — in a stable order for listing. -/
 def all : List (String × PassName × String) :=
-  [ ("CancelGates", .CancelGates,
+  [ ("DecomposeToffoli", .DecomposeToffoli,
+     "Decompose CCX and CCZ exactly into Clifford+T"),
+    ("DecomposeCz", .DecomposeCz,
+     "Decompose CZ exactly into H, CX, H"),
+    ("CancelGates", .CancelGates,
      "Cancel adjacent self-inverse gate pairs and reduce Hadamards"),
     ("CnotMin", .CnotMin,
      "Re-synthesize CNOT-dihedral blocks to cut CNOT count"),
     ("SuperOpt", .SuperOpt,
-     "Peephole superoptimization against the exact synthesis table"),
+     "Peephole superoptimization against an exact MURM"),
     ("PhaseFoldRand", .PhaseFoldRand,
-     "Merge rotations on the same parity (randomized 128-bit tags)") ]
+     "Merge rotations on the same phase polynomial (randomized 128-bit tags)") ]
 
 /-- Parse a pass name. -/
 def parse (s : String) : Option PassName :=
@@ -123,14 +131,53 @@ end PassName
 
 /-! ## Options -/
 
-/-- `SuperOpt` window and table bounds, `none` meaning "whatever the level implies". -/
+/-- Which gate families SuperOpt may emit. -/
+inductive SuperOptGates where
+  /-- Base Clifford+T plus CZ/CCX/CCZ present in the current stage. -/
+  | auto
+  /-- The fixed Clifford+T base basis. -/
+  | base
+  /-- Exactly this nonempty subset of the supported synthesis gates. -/
+  | explicit (gates : GateSet)
+deriving Repr, Inhabited, DecidableEq
+
+namespace SuperOptGates
+
+/-- Resolve a basis from the circuit entering this particular SuperOpt occurrence. -/
+def effective (mode : SuperOptGates) (stage : GateSet) : GateSet :=
+  match mode with
+  | .auto => baseGateSet.union (stage.inter optionalGateSet)
+  | .base => baseGateSet
+  | .explicit gates => gates
+
+/-- Parse `auto`, `base`, or an exact comma-separated gate list. -/
+def parse (raw : String) : Except String SuperOptGates :=
+  if raw == "auto" then .ok .auto
+  else if raw == "base" then .ok .base
+  else
+    let names := (raw.splitOn ",").map (·.trimAscii.toString) |>.filter (· ≠ "")
+    if names.isEmpty then .error "--superopt-gates requires auto, base, or a nonempty gate list"
+    else do
+      let mut gates := GateSet.empty
+      for name in names do
+        let some kind := GateKind.parse name |
+          throw s!"unsupported SuperOpt gate '{name}'"
+        if !supportedGateSet.contains kind then
+          throw s!"gate '{name}' cannot be used for SuperOpt synthesis"
+        gates := gates.insert kind
+      if gates.isEmpty then .error "--superopt-gates requires a nonempty gate list"
+      else .ok (.explicit gates)
+
+end SuperOptGates
+
+/-- `SuperOpt` window and MURM bounds, `none` meaning "whatever the level implies". -/
 structure SuperOptBounds where
-  /-- Widest window and table, in wires. -/
+  /-- Widest window and MURM, in wires. -/
   qubits : Option Nat := none
   /-- Longest window, in gates. -/
   windowGates : Option Nat := none
-  /-- Cap on stored unitaries per table width. -/
-  tableEntries : Option Nat := none
+  /-- Cap on stored unitaries per MURM width. -/
+  murmEntries : Option Nat := none
 deriving Repr, Inhabited
 
 /-- Everything the driver needs. -/
@@ -143,34 +190,48 @@ structure Options where
   fixpoint : Bool := false
   /-- `SuperOpt` bounds overrides. -/
   superopt : SuperOptBounds := {}
+  /-- How the synthesis basis is selected at each SuperOpt stage. -/
+  superoptGates : SuperOptGates := .auto
+  /-- Lower CCX and CCZ between the two optimization stages. -/
+  decomposeCcx : Bool := false
+  /-- Lower CZ between the two optimization stages. -/
+  decomposeCz : Bool := false
   /-- Compatibility value accepted from `--seed`; OS-backed phase folding ignores it. -/
   seed : Option Nat := none
-  /-- Print detailed input and synthesis-table loading information. -/
+  /-- Print detailed input and MURM-loading information. -/
   verbose : Bool := false
 deriving Repr, Inhabited
 
-/-- The window/table bounds a level implies: Rust's own — 3 wires, 25-gate windows, a
-200,000-entry table, with the same `table_gates = window_gates - 1` mapping.
+/-- Optional native families that a requested decomposition stage must not allow SuperOpt to
+reintroduce afterward. -/
+def Options.decomposedGateSet (o : Options) : GateSet :=
+  let set := if o.decomposeCcx then GateSet.ofKinds [.ccx, .ccz] else GateSet.empty
+  if o.decomposeCz then set.insert .cz else set
 
-That table takes about 76 seconds to build here against Rust's parallel builder, which is
-affordable only because it is built once and cached (`TableCache`): a warm run loads its
+/-- The window/MURM bounds a level implies: Rust's own — 3 wires, 25-gate windows, a
+200,000-entry MURM, with the same `table_gates = window_gates - 1` mapping.
+
+That MURM takes about 76 seconds to build here against Rust's parallel builder, which is
+affordable only because it is built once and cached (`MurmCache`): a warm run loads its
 549,456 unitaries in 0.07 s. `--superopt-qubits`, `--superopt-window-gates` and
 `--superopt-table-entries` override any of the three. -/
 def Level.bounds : Level → Nat × Nat × Nat
   | _ => (3, 25, 200000)
 
 /-- Resolve the bounds for a run: level preset, then any explicit override. -/
-def resolveBounds (o : Options) : SuperOptConfig × SuperOptTableConfig :=
+def resolveBounds (o : Options) (stage : GateSet) (forbidden : GateSet := GateSet.empty) :
+    SuperOptConfig × MurmConfig :=
   let (q, w, e) := o.level.bounds
   let q := o.superopt.qubits.getD q
   let w := o.superopt.windowGates.getD w
-  let e := o.superopt.tableEntries.getD e
-  -- A table entry only ever replaces a strictly larger window, so the table never needs to
+  let e := o.superopt.murmEntries.getD e
+  let basis := (o.superoptGates.effective stage).diff forbidden
+  -- A MURM entry only ever replaces a strictly larger window, so the MURM never needs to
   -- be deeper than `windowGates - 1`.
   ({ maxQubits := q, maxWindow := w }, { maxQubits := q, maxGates := w - 1,
-                                         maxEntriesPerQubit := e })
+                                         maxEntriesPerQubit := e, basis })
 
-/-- Whether a level's pipeline includes `SuperOpt`, and so pays for a table. -/
+/-- Whether a level's pipeline includes `SuperOpt`, and so pays for a MURM. -/
 def Level.usesSuperOpt : Level → Bool
   | .O1 => false
   | _ => true
@@ -182,17 +243,25 @@ its samples from the operating system rather than evaluating the `PMF`; the boun
 applies under the explicit assumption that those samples realize the model's independent
 uniform draws. -/
 
-/-- Tag width for phase folding, matching Rust's `u128` parity hashes. One invocation fails
-with probability at most `C(t,2)·2⁻¹²⁸` in the ideal model. -/
+/-- Tag width for phase folding, matching Rust's `u128` fingerprints. -/
 def tagBits : Nat := 128
 
 /-- **The verified object a pass name denotes.** The three deterministic passes enter at
 error `0` with a one-point seed; phase folding is the one that consumes randomness. -/
-noncomputable def passOf (cfg : SuperOptConfig) (tbl : SynthTable) : PassName → RandPass
+noncomputable def passOf (cfg : SuperOptConfig) (murm : Murm) : PassName → RandPass
+  | .DecomposeToffoli => DecomposeToffoliR
+  | .DecomposeCz => DecomposeCzR
   | .CancelGates => CancelGatesR
   | .CnotMin => CnotMinR
-  | .SuperOpt => SuperOptR cfg tbl
-  | .PhaseFoldRand => PhaseFoldRand tagBits
+  | .SuperOpt => SuperOptR cfg murm
+  | .PhaseFoldRand => PhaseFoldRand
+
+/-- The idealized pipeline applies the nonlinear transformation to its sampled circuit. -/
+theorem passOf_phaseFoldRand_run (cfg : SuperOptConfig) (murm : Murm)
+    (circuit : Circuit n m)
+    (sample : (passOf cfg murm .PhaseFoldRand).Seed circuit) :
+    (passOf cfg murm .PhaseFoldRand).run circuit sample =
+      phaseFoldNonlinearWithSample 128 circuit sample := rfl
 
 /-- The pipeline a level runs, when `--passes` is absent.
 
@@ -203,13 +272,13 @@ def Level.pipeline : Level → List PassName
   | _ => [.CnotMin, .CancelGates, .SuperOpt, .PhaseFoldRand]
 
 /-- One round of the idealized randomized pipeline, in executable pass order. -/
-noncomputable def tzapRound (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName) :
-    RandPass := RandPass.pipeline (names.map (passOf cfg tbl))
+noncomputable def tzapRound (cfg : SuperOptConfig) (murm : Murm) (names : List PassName) :
+    RandPass := RandPass.pipeline (names.map (passOf cfg murm))
 
 /-- The idealized randomized round, repeated while it keeps removing gates, at most `fuel`
 times. -/
-noncomputable def tzapRun (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
-    (fuel : Nat) : RandPass := (tzapRound cfg tbl names).fixpointShrink fuel
+noncomputable def tzapRun (cfg : SuperOptConfig) (murm : Murm) (names : List PassName)
+    (fuel : Nat) : RandPass := (tzapRound cfg murm names).fixpointShrink fuel
 
 /-! ### What the run is worth
 
@@ -217,8 +286,8 @@ Two statements, and between them they say what the optimizer guarantees.
 
 `tzapRun_correct` is the general one: the output denotes the same channel as the input except
 on a set of seeds whose measure is at most `error`, which by `fixpointShrink_error_le` and
-`pipeline_error_le` is at most (rounds × passes) times one phase fold's `C(t,2)·2⁻ᵏ`. Note
-that this needs no independence *between* rounds' failure events — a union bound never does —
+`pipeline_error_le` is at most the sum of the nonlinear comparison bounds across phase-fold
+invocations. This needs no independence *between* rounds' failure events — a union bound never does —
 only that each round's tags are drawn afresh, which is why `PhaseFoldRandExec` draws per call.
 
 `tzapRun_exact` is the special one: drop `PhaseFoldRand` from `--passes` and the bound is
@@ -226,63 +295,73 @@ only that each round's tags are drawn afresh, which is why `PhaseFoldRandExec` d
 unconditional `Pass` guarantee. -/
 
 theorem passOf_error_eq_zero {nm : PassName} (h : nm ≠ .PhaseFoldRand) (cfg : SuperOptConfig)
-    (tbl : SynthTable) (c : Circuit n m) : (passOf cfg tbl nm).error c = 0 := by
+    (murm : Murm) (c : Circuit n m) : (passOf cfg murm nm).error c = 0 := by
   cases nm <;> simp_all [passOf, CancelGatesR, CnotMinR, SuperOptR, deterministicRand]
 
 theorem tzapRound_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
-    (cfg : SuperOptConfig) (tbl : SynthTable) (c : Circuit n m) :
-    (tzapRound cfg tbl names).error c = 0 := by
+    (cfg : SuperOptConfig) (murm : Murm) (c : Circuit n m) :
+    (tzapRound cfg murm names).error c = 0 := by
   refine le_antisymm ?_ (by simp)
-  have := RandPass.pipeline_error_le 0 (names.map (passOf cfg tbl)) ?_ c
+  have := RandPass.pipeline_error_le 0 (names.map (passOf cfg murm)) ?_ c
   · simpa [tzapRound] using this
   · intro p hp n' m' c
     obtain ⟨nm, hnm, rfl⟩ := List.mem_map.1 hp
-    exact le_of_eq (passOf_error_eq_zero (by rintro rfl; exact h hnm) cfg tbl c)
+    exact le_of_eq (passOf_error_eq_zero (by rintro rfl; exact h hnm) cfg murm c)
 
 theorem tzapRun_error_eq_zero {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
-    (cfg : SuperOptConfig) (tbl : SynthTable) (fuel : Nat) (c : Circuit n m) :
-    (tzapRun cfg tbl names fuel).error c = 0 := by
+    (cfg : SuperOptConfig) (murm : Murm) (fuel : Nat) (c : Circuit n m) :
+    (tzapRun cfg murm names fuel).error c = 0 := by
   refine le_antisymm ?_ (by simp)
-  have := RandPass.fixpointShrink_error_le (tzapRound cfg tbl names) 0
-    (fun c => le_of_eq (tzapRound_error_eq_zero h cfg tbl c)) fuel c
+  have := RandPass.fixpointShrink_error_le (tzapRound cfg murm names) 0
+    (fun c => le_of_eq (tzapRound_error_eq_zero h cfg murm c)) fuel c
   simpa [tzapRun] using this
 
 /-- **The optimizer is correct.** For a well-formed circuit, the pipeline's output denotes the
 same channel as its input, except on a set of seeds of measure at most `error`. -/
-theorem tzapRun_correct (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
+theorem tzapRun_correct (cfg : SuperOptConfig) (murm : Murm) (names : List PassName)
     (fuel : Nat) (c : Circuit n m) :
-    ((tzapRun cfg tbl names fuel).dist c).toOuterMeasure
-        {s | ¬ ((tzapRun cfg tbl names fuel).run c s).Equivalent c}
-      ≤ (tzapRun cfg tbl names fuel).error c :=
-  (tzapRun cfg tbl names fuel).correct c
+    ((tzapRun cfg murm names fuel).dist c).toOuterMeasure
+        {s | ¬ ((tzapRun cfg murm names fuel).run c s).Equivalent c}
+      ≤ (tzapRun cfg murm names fuel).error c :=
+  (tzapRun cfg murm names fuel).correct c
 
 /-- **…and exactly correct without the randomized pass.** -/
 theorem tzapRun_exact {names : List PassName} (h : PassName.PhaseFoldRand ∉ names)
-    (cfg : SuperOptConfig) (tbl : SynthTable) (fuel : Nat) (c : Circuit n m)
-    {s : (tzapRun cfg tbl names fuel).Seed c}
-    (hs : s ∈ ((tzapRun cfg tbl names fuel).dist c).support) :
-    ((tzapRun cfg tbl names fuel).run c s).Equivalent c :=
-  RandPass.correct_of_error_eq_zero _ c (tzapRun_error_eq_zero h cfg tbl fuel c) hs
+    (cfg : SuperOptConfig) (murm : Murm) (fuel : Nat) (c : Circuit n m)
+    {s : (tzapRun cfg murm names fuel).Seed c}
+    (hs : s ∈ ((tzapRun cfg murm names fuel).dist c).support) :
+    ((tzapRun cfg murm names fuel).run c s).Equivalent c :=
+  RandPass.correct_of_error_eq_zero _ c (tzapRun_error_eq_zero h cfg murm fuel c) hs
 
 /-- **The run returns a circuit the back end may print**, for any seed: operands in range and
 honest `has*` flags, from `RandPass`'s structural obligations. With `Qasm.parse_valid`, which
 establishes the same of whatever the front end accepts, this holds from parse to emit. -/
-theorem tzapRun_structural (cfg : SuperOptConfig) (tbl : SynthTable) (names : List PassName)
+theorem tzapRun_structural (cfg : SuperOptConfig) (murm : Murm) (names : List PassName)
     (fuel : Nat) (c : Circuit n m) (hc : c.raw.Structural)
-    (s : (tzapRun cfg tbl names fuel).Seed c) :
-    ((tzapRun cfg tbl names fuel).run c s).raw.Structural :=
-  ⟨(tzapRun cfg tbl names fuel).wellFormed_run c s hc.1,
-   (tzapRun cfg tbl names fuel).flagsOk_run c s hc.2⟩
+    (s : (tzapRun cfg murm names fuel).Seed c) :
+    ((tzapRun cfg murm names fuel).run c s).raw.Structural :=
+  ⟨(tzapRun cfg murm names fuel).wellFormed_run c s hc.1,
+   (tzapRun cfg murm names fuel).flagsOk_run c s hc.2⟩
 
 /-! ## Randomized executable core -/
 
 /-- The runtime interpretation of a pass name. Deterministic passes are lifted into `IO`;
 phase folding obtains a fresh OS-random sample on every invocation. -/
-def executableStep (cfg : SuperOptConfig) (tbl : SynthTable) : PassName → ExecutableRandPass
+def executableStep (cfg : SuperOptConfig) (murm : Murm) : PassName → ExecutableRandPass
+  | .DecomposeToffoli => ExecutableRandPass.ofPass DecomposeToffoli
+  | .DecomposeCz => ExecutableRandPass.ofPass DecomposeCz
   | .CancelGates => ExecutableRandPass.ofPass CancelGates
   | .CnotMin => ExecutableRandPass.ofPass CnotMin
-  | .SuperOpt => ExecutableRandPass.ofPass (SuperOpt cfg tbl)
-  | .PhaseFoldRand => PhaseFoldRandExec tagBits
+  | .SuperOpt => ExecutableRandPass.ofPass (SuperOpt cfg murm)
+  | .PhaseFoldRand => PhaseFoldRandExec
+
+/-- Execution draws a sample, then applies the very same pure nonlinear pass as the
+probability model. The theorem does not assert that OS bytes are uniformly distributed. -/
+theorem executablePhaseFoldRand_run (cfg : SuperOptConfig) (murm : Murm)
+    (circuit : Circuit n m) :
+    (executableStep cfg murm .PhaseFoldRand).run circuit = do
+      let sample ← randomSample (varBound circuit.raw) 128
+      return (passOf cfg murm .PhaseFoldRand).run circuit sample := rfl
 
 /-- How many fixpoint rounds a level allows: `O2` is the cheap bounded tier, the rest run out
 fully. -/
@@ -345,10 +424,10 @@ deriving Repr, Inhabited
 /-- The checked randomized core used by the CLI. Conditional composition ensures that each
 phase-folding invocation draws after seeing the circuit produced by the preceding passes and
 rounds. -/
-def runConfiguredChecked (cfg : SuperOptConfig) (tbl : SynthTable)
+def runConfiguredChecked (cfg : SuperOptConfig) (murm : Murm)
     (c : Circuit n m) (o : Options) : IO (Circuit n m) := do
   let names := o.passes.getD o.level.pipeline
-  let round := ExecutableRandPass.pipeline (names.map (executableStep cfg tbl))
+  let round := ExecutableRandPass.pipeline (names.map (executableStep cfg murm))
   if o.passes.isSome then
     if o.fixpoint then (round.fixpointShrink (roundFuel none c.raw)).run c
     else round.run c
@@ -360,41 +439,88 @@ def runConfiguredChecked (cfg : SuperOptConfig) (tbl : SynthTable)
 
 /-- Raw randomized API boundary. Malformed internal circuits are left unchanged; parsed QASM
 always takes the checked branch. -/
-def runConfigured (cfg : SuperOptConfig) (tbl : SynthTable)
+def runConfigured (cfg : SuperOptConfig) (murm : Murm)
     (c : RawCircuit) (o : Options) : IO RawCircuit := do
   if hc : c.Wf then
-    return (← runConfiguredChecked cfg tbl (Circuit.of c hc) o).raw
+    return (← runConfiguredChecked cfg murm (Circuit.of c hc) o).raw
   else return c
 
-/-- Run the optimizer. Builds the synthesis table first when the pipeline needs one, then
-delegates the circuit transformation to the OS-randomized executable pipeline. -/
-def optimize (c : RawCircuit) (o : Options) : IO (RawCircuit × Report) := do
-  let names := o.passes.getD o.level.pipeline
-  let (cfg, tcfg) := resolveBounds o
-  -- Only pay for a table if some selected pass will consult it.
-  let needsTable := names.contains .SuperOpt
-  let tbl ← if needsTable then do
-      -- Captured before the load below can create the file, so a cold run says so.
-      let cached ← TableCache.isCached tcfg
-      -- A cold build takes tens of seconds, so it is announced even quietly; a warm load is
-      -- fast enough to stay silent unless asked for.
+/-- Run one verified deterministic pass at the raw API boundary. -/
+def runPassRaw (pass : Pass) (c : RawCircuit) : RawCircuit :=
+  if hc : c.Wf then (pass.run (Circuit.of c hc)).raw else c
+
+/-- Load exactly the MURM needed by one stage.  An empty synthesis basis disables SuperOpt
+for that stage instead of constructing a useless map. -/
+def prepareMurm (c : RawCircuit) (o : Options) (forbidden : GateSet)
+    (names : List PassName) : IO (SuperOptConfig × MurmConfig × Murm) := do
+  let (cfg, murmCfg) := resolveBounds o c.gateSet forbidden
+  let needsMurm := names.contains .SuperOpt && !murmCfg.basis.isEmpty
+  let murm ← if needsMurm then do
+      let cached ← MurmCache.isCached murmCfg
       if !cached then
-        IO.eprintln "  🔧 Building superoptimizer table (one-time — cached for future use)..."
+        IO.eprintln "  🔧 Building MURM (one-time — cached for future use)..."
       let t0 ← IO.monoNanosNow
-      let (tbl, fromCache) ← TableCache.loadOrBuild tcfg
-      let total := (List.range (tcfg.maxQubits + 1)).foldl
-        (fun acc k => acc + (tbl.widths[k]?.map WidthTable.size |>.getD 0)) 0
+      let (murm, fromCache) ← MurmCache.loadOrBuild murmCfg
+      let total := (List.range (murmCfg.maxQubits + 1)).foldl
+        (fun acc k => acc + (murm.widths[k]?.map WidthMurm.size |>.getD 0)) 0
       force fun _ => total
       let t1 ← IO.monoNanosNow
       if o.verbose || !fromCache then
         let verb := if fromCache then "Loaded" else "Built"
-        IO.eprintln s!"  {verb} superoptimizer table ({fmtNum total} unitaries) in \
+        IO.eprintln s!"  {verb} MURM ({fmtNum total} unitaries) in \
                        {fmtSecs (t1 - t0)}s"
+        IO.eprintln s!"    └─ Synthesis basis: {murmCfg.basis}"
         IO.eprintln ""
-      pure tbl
+      pure murm
     else pure default
+  return (cfg, murmCfg, murm)
+
+/-- One default optimization stage, with its synthesis basis resolved from the circuit that
+actually enters the stage. -/
+def runDefaultStage (c : RawCircuit) (o : Options) (forbidden : GateSet) : IO RawCircuit := do
+  let names := o.level.pipeline
+  let (cfg, _, murm) ← prepareMurm c o forbidden names
+  runConfigured cfg murm c { o with passes := none }
+
+/-- Run an explicit pipeline once.  SuperOpt is handled at the pass boundary so `auto`
+observes every preceding transformation, including an explicit decomposition. -/
+def runExplicitSweep (c : RawCircuit) (o : Options) : List PassName → IO RawCircuit
+  | [] => pure c
+  | name :: names => do
+      let (cfg, murmCfg, murm) ← prepareMurm c o GateSet.empty [name]
+      let next ← if name == .SuperOpt && murmCfg.basis.isEmpty then pure c
+        else runConfigured cfg murm c { o with passes := some [name], fixpoint := false }
+      runExplicitSweep next o names
+
+/-- Repeat an explicit pipeline while it strictly shrinks the circuit. -/
+def runExplicitFixpoint : Nat → RawCircuit → Options → List PassName → IO RawCircuit
+  | 0, c, _, _ => pure c
+  | fuel + 1, c, o, names => do
+      let next ← runExplicitSweep c o names
+      if next.gates.length < c.gates.length then runExplicitFixpoint fuel next o names
+      else pure next
+
+/-- Run the optimizer. Loads the stage's MURM when the pipeline needs one, then
+delegates the circuit transformation to the OS-randomized executable pipeline. -/
+def optimize (c : RawCircuit) (o : Options) : IO (RawCircuit × Report) := do
   let baseline := Metrics.of c
-  let result ← runConfigured cfg tbl c o
+  let result ← match o.passes with
+    | some names =>
+        if o.fixpoint then runExplicitFixpoint (roundFuel none c) c o names
+        else runExplicitSweep c o names
+    | none => do
+        -- The default workflow deliberately optimizes before lowering native gates.
+        let inputOptimized ← runDefaultStage c o GateSet.empty
+        let mut decomposed := false
+        let mut result := inputOptimized
+        let ccxKinds := GateSet.ofKinds [.ccx, .ccz]
+        if o.decomposeCcx && !(result.gateSet.inter ccxKinds).isEmpty then
+          result := runPassRaw DecomposeToffoli result
+          decomposed := true
+        if o.decomposeCz && result.gateSet.contains .cz then
+          result := runPassRaw DecomposeCz result
+          decomposed := true
+        if decomposed then runDefaultStage result o o.decomposedGateSet else pure result
   return (result, ⟨baseline, Metrics.of result⟩)
 
 end TzapLean

@@ -11,7 +11,7 @@ input (`superOptGates_correct`).
 The exact-matrix checks come first: they are what a floating-point implementation would get
 subtly wrong, and what the cyclotomic representation exists to get right.
 
-The pass tests share **one** table. Each `#guard` is evaluated independently, so a table
+The pass tests share **one** MURM. Each `#guard` is evaluated independently, so a MURM
 built inside each would be rebuilt each time; `passFailures` therefore builds it once and
 runs every case against it. When a case fails, `#eval passFailures` names it.
 -/
@@ -57,7 +57,7 @@ def sampleCycs : List Cyc :=
   [⟨0,0,0,0⟩, ⟨1,0,0,0⟩, ⟨0,1,0,0⟩, ⟨0,0,1,0⟩, ⟨0,0,0,1⟩,
    ⟨1,2,3,4⟩, ⟨-1,2,-3,4⟩, ⟨127,-127,3,-9⟩, ⟨-5,-6,-7,-8⟩]
 
--- The one-step `ω^p` the table builder uses is the recursive one, for every `p` mod 8.
+-- The one-step `ω^p` the MURM builder uses is the recursive one, for every `p` mod 8.
 #guard sampleCycs.all fun x => (List.range 24).all fun p => x.timesOmegaFast p == x.timesOmega p
 
 /-! ## Canonical window-shape cache -/
@@ -89,22 +89,42 @@ def blockedTagged : List Tagged := [(h 0, some 0), (x 0, none), (h 0, some 0)]
 #guard !sepAllB (fun _ => [0]) blockedTagged
 #guard sepAllB (fun _ => [0]) blockedTagged = sepB (fun _ => [0]) [] blockedTagged
 
-/-! ## The library gate set
-
-`library_gates(k)` has `7k` one-wire gates and `k(k−1)` `CNOT`s — Rust asserts exactly these
-counts. `ccx` and `cz` are absent by design, so a rewrite never introduces them. -/
+/-! ## The library gate set -/
 
 #guard (libGates 1).length == 7
 #guard (libGates 2).length == 16
 #guard (libGates 3).length == 27
 #guard (libGates 4).length == 40
+#guard (libGates 3 (GateSet.singleton .cz)).length == 3
+#guard (libGates 3 (GateSet.singleton .ccx)).length == 3
+#guard (libGates 3 (GateSet.singleton .ccz)).length == 1
+#guard (libGates 3 optionalGateSet).length == 7
 
-/-! ## The table
+#guard (libGates 3 (GateSet.singleton .cz)).all fun g => g.kind == .cz
+#guard (libGates 3 (GateSet.singleton .ccx)).all fun g =>
+  match g with | .ccx a b target => a < b && target != a && target != b | _ => false
+#guard (libGates 4 (GateSet.singleton .ccz)).all fun g =>
+  match g with | .ccz a b c => a < b && b < c | _ => false
 
-Rust asserts a depth-1 width-1 table holds 8 unitaries and reports depth 1. -/
+def singletonMurmSynthesizes (kind : GateKind) (gate : Gate) : Bool :=
+  let cfg : MurmConfig :=
+    { maxQubits := 3, maxGates := 1, maxEntriesPerQubit := 32,
+      basis := GateSet.singleton kind }
+  let murm := buildMurm cfg
+  match ExactMat.matrixOf 3 [gate] with
+  | none => false
+  | some matrix => murm.synthesize 3 matrix.normalize == some [gate]
 
-/-- A depth-1 width-1 table, for the counts Rust checks. -/
-def tinyTable : WidthTable := buildWidth 1 { maxQubits := 1, maxGates := 1 }
+#guard singletonMurmSynthesizes .cz (.cz 0 1)
+#guard singletonMurmSynthesizes .ccx (.ccx 0 1 2)
+#guard singletonMurmSynthesizes .ccz (.ccz 0 1 2)
+
+/-! ## The MURM
+
+Rust asserts a depth-1 width-1 MURM holds 8 unitaries and reports depth 1. -/
+
+/-- A depth-1 width-1 MURM, for the counts Rust checks. -/
+def tinyTable : WidthMurm := buildWidth 1 { maxQubits := 1, maxGates := 1 }
 
 #guard tinyTable.size == 8
 #guard tinyTable.depth == 1
@@ -116,7 +136,7 @@ def tinyTable : WidthTable := buildWidth 1 { maxQubits := 1, maxGates := 1 }
 /-! ## The pass -/
 
 /-- Two wires, replacements of up to three gates. -/
-def tcfg : SuperOptTableConfig := { maxQubits := 2, maxGates := 3 }
+def tcfg : MurmConfig := { maxQubits := 2, maxGates := 3 }
 
 /-- Windows of up to six gates on up to two wires. -/
 def cfg : SuperOptConfig := { maxQubits := 2, maxWindow := 6 }
@@ -177,9 +197,9 @@ def bridgeCases : List (String × Nat × List Gate × List Gate) :=
     ("bridge t", 2, [t 0, h 1, cnot 0 1, tdg 0], [h 1, cnot 0 1]) ]
 
 def bridgeFailures : List String :=
-  let tbl := buildTable tcfg
+  let murm := buildMurm tcfg
   bridgeCases.filterMap fun (name, n, inp, want) =>
-    if superOptGates cfg tbl n inp == want then none else some name
+    if superOptGates cfg murm n inp == want then none else some name
 
 #guard bridgeFailures.isEmpty
 
@@ -191,21 +211,21 @@ simultaneous-window scan from the old earliest-anchor scan, which looked through
 before giving the `s` anchor a turn. -/
 def completionOrderOk : Bool :=
   let inp := [x 0, s 1, s 1, cnot 0 1]
-  let tbl := buildTable tcfg
-  let st := proposeRewrites cfg tbl 2 inp.toArray
+  let murm := buildMurm tcfg
+  let st := proposeRewrites cfg murm 2 inp.toArray
   st.tags.toList == [none, some 0, some 0, none] &&
-    superOptGates cfg tbl 2 inp == [x 0, z 1, cnot 0 1]
+    superOptGates cfg murm 2 inp == [x 0, z 1, cnot 0 1]
 
 #guard completionOrderOk
 
 /-- The second pair has the same support-local shape as the first pair on another physical
 wire, so its synthesis answer comes from the scan-local cache. -/
 def shapeCacheReusesAnswer : Bool :=
-  let tbl := buildTable tcfg
+  let murm := buildMurm tcfg
   let inp := #[h 0, h 0, h 1, h 1]
-  let st := proposeRewrites cfg tbl 2 inp
+  let st := proposeRewrites cfg murm 2 inp
   st.shapeHits > 0 && st.shapeMisses > 0 &&
-    superOptGates cfg tbl 2 inp.toList == []
+    superOptGates cfg murm 2 inp.toList == []
 
 #guard shapeCacheReusesAnswer
 
@@ -214,18 +234,18 @@ def shapeCacheReusesAnswer : Bool :=
 `superOptGates` is *one forward scan*, because `SuperOpt::run` is one forward scan: a case
 needing two rewrites on the same wires needs two of them, and it is the pipeline that repeats
 the pass, not the pass that repeats itself. -/
-def superOptFix (tbl : SynthTable) (n : Nat) : Nat → List Gate → List Gate
+def superOptFix (murm : Murm) (n : Nat) : Nat → List Gate → List Gate
   | 0, gs => gs
   | fuel + 1, gs =>
-      let gs' := superOptGates cfg tbl n gs
-      if gs'.length < gs.length then superOptFix tbl n fuel gs' else gs'
+      let gs' := superOptGates cfg murm n gs
+      if gs'.length < gs.length then superOptFix murm n fuel gs' else gs'
 
-/-- Cases whose fixpoint differs from what is expected — empty when all pass. One table serves
+/-- Cases whose fixpoint differs from what is expected — empty when all pass. One MURM serves
 every case. -/
 def passFailures : List String :=
-  let tbl := buildTable tcfg
+  let murm := buildMurm tcfg
   passCases.filterMap fun (name, n, inp, want) =>
-    if superOptFix tbl n inp.length inp == want then none else some name
+    if superOptFix murm n inp.length inp == want then none else some name
 
 #guard passFailures.isEmpty
 
@@ -239,43 +259,80 @@ def oneScanCases : List (String × Nat × List Gate × List Gate) :=
     ("(hs)^3", 1, [h 0, s 0, h 0, s 0, h 0, s 0], [sdg 0, h 0, h 0, s 0]) ]
 
 def oneScanFailures : List String :=
-  let tbl := buildTable tcfg
+  let murm := buildMurm tcfg
   oneScanCases.filterMap fun (name, n, inp, want) =>
-    if superOptGates cfg tbl n inp == want then none else some name
+    if superOptGates cfg murm n inp == want then none else some name
 
 #guard oneScanFailures.isEmpty
 
 /-- Every other case *is* finished by a single scan. -/
 def singleScanSuffices : List String :=
-  let tbl := buildTable tcfg
+  let murm := buildMurm tcfg
   passCases.filterMap fun (name, n, inp, want) =>
     if oneScanCases.any (·.1 == name) then none
-    else if superOptGates cfg tbl n inp == want then none else some name
+    else if superOptGates cfg murm n inp == want then none else some name
 
 #guard singleScanSuffices.isEmpty
 
 /-- Iterating reaches a fixpoint: one more scan over the settled circuit changes nothing. -/
 def fixpointFailures : List String :=
-  let tbl := buildTable tcfg
+  let murm := buildMurm tcfg
   passCases.filterMap fun (name, n, inp, _) =>
-    let done := superOptFix tbl n inp.length inp
-    if superOptGates cfg tbl n done == done then none else some name
+    let done := superOptFix murm n inp.length inp
+    if superOptGates cfg murm n done == done then none else some name
 
 #guard fixpointFailures.isEmpty
 
 /-! ## Three-wire windows
 
-At width 3 the table reaches `ccx` and `ccz` windows, which two-wire windows cannot. -/
+At width 3 the MURM reaches `ccx` and `ccz` windows, which two-wire windows cannot. -/
 
 /-- Cases needing a three-wire table. -/
 def wide3Failures : List String :=
-  let tbl := buildTable { maxQubits := 3, maxGates := 1 }
+  let murm := buildMurm { maxQubits := 3, maxGates := 1 }
   let cfg3 : SuperOptConfig := { maxQubits := 3, maxWindow := 6 }
   [("ccx pair", [ccx 0 1 2, ccx 0 1 2]),
    ("ccz pair", [ccz 0 1 2, ccz 0 1 2]),
    ("cz pair", [Gate.cz 0 1, Gate.cz 0 1])].filterMap fun (name, inp) =>
-    if superOptGates cfg3 tbl 3 inp == ([] : List Gate) then none else some name
+    if superOptGates cfg3 murm 3 inp == ([] : List Gate) then none else some name
 
 #guard wide3Failures.isEmpty
+
+/-! ## Replayable native-gate SuperOpt sweep
+
+This corpus makes native CZ, CCX, and CCZ available both to the input and to the MURM.  It
+checks 128 deterministic mixed circuits for structural validity and the pass's strict-shrink
+contract. -/
+
+def nativeSuperOptGate (seed i : Nat) : Gate :=
+  let q := (seed + 2 * i) % 3
+  match (seed * 11 + i) % 11 with
+  | 0 => .h q
+  | 1 => .x q
+  | 2 => .z q
+  | 3 => .t q
+  | 4 => .tdg q
+  | 5 => .cnot q ((q + 1) % 3)
+  | 6 => .cz q ((q + 1) % 3)
+  | 7 => .ccx q ((q + 1) % 3) ((q + 2) % 3)
+  | 8 => .ccz q ((q + 1) % 3) ((q + 2) % 3)
+  | 9 => .s q
+  | _ => .sdg q
+
+def nativeSuperOptCircuit (seed : Nat) : List Gate :=
+  [.cz 0 1, .ccx 0 1 2, .ccz 0 1 2] ++
+    (List.range 21).map (nativeSuperOptGate seed)
+
+def nativeSuperOptSweepOk : Bool :=
+  let murm := buildMurm
+    { maxQubits := 3, maxGates := 1, maxEntriesPerQubit := 256,
+      basis := baseGateSet.union optionalGateSet }
+  let config : SuperOptConfig := { maxQubits := 3, maxWindow := 5 }
+  (List.range 128).all fun seed =>
+    let input := nativeSuperOptCircuit seed
+    let output := superOptGates config murm 3 input
+    output.length ≤ input.length && output.all Gate.Wf
+
+#guard nativeSuperOptSweepOk
 
 end TzapLean

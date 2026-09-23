@@ -2,13 +2,16 @@ import TzapLean.Merge
 import TzapLean.CnotMin
 
 /-!
-# `PhaseFoldRand`: the algorithm
+# `PhaseFoldRand`: the verified affine model
 
-The executable half of phase folding, following `src/phase_fold_rand.rs`. Each wire carries a
-random `k`-bit *tag* standing for the parity it holds: `x` complements the tag, `cnot` XORs
-the control's into the target's, `h`, `ccx` and `reset` draw a fresh one, and everything else
-leaves tags alone. Two rotations may merge when their wires' tags agree — or are complements,
-in which case the angle merges negated.
+The currently verified affine phase folder. Each wire carries a random `k`-bit *tag* standing
+for the parity it holds: `x` complements the tag, `cnot` XORs the control's into the target's,
+and `h`, `ccx`, and `reset` draw a fresh one. Two rotations may merge when their wires' tags
+agree — or are complements, in which case the angle merges negated.
+
+The CLI's Rust-compatible nonlinear executable is in `TzapLean.PhaseFoldNonlinear`. This module
+retains the affine transformation used by the current `RandPass` collision theorem while the
+packed representation is formally refined to the quotient field used by Schwartz–Zippel.
 
 Nothing here mentions `Form`: like Rust, the pass only ever compares tags. The symbolic
 parities live in `TzapLean.Analysis` and are attached to this algorithm in
@@ -128,7 +131,7 @@ def initial {k : Nat} (wdraws : Nat → Tag) (n : Nat) : TState k where
   tags := (List.range n).map wdraws
   fresh := n
 
-/-- The Rust transfer functions, on tags. -/
+/-- The verified affine transfer functions, on tags. -/
 def step {k : Nat} (wdraws : Nat → Tag) (ts : TState k) (g : Gate) : TState k :=
   match g with
   | .x q => { ts with tags := ts.tags.set q (ts.tagOf q ^^^ onesTag k) }
@@ -301,11 +304,9 @@ boundary. The correctness theorem relates that stream to the theory's `Draws k` 
 `wordToBits`, which is why nothing in the inner loop ever touches an `F₂` function: the pass
 XORs machine words, and only the statement of the theorem talks about bits.
 
-The randomized runner draws a `Sample (varBound c) k` — an element of the very space
-`PhaseFoldRand.correct` bounds a measure over — and hands `phaseFold` the words it stands
-for. `PhaseFoldRand_run` records that `phaseFold k (wordsOf k (liftSample s)) c` *is*
-`(PhaseFoldRand k).run c s`. The executable obtains the bytes from the operating system;
-the mathematical theorem separately assumes the corresponding sample is uniform.
+The affine reference pass draws a `Sample (varBound c) k` and hands `phaseFold` the words it
+stands for. The executable uses the nonlinear fold instead; `GF128Bridge.lean` proves the
+corresponding 128-bit sampled theorem. OS randomness is modeled separately as uniform draws.
 -/
 
 /-- The number of variables a circuit's analysis can allocate: one per wire, plus one per

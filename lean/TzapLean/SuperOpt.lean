@@ -1,6 +1,6 @@
 import TzapLean.ExactMat
 import TzapLean.Locality
-import TzapLean.SynthTable
+import TzapLean.Murm
 import TzapLean.Rewrite
 
 /-!
@@ -11,11 +11,11 @@ wires — computes each window's exact matrix, and replaces it whenever a shorte
 the same matrix. Nothing is matched syntactically: any identity expressible in the search
 space is found without ever being written down.
 
-Candidates come from the precomputed synthesis table (`SynthTable.lean`): a window's matrix
+Candidates come from the precomputed MURM: a window's matrix
 is canonicalized to a key and looked up, and a hit *is* the shortest circuit the enumeration
-found for that unitary. The table is unverified — its BFS, its prunes, its key, its reified
+found for that unitary. The MURM is unverified — its BFS, its prunes, its key, its reified
 matrices are all outside the proof — because every candidate is re-verified by `accepts`
-before it is taken. A wrong table costs optimization, never correctness.
+before it is taken. A wrong MURM costs optimization, never correctness.
 
 This is `src/super_opt/mod.rs`: one forward scan with every window open at once, greedy
 selection over the whole circuit, and one splice at the end.
@@ -179,7 +179,7 @@ re-established here, against the gates as they actually are: the wires are disti
 to the register, the gates the rewrite claims live on them and have distinct operands, the
 replacement is strictly shorter, and its matrix is the window's up to a global phase.
 
-The search that proposed the candidate is unverified — it is a table lookup on a flat matrix,
+The search that proposed the candidate is unverified — it is a MURM lookup on a flat matrix,
 with no `ExactMat` anywhere — and this is what makes that safe. It runs once per *selected*
 rewrite, where the old arrangement built an exact matrix for every window that got past a
 filter. -/
@@ -283,7 +283,7 @@ structure Scan where
   supports : Array (List Qubit)
   /-- Rewrite → its replacement, in support-local form. -/
   cands : Array (List Gate)
-  /-- Canonical window shape → the table's answer; inner `none` is a cached miss. -/
+  /-- Canonical window shape → the MURM's answer; inner `none` is a cached miss. -/
   shapeCache : Std.HashMap ShapeKey (Option (List Gate))
   /-- Cache hits in this scan, retained for tests and profiling. -/
   shapeHits : Nat
@@ -324,9 +324,9 @@ def Scan.offer (st : Scan) (mem : List Nat) (sup : List Qubit)
   | some cand =>
       if cand.length < mem.length then (st.select mem sup cand, true) else (st, false)
 
-/-- Offer a window to the table: select it when the table holds something strictly shorter and
+/-- Offer a window to the MURM: select it when the MURM holds something strictly shorter and
 nothing it claims is claimed already. -/
-def Scan.consider (st : Scan) (tbl : SynthTable) (gs : Array Gate) (sup : List Qubit)
+def Scan.consider (st : Scan) (murm : Murm) (gs : Array Gate) (sup : List Qubit)
     (mem : List Nat) : Scan × Bool :=
   if mem.any (st.claimed[·]!) then (st, false)
   else
@@ -340,7 +340,7 @@ def Scan.consider (st : Scan) (tbl : SynthTable) (gs : Array Gate) (sup : List Q
             let members := mem.map (gs[·]!)
             let answer :=
               (FlatMat.ofGates sup.length (localizeGates sup members)).bind
-                (tbl.synthesizeFlat sup.length)
+                (murm.synthesizeFlat sup.length)
             let st := { st with shapeCache := st.shapeCache.insert key answer,
                                 shapeMisses := st.shapeMisses + 1 }
             st.offer mem sup answer
@@ -348,11 +348,11 @@ def Scan.consider (st : Scan) (tbl : SynthTable) (gs : Array Gate) (sup : List Q
         let members := mem.map (gs[·]!)
         let answer :=
           (FlatMat.ofGates sup.length (localizeGates sup members)).bind
-            (tbl.synthesizeFlat sup.length)
+            (murm.synthesizeFlat sup.length)
         st.offer mem sup answer
 
 /-- Offer one live window the current gate. -/
-def Scan.step (cfg : SuperOptConfig) (tbl : SynthTable) (gs : Array Gate) (st : Scan)
+def Scan.step (cfg : SuperOptConfig) (murm : Murm) (gs : Array Gate) (st : Scan)
     (i wid : Nat) : Scan :=
   let w := st.wins[wid]!
   if st.claimed[i]! || w.members.any (st.claimed[·]!) then st.retire wid
@@ -360,7 +360,7 @@ def Scan.step (cfg : SuperOptConfig) (tbl : SynthTable) (gs : Array Gate) (st : 
     match expandClosure gs st.gbq cfg.maxQubits cfg.maxWindow w i with
     | none => st.retire wid
     | some (sup, mem) =>
-        let (st, selected) := st.consider tbl gs sup mem
+        let (st, selected) := st.consider murm gs sup mem
         if selected || mem.length ≥ cfg.maxWindow then st.retire wid
         else
           let added := sup.filter (fun q => !w.support.contains q)
@@ -368,7 +368,7 @@ def Scan.step (cfg : SuperOptConfig) (tbl : SynthTable) (gs : Array Gate) (st : 
           { st with byQubit := added.foldl (fun a q => a.modify q (wid :: ·)) st.byQubit }
 
 /-- Everything one gate does to the scan. -/
-def Scan.gate (cfg : SuperOptConfig) (tbl : SynthTable) (n : Nat) (gs : Array Gate)
+def Scan.gate (cfg : SuperOptConfig) (murm : Murm) (n : Nat) (gs : Array Gate)
     (st : Scan) (i : Nat) : Scan := Id.run do
   let g := gs[i]!
   let qs := g.qubitsOf
@@ -389,7 +389,7 @@ def Scan.gate (cfg : SuperOptConfig) (tbl : SynthTable) (n : Nat) (gs : Array Ga
     for wid in touched do st := st.retire wid
     return st
   for wid in touched do
-    st := Scan.step cfg tbl gs st i wid
+    st := Scan.step cfg murm gs st i wid
   if canAnchor cfg n g && !st.claimed[i]! then
     let wid := st.wins.size
     st := { st with wins := st.wins.push ⟨i, qs, [i]⟩, alive := st.alive.push true }
@@ -398,11 +398,11 @@ def Scan.gate (cfg : SuperOptConfig) (tbl : SynthTable) (n : Nat) (gs : Array Ga
   return st
 
 /-- **Propose a set of rewrites**: the tagging, and each rewrite's wires and replacement. -/
-def proposeRewrites (cfg : SuperOptConfig) (tbl : SynthTable) (n : Nat) (gs : Array Gate) :
+def proposeRewrites (cfg : SuperOptConfig) (murm : Murm) (n : Nat) (gs : Array Gate) :
     Scan := Id.run do
   let mut st := Scan.initial n gs.size
   for i in [0 : gs.size] do
-    st := Scan.gate cfg tbl n gs st i
+    st := Scan.gate cfg murm n gs st i
   return st
 
 /-! ## Checking a proposal, and taking it
@@ -439,15 +439,15 @@ def Scan.vetted (st : Scan) (n : Nat) (xs : List Tagged) : List Tagged :=
 /-- Peephole superoptimization of a gate list over `n` wires: propose, check, splice.
 
 One forward scan, as `SuperOpt::run` is one forward scan — repetition is the driver's job. -/
-def superOptGates (cfg : SuperOptConfig) (tbl : SynthTable) (n : Nat) (gs : List Gate) :
+def superOptGates (cfg : SuperOptConfig) (murm : Murm) (n : Nat) (gs : List Gate) :
     List Gate :=
   let arr := gs.toArray
-  let st := proposeRewrites cfg tbl n arr
+  let st := proposeRewrites cfg murm n arr
   let xs := st.vetted n (st.tagged gs)
   if onSuppB st.supp xs && sepAllB st.supp xs then applyAllLinear st.repl [] xs else gs
 
 /-- Peephole superoptimization of a circuit. -/
-def superOpt (cfg : SuperOptConfig) (tbl : SynthTable) (c : RawCircuit) : RawCircuit :=
-  c.withGates (superOptGates cfg tbl c.numQubits c.gates)
+def superOpt (cfg : SuperOptConfig) (murm : Murm) (c : RawCircuit) : RawCircuit :=
+  c.withGates (superOptGates cfg murm c.numQubits c.gates)
 
 end TzapLean

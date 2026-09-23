@@ -1,5 +1,6 @@
 import TzapLean.Cancel
 import TzapLean.CnotMinProof
+import TzapLean.Decompose
 
 /-!
 # Ported Tests
@@ -22,6 +23,19 @@ the literal: those tests only care that the gate is a non-Clifford diagonal, whi
 
 namespace TzapLean
 
+/-! ## Gate families and canonical gate sets -/
+
+#guard GateKind.all.map GateKind.qasmName ==
+  ["h", "x", "z", "s", "sdg", "t", "tdg", "rz", "cx", "cz", "ccx", "ccz", "measure", "reset"]
+#guard toString (RawCircuit.ofGates 3 1
+  [.ccz 2 0 1, .h 0, .measure 1 0, .ccx 1 0 2, .cz 2 1, .rz (1/8) 0]).gateSet ==
+  "{h, rz, cz, ccx, ccz, measure}"
+#guard (GateKind.parse "cx" == some .cx)
+#guard (GateKind.parse "cnot").isNone
+#guard (Gate.cz 4 1).canonicalOperands == .cz 1 4
+#guard (Gate.ccx 4 1 2).canonicalOperands == .ccx 1 4 2
+#guard (Gate.ccz 4 1 2).canonicalOperands == .ccz 1 2 4
+
 /-- Number of gates of a given kind, for the count-based assertions. -/
 def countKind (p : Gate → Bool) (c : RawCircuit) : Nat := c.gates.countP p
 
@@ -34,6 +48,16 @@ def countH (c : RawCircuit) : Nat := countKind isHGate c
 
 /-- The pass under test, as a plain function. -/
 def runCancel (c : RawCircuit) : RawCircuit := cancelGatesCircuit c
+
+/-! ## Native controlled-gate decomposition shapes -/
+
+#guard (decomposeToffoli (RawCircuit.ofGates 3 0 [.ccx 0 1 2])).gates ==
+  ccxDecomposition 0 1 2
+#guard !(decomposeToffoli (RawCircuit.ofGates 3 0 [.ccx 0 1 2, .ccz 2 1 0])).gateSet.contains .ccx
+#guard !(decomposeToffoli (RawCircuit.ofGates 3 0 [.ccx 0 1 2, .ccz 2 1 0])).gateSet.contains .ccz
+#guard (decomposeCz (RawCircuit.ofGates 2 0 [.cz 0 1])).gates ==
+  [.h 1, .cnot 0 1, .h 1]
+#guard !(decomposeCz (RawCircuit.ofGates 2 0 [.cz 0 1])).gateSet.contains .cz
 
 /-! ## `src/cancel.rs` -/
 
@@ -134,6 +158,14 @@ def runCancel (c : RawCircuit) : RawCircuit := cancelGatesCircuit c
 
 -- ccx_cancel
 #guard (runCancel (RawCircuit.ofGates 3 0 [Gate.ccx 0 1 2, Gate.ccx 0 1 2])).gates.length = 0
+
+-- ccx_cancel_swapped_controls
+#guard (runCancel (RawCircuit.ofGates 3 0 [Gate.ccx 0 1 2, Gate.ccx 1 0 2])).gates.length = 0
+
+-- ccz_cancel_across_diagonals_with_permuted_operands
+#guard (runCancel (RawCircuit.ofGates 3 0
+  [Gate.ccz 0 1 2, Gate.t 0, Gate.rz (3/17) 1, Gate.cz 1 2, Gate.ccz 2 0 1])).gates ==
+    [Gate.t 0, Gate.rz (3/17) 1, Gate.cz 1 2]
 
 -- ccz_cancel_is_symmetric_in_all_operands
 #guard (runCancel (RawCircuit.ofGates 3 0 [Gate.ccz 0 1 2, Gate.ccz 2 0 1])).hasToffoli = false

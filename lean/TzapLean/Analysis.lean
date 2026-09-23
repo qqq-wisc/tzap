@@ -17,9 +17,9 @@ target — the two places where a wire's new value is not an affine function of 
 Allocating a fresh variable there is what lets the analysis stay affine while remaining
 sound: the valuation simply records whichever branch the amplitude took.
 
-The transfer functions mirror `src/phase_fold_rand.rs`: `x` complements, `cnot` XORs, `h`
+These are the conservative affine transfer functions: `x` complements, `cnot` XORs, `h`
 and `ccx` allocate, `measure` and every diagonal gate leave parities alone. `reset` allocates
-too, where Rust records the constant `0`: the weaker fact keeps every analysis state
+too: the weaker fact keeps every analysis state
 *generic* (any basis state is explainable), which is what the induction in `PhaseFoldProof`
 needs, and phase folding never merges across a `reset` here anyway.
 -/
@@ -53,7 +53,7 @@ def _root_.TzapLean.Gate.allocates : Gate → Bool
   | .h _ | .ccx .. | .reset _ => true
   | _ => false
 
-/-- One step of the analysis — the Rust transfer functions. -/
+/-- One step of the conservative affine analysis. -/
 def step (st : AState) (g : Gate) : AState :=
   match g with
   | .x q => { st with par := st.par.set q (st.parOf q).flip }

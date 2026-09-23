@@ -64,7 +64,108 @@ inductive Gate where
   | reset (q : Qubit)
   deriving DecidableEq, Repr, Inhabited
 
+/-- A gate family, independent of operands.  The constructor order is the canonical order
+used by the CLI, MURM basis keys, and tests; it deliberately does not depend on first
+appearance or alphabetical sorting. -/
+inductive GateKind where
+  | h | x | z | s | sdg | t | tdg | rz | cx | cz | ccx | ccz | measure | reset
+  deriving DecidableEq, Repr, Inhabited, BEq, Hashable
+
+namespace GateKind
+
+/-- Every supported gate family in the stable user-visible order. -/
+def all : List GateKind :=
+  [.h, .x, .z, .s, .sdg, .t, .tdg, .rz, .cx, .cz, .ccx, .ccz, .measure, .reset]
+
+/-- Stable bit position used by `GateSet`. -/
+def index : GateKind → Nat
+  | .h => 0 | .x => 1 | .z => 2 | .s => 3 | .sdg => 4 | .t => 5 | .tdg => 6
+  | .rz => 7 | .cx => 8 | .cz => 9 | .ccx => 10 | .ccz => 11
+  | .measure => 12 | .reset => 13
+
+def qasmName : GateKind → String
+  | .h => "h" | .x => "x" | .z => "z" | .s => "s" | .sdg => "sdg"
+  | .t => "t" | .tdg => "tdg" | .rz => "rz" | .cx => "cx" | .cz => "cz"
+  | .ccx => "ccx" | .ccz => "ccz" | .measure => "measure" | .reset => "reset"
+
+def parse (name : String) : Option GateKind :=
+  all.find? (qasmName · == name)
+
+instance : ToString GateKind := ⟨qasmName⟩
+
+end GateKind
+
+/-- A compact set of gate families.  Bits are assigned by `GateKind.index`; rendering always
+uses `GateKind.all`, so it is deterministic across circuits and runs. -/
+structure GateSet where
+  mask : Nat := 0
+  deriving DecidableEq, Repr, Inhabited, BEq, Hashable
+
+namespace GateSet
+
+def empty : GateSet := ⟨0⟩
+
+def contains (s : GateSet) (k : GateKind) : Bool := s.mask.testBit k.index
+
+def insert (s : GateSet) (k : GateKind) : GateSet := ⟨s.mask ||| (1 <<< k.index)⟩
+
+def singleton (k : GateKind) : GateSet := empty.insert k
+
+def ofKinds (ks : List GateKind) : GateSet := ks.foldl insert empty
+
+def union (a b : GateSet) : GateSet := ⟨a.mask ||| b.mask⟩
+
+def inter (a b : GateSet) : GateSet := ⟨a.mask &&& b.mask⟩
+
+def diff (a b : GateSet) : GateSet :=
+  ofKinds (GateKind.all.filter fun k => a.contains k && !b.contains k)
+
+def kinds (s : GateSet) : List GateKind := GateKind.all.filter s.contains
+
+def isSubset (a b : GateSet) : Bool := a.kinds.all b.contains
+
+def isEmpty (s : GateSet) : Bool := s.mask == 0
+
+def toString (s : GateSet) : String :=
+  "{" ++ String.intercalate ", " (s.kinds.map GateKind.qasmName) ++ "}"
+
+instance : ToString GateSet := ⟨GateSet.toString⟩
+
+end GateSet
+
 namespace Gate
+
+/-- Canonical operands for a symmetric two-wire gate. -/
+def canonicalPair (a b : Qubit) : Qubit × Qubit := if a ≤ b then (a, b) else (b, a)
+
+/-- Canonical Toffoli operands: ordered controls, fixed target. -/
+def canonicalCcx (a b t : Qubit) : Qubit × Qubit × Qubit :=
+  let (a, b) := canonicalPair a b
+  (a, b, t)
+
+/-- Canonical operands for a fully symmetric three-wire gate. -/
+def canonicalTriple (a b c : Qubit) : Qubit × Qubit × Qubit :=
+  if a ≤ b then
+    if b ≤ c then (a, b, c)
+    else if a ≤ c then (a, c, b) else (c, a, b)
+  else
+    if a ≤ c then (b, a, c)
+    else if b ≤ c then (b, c, a) else (c, b, a)
+
+/-- Canonicalize only operands whose gate semantics is symmetric. -/
+def canonicalOperands : Gate → Gate
+  | .cz a b => let (a, b) := canonicalPair a b; .cz a b
+  | .ccx a b target =>
+      let (a', b', target') := canonicalCcx a b target
+      .ccx a' b' target'
+  | .ccz a b c => let (a, b, c) := canonicalTriple a b c; .ccz a b c
+  | g => g
+
+/-- Operand-free family of a gate. -/
+def kind : Gate → GateKind
+  | .h _ => .h | .x _ => .x | .z _ => .z | .s _ => .s | .sdg _ => .sdg
+  | .t _ => .t | .tdg _ => .tdg | .rz .. => .rz | .cnot .. => .cx | .cz .. => .cz
+  | .ccx .. => .ccx | .ccz .. => .ccz | .measure .. => .measure | .reset _ => .reset
 
 /-- The qubits a gate acts on, in the order the Rust `qubits_of` reports them.
 `measure` reports only its qubit; its classical bit is not a qubit. -/
@@ -206,6 +307,11 @@ structure RawCircuit where
   deriving Repr, Inhabited, DecidableEq
 
 namespace RawCircuit
+
+/-- Gate families actually present in the gate list.  This deliberately ignores the cached
+`has*` flags so optimizer policy cannot be affected by stale metadata. -/
+def gateSet (c : RawCircuit) : GateSet :=
+  c.gates.foldl (fun set gate => set.insert gate.kind) GateSet.empty
 
 /-- An empty circuit over `numQubits` qubits and no classical bits. -/
 def new (numQubits : Nat) : RawCircuit := { numQubits }
