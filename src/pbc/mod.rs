@@ -19,12 +19,14 @@
 //! ```
 
 mod ascii;
+mod convert;
 mod pauli;
 
 pub use ascii::AsciiOptions;
+pub use convert::{ToPbc, to_pbc};
 pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
 
-use crate::circuit::{CBit, Gate, Qubit, qubit_operands};
+use crate::circuit::{CBit, Gate, GateKind, Qubit, qubit_operands};
 use pauli::PauliArena;
 use std::fmt;
 
@@ -109,6 +111,13 @@ impl PbcOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PbcError {
+    /// Invalid source instruction; index is zero-based.
+    InvalidInput {
+        index: usize,
+        cause: Box<PbcError>,
+    },
+    UnsupportedGate(GateKind),
+    TooManyQubits,
     QubitOutOfRange(Qubit),
     ClassicalBitOutOfRange(CBit),
     ForeignPauli,
@@ -123,6 +132,9 @@ pub enum PbcError {
 impl fmt::Display for PbcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidInput { index, cause } => write!(f, "input gate {index}: {cause}"),
+            Self::UnsupportedGate(gate) => write!(f, "unsupported PBC input gate: {gate:?}"),
+            Self::TooManyQubits => f.write_str("PBC qubit count exceeds the supported u32 range"),
             Self::QubitOutOfRange(q) => write!(f, "PBC qubit {q} is out of range"),
             Self::ClassicalBitOutOfRange(c) => write!(f, "PBC classical bit {c} is out of range"),
             Self::ForeignPauli => f.write_str("Pauli reference belongs to another circuit"),
@@ -131,13 +143,20 @@ impl fmt::Display for PbcError {
                 f.write_str("rotation and measurement axes must be Hermitian")
             }
             Self::NonCliffordSuffix => f.write_str("output suffix only accepts Clifford gates"),
-            Self::RepeatedOperand => f.write_str("Clifford gate operands must be distinct"),
+            Self::RepeatedOperand => f.write_str("gate operands must be distinct"),
             Self::ExpansionLimit => f.write_str("Pauli expansion exceeds the cell budget"),
             Self::DrawingLimit => f.write_str("circuit exceeds the ASCII drawing limits"),
         }
     }
 }
-impl std::error::Error for PbcError {}
+impl std::error::Error for PbcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidInput { cause, .. } => Some(cause.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 /// An owned PBC program. Handles are scoped to this circuit. Read-only slices
 /// expose the IR; checked methods maintain operand and outcome validity.
@@ -234,8 +253,8 @@ impl PbcCircuit {
 
     /// Check an arbitrary expression before using it as a physical axis.
     /// This explicit materialization is intended for manual construction. A
-    /// future converter can construct axes from its proven frame invariants
-    /// inside this module without expanding them.
+    /// converter constructs axes from its Clifford-frame invariants without
+    /// expanding them.
     pub fn hermitian_axis(
         &self,
         reference: PauliRef,

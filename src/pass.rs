@@ -1,15 +1,16 @@
 use crate::circuit::{Circuit, Gate, qubit_operands};
 
-/// An optimization pass: takes a circuit, returns an equivalent one.
+/// A circuit pass. The default output keeps optimization pipelines gate-based;
+/// terminal conversions can select a different output type.
 ///
 /// Implementors are not required to be `Sync`/`Send`: a pass may cache state
 /// behind interior mutability that isn't safe to share across threads (see
 /// `SuperOpt`'s `MatrixStore`, which uses `Rc<RefCell<_>>` since it's never
 /// actually accessed from more than one thread — each parallel worker
 /// constructs and owns its own pass instance).
-pub trait Pass {
+pub trait Pass<Output = Circuit> {
     fn name(&self) -> &str;
-    fn run(&self, circuit: &Circuit) -> Circuit;
+    fn run(&self, circuit: &Circuit) -> Output;
 }
 
 /// The outcome of [`run_passes`].

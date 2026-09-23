@@ -254,5 +254,6 @@ pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix
     Ok(result)
 }
 
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

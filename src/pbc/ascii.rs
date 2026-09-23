@@ -94,7 +94,7 @@ impl PbcCircuit {
         }
         if !self.output_cliffords.is_empty() {
             columns.push(Column {
-                label: "Clifford suffix".into(),
+                label: "suffix".into(),
                 wires: vec!["|".into(); self.num_qubits],
             });
         }

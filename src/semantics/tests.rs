@@ -1,3 +1,4 @@
+use super::test_support::approximate;
 use super::*;
 use crate::pbc::PauliAngle;
 
@@ -15,40 +16,12 @@ fn eval(c: &PbcCircuit) -> Matrix {
     pbc_unitary(c, Limits::default()).unwrap()
 }
 fn check(c: &PbcCircuit, expected: Vec<Gate>) {
-    let actual = eval(c);
     let circuit = gates(c.num_qubits(), expected);
-    let exact = circuit_unitary(&circuit, Limits::default()).unwrap();
-    assert!(actual.equivalent_up_to_global_phase(&exact));
-    check_numeric(&actual, &circuit);
-    assert_eq!(actual.adjoint().mul(&actual), Matrix::identity(actual.dim));
-}
-
-/// Also compare directly to the pre-existing floating-point gate interpreter,
-/// aligning global phase with a largest-magnitude entry for stability.
-fn check_numeric(actual: &Matrix, circuit: &Circuit) {
-    let expected = crate::unitary::circuit_unitary(circuit);
-    let (r, c) = (0..actual.dim)
-        .flat_map(|r| (0..actual.dim).map(move |c| (r, c)))
-        .max_by(|&(r, c), &(s, t)| {
-            expected[r][c]
-                .norm_sq()
-                .total_cmp(&expected[s][t].norm_sq())
-        })
-        .unwrap();
-    let a = approximate(actual.get(r, c));
-    let b = expected[r][c].components();
-    assert!((a.0 * a.0 + a.1 * a.1 - b.0 * b.0 - b.1 * b.1).abs() < 1e-10);
-    let mul = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
-    for (r, row) in expected.iter().enumerate() {
-        for (c, value) in row.iter().enumerate() {
-            let left = mul(approximate(actual.get(r, c)), b);
-            let right = mul(value.components(), a);
-            assert!(
-                (left.0 - right.0).abs() < 1e-10 && (left.1 - right.1).abs() < 1e-10,
-                "numeric mismatch at ({r}, {c}): {left:?} != {right:?}"
-            );
-        }
-    }
+    test_support::assert_equivalent(&circuit, c);
+    // Every hand-written pair also exercises the automatic converter.
+    let converted = crate::pbc::to_pbc(&circuit).unwrap();
+    test_support::assert_equivalent(&circuit, &converted);
+    assert!(eval(c).equivalent_up_to_global_phase(&eval(&converted)));
 }
 
 /// Small declarative fixtures: one letter per qubit, angle in units of pi/8.
@@ -521,17 +494,6 @@ fn noncommuting_rotations_keep_execution_order() {
     )
     .unwrap();
     assert!(!eval(&c).equivalent_up_to_global_phase(&reversed));
-}
-
-fn approximate(s: &Scalar) -> (f64, f64) {
-    let c: Vec<f64> =
-        s.0.iter()
-            .map(|r| {
-                r.numer().to_string().parse::<f64>().unwrap()
-                    / r.denom().to_string().parse::<f64>().unwrap()
-            })
-            .collect();
-    (c[0] + 2.0_f64.sqrt() * c[1], c[2] + 2.0_f64.sqrt() * c[3])
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Manually constructed logical PBC; conversion from gate circuits comes later.
+//! Manually constructed logical PBC; see `to_pbc` for gate-circuit conversion.
 use tzap::circuit::Gate;
 use tzap::pbc::{PauliAngle, PbcCircuit};
 
