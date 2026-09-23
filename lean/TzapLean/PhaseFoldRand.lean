@@ -1,22 +1,25 @@
 import TzapLean.PhaseFoldProof
-import TzapLean.RandPass
+import TzapLean.PhaseFoldNonlinear
 import TzapLean.ExecutableRandPass
 
 /-!
-# `PhaseFoldRand` as a `RandPass`
+# Affine phase-folding reference and nonlinear sampled runner
 
-Everything is in place: `phaseFoldGates_correct` says the pass is right whenever its tags are
-faithful, and `collides_probability_le` says unfaithful tags are unlikely. Putting the two
-together gives the obligation `RandPass` demands,
+The affine `phaseFoldGates_correct` says folding is right whenever its tags are faithful,
+and `collides_probability_le` says unfaithful tags are unlikely. Together they give the
+reference bound
 
 ```
 Pr_{s ← uniform} [ ⟦phaseFold s c⟧ ≠ ⟦c⟧ ]  ≤  C(L, 2) · 2⁻ᵏ
 ```
 
 where `L` is the number of parities (and complements) this circuit makes the pass compare.
-The seed is one ideal uniform `k`-bit tag per variable — `Sample (varBound c) k`.
-`phaseFoldWithSample_eq_run` records the pure correspondence between the executable's sampled
-transformation and the ideal model. The CLI uses the OS-backed runner with `k = 128`.
+The seed is one ideal uniform `k`-bit tag per affine variable — `Sample (varBound c) k`.
+The CLI uses the nonlinear OS-backed runner with 128-bit samples.
+
+The affine proof covers the conservative CCX fallback. `GF128Bridge.lean` proves the
+nonlinear pass's 128-bit sampled probability bound and supplies the sole verified
+`PhaseFoldRand` wired into the optimizer.
 -/
 
 namespace TzapLean
@@ -293,65 +296,21 @@ theorem faithful_of_not_collides {m k : Nat} {ps : List Form} {sample : Sample m
 
 /-! ## Executable randomized phase folding -/
 
-/-- Run phase folding at an explicit sample and package its output as a checked circuit.
-This is the shared pure function used by both the ideal `RandPass` and the OS-backed runner. -/
-def phaseFoldWithSample (k : Nat) (c : Circuit n m) (s : Sample (varBound c.raw) k) :
-    Circuit n m :=
-  ⟨phaseFold k (wordsOf k (liftSample s)) c.raw,
-    (phaseFold_numQubits k _ c.raw).trans c.numQubits_eq,
-    (phaseFold_numCbits k _ c.raw).trans c.numCbits_eq,
-    phaseFoldGates_wf (wordsOf k (liftSample s)) c.wf⟩
+/-- The concrete nonlinear transformation used by the executable.  Its random words are
+normalized to 128 bits by `Fingerprint.fresh`, and the CLI instantiates this with `k = 128`. -/
+def phaseFoldNonlinearWithSample (k : Nat) (c : Circuit n m)
+    (s : Sample (varBound c.raw) k) : Circuit n m :=
+  ⟨phaseFoldNonlinear (wordsOf k (liftSample s)) c.raw,
+    (phaseFoldNonlinear_numQubits _ c.raw).trans c.numQubits_eq,
+    (phaseFoldNonlinear_numCbits _ c.raw).trans c.numCbits_eq,
+    phaseFoldGatesNonlinear_wf _ c.wf⟩
 
-/-- The runtime phase-folding pass. Every invocation obtains a fresh sample from
-`IO.getRandomBytes`; its idealized distribution and failure bound are `PhaseFoldRand k` below. -/
-def PhaseFoldRandExec (k : Nat) : ExecutableRandPass where
+/-- The runtime nonlinear phase-folding pass. Every invocation obtains a fresh 128-bit sample
+from `IO.getRandomBytes` and calls the same pure transformation as the verified pass. -/
+def PhaseFoldRandExec : ExecutableRandPass where
   name := "Phase folding"
   run := fun c => do
-    let s ← randomSample (varBound c.raw) k
-    return phaseFoldWithSample k c s
-
-/-! ## The pass -/
-
-noncomputable section
-
-/-- **Phase folding, as a randomized pass.** The seed is one uniform `k`-bit tag per
-variable; the failure probability is the chance that two of the parities this circuit makes
-the pass compare hash alike. -/
-def PhaseFoldRand (k : Nat) : RandPass where
-  name := "Phase folding"
-  Seed := fun c => Sample (varBound c.raw) k
-  dist := fun _ => PMF.uniformOfFintype _
-  run := phaseFoldWithSample k
-  error := fun c =>
-    ((relevantForms c.raw).length.choose 2 : ℝ≥0∞) * ((2 : ℝ≥0∞)⁻¹) ^ k
-  wellFormed_run c s hc := phaseFoldGates_inRange (wordsOf k (liftSample s)) hc
-  flagsOk_run c _ _ := RawCircuit.flagsOk_withGates _ _
-  correct c := by
-    rcases c with ⟨c, rfl, rfl, hc⟩
-    refine le_trans ((PMF.uniformOfFintype (Sample (varBound c) k)).toOuterMeasure_mono ?_)
-      (collides_probability_le (relevantForms c) (bounded_relevantForms c))
-    intro s hs
-    by_contra hcol
-    exact hs.1 (phaseFoldGates_correct (wordToBits_wordsOf k (liftSample s)) c.gates hc
-      (faithful_of_not_collides hcol))
-
-@[simp] theorem PhaseFoldRand_run (k : Nat) (c : Circuit n m)
-    (s : (PhaseFoldRand k).Seed c) :
-    ((PhaseFoldRand k).run c s).raw = phaseFold k (wordsOf k (liftSample s)) c.raw := rfl
-
-/-- **The sampled executable transformation is exactly the transformation in the bound.**
-The remaining assumption is that `IO.getRandomBytes` realizes the model's independent uniform
-sample; that is a platform property, not a theorem about a Lean term. -/
-theorem phaseFoldWithSample_eq_run (k : Nat) (c : Circuit n m)
-    (s : Sample (varBound c.raw) k) :
-    phaseFoldWithSample k c s = (PhaseFoldRand k).run c s := rfl
-
-/-- The failure bound in closed form: with `t` compared parities the pass is wrong with
-probability at most `C(t,2)·2⁻ᵏ`, so doubling the tag width squares the odds against it. -/
-theorem PhaseFoldRand_error (k : Nat) (c : Circuit n m) :
-    (PhaseFoldRand k).error c =
-      ((relevantForms c.raw).length.choose 2 : ℝ≥0∞) * ((2 : ℝ≥0∞)⁻¹) ^ k := rfl
-
-end
+    let s ← randomSample (varBound c.raw) 128
+    return phaseFoldNonlinearWithSample 128 c s
 
 end TzapLean

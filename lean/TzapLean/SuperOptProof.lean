@@ -5,7 +5,7 @@ import TzapLean.SuperOpt
 
 The scan proposes a whole *set* of rewrites and then every part of it is verified, so nothing
 about the search enters the proof — not the order it considers windows in, not the closure it
-computes, not the table it looks up. Three checks stand between a proposal and a rewritten
+computes, not the MURM it looks up. Three checks stand between a proposal and a rewritten
 circuit:
 
 * `checkRewrite` — this file. A candidate that passes `accepts` denotes the same operator as
@@ -96,7 +96,7 @@ theorem accepts_spec {k : Nat} {target : ExactMat k} {cand : List Gate}
 
 /-! ## A verified replacement is equivalent to the gates it replaces
 
-The search that proposed the replacement is unverified — a table lookup on a flat matrix,
+The search that proposed the replacement is unverified — a MURM lookup on a flat matrix,
 with no `ExactMat` anywhere. `checkRewrite` is what makes that safe, and this is what
 `checkRewrite` buys: the two gate lists denote the same operator, so splicing one in for the
 other is meaning-preserving.
@@ -208,13 +208,13 @@ theorem vetted_repl {n m : Nat} (st : Scan) (xs : List Tagged) (w : Nat)
   exact checkRewrite_correct (m := m) hkeep
 
 /-- **Superoptimization preserves meaning.** -/
-theorem superOptGates_correct {n m : Nat} (cfg : SuperOptConfig) (tbl : SynthTable)
-    (gs : List Gate) : Equivalent n m (superOptGates cfg tbl n gs) gs := by
+theorem superOptGates_correct {n m : Nat} (cfg : SuperOptConfig) (murm : Murm)
+    (gs : List Gate) : Equivalent n m (superOptGates cfg murm n gs) gs := by
   rw [superOptGates]
   split
   · rename_i hchecks
     simp only [Bool.and_eq_true] at hchecks
-    set st := proposeRewrites cfg tbl n gs.toArray with hst
+    set st := proposeRewrites cfg murm n gs.toArray with hst
     set xs := st.vetted n (st.tagged gs) with hxs
     have hgates : untag xs = gs := by rw [hxs, Scan.vetted, untag_vettedBy, untag_tagged]
     have hmain := applyAll_correct (n := n) (m := m) st.supp st.repl xs
@@ -226,14 +226,14 @@ theorem superOptGates_correct {n m : Nat} (cfg : SuperOptConfig) (tbl : SynthTab
 
 /-- The two halves of the structural invariant, from the same check. -/
 theorem superOptGates_pred {n m : Nat} {P : Gate → Prop} (cfg : SuperOptConfig)
-    (tbl : SynthTable) (gs : List Gate) (hin : ∀ g ∈ gs, P g)
+    (murm : Murm) (gs : List Gate) (hin : ∀ g ∈ gs, P g)
     (hrepl : ∀ (S : List Qubit) (r : List Gate), (∀ g ∈ r, g.Wf) →
       (∀ g ∈ r, ∀ q ∈ g.qubitsOf, q ∈ S) → (∀ g ∈ r, g.isUnitary = true) →
       (∀ q ∈ S, q < n) → ∀ g ∈ r, P g) :
-    ∀ g ∈ superOptGates cfg tbl n gs, P g := by
+    ∀ g ∈ superOptGates cfg murm n gs, P g := by
   rw [superOptGates]
   split
-  · set st := proposeRewrites cfg tbl n gs.toArray with hst
+  · set st := proposeRewrites cfg murm n gs.toArray with hst
     set xs := st.vetted n (st.tagged gs) with hxs
     have hgates : untag xs = gs := by rw [hxs, Scan.vetted, untag_vettedBy, untag_tagged]
     rw [applyAllLinear_initial]
@@ -243,15 +243,15 @@ theorem superOptGates_pred {n m : Nat} {P : Gate → Prop} (cfg : SuperOptConfig
   · exact hin
 
 /-- **Superoptimization preserves well-formedness.** -/
-theorem superOptGates_wf {n : Nat} (cfg : SuperOptConfig) (tbl : SynthTable) (gs : List Gate)
-    (hwf : ∀ g ∈ gs, g.Wf) : ∀ g ∈ superOptGates cfg tbl n gs, g.Wf :=
-  superOptGates_pred (m := 0) cfg tbl gs hwf (fun _ _ h _ _ _ => h)
+theorem superOptGates_wf {n : Nat} (cfg : SuperOptConfig) (murm : Murm) (gs : List Gate)
+    (hwf : ∀ g ∈ gs, g.Wf) : ∀ g ∈ superOptGates cfg murm n gs, g.Wf :=
+  superOptGates_pred (m := 0) cfg murm gs hwf (fun _ _ h _ _ _ => h)
 
 /-- **Superoptimization keeps every operand in range.** -/
-theorem superOptGates_inRange {n m : Nat} (cfg : SuperOptConfig) (tbl : SynthTable)
+theorem superOptGates_inRange {n m : Nat} (cfg : SuperOptConfig) (murm : Murm)
     (gs : List Gate) (hin : ∀ g ∈ gs, g.InRange n m) :
-    ∀ g ∈ superOptGates cfg tbl n gs, g.InRange n m :=
-  superOptGates_pred (m := m) cfg tbl gs hin (fun S r _ hsub hu hrange g hg =>
+    ∀ g ∈ superOptGates cfg murm n gs, g.InRange n m :=
+  superOptGates_pred (m := m) cfg murm gs hin (fun S r _ hsub hu hrange g hg =>
     ⟨fun q hq => hrange q (hsub g hg q hq), fun b hb => by
       rw [Gate.cbitsOf_eq_nil_of_isUnitary (hu g hg)] at hb
       exact absurd hb (by simp)⟩)
@@ -259,16 +259,16 @@ theorem superOptGates_inRange {n m : Nat} (cfg : SuperOptConfig) (tbl : SynthTab
 /-- `SuperOpt`, as a `Pass`: every rewrite it takes is decided by exact matrix comparison, and
 the set of them by `Sep` and `OnSupp`, so the obligations are discharged by checks the pass
 already runs. -/
-def SuperOpt (cfg : SuperOptConfig) (tbl : SynthTable) : Pass where
+def SuperOpt (cfg : SuperOptConfig) (murm : Murm) : Pass where
   name := "Superoptimization"
-  run := fun c => ⟨superOpt cfg tbl c.raw, c.numQubits_eq, c.numCbits_eq,
-    superOptGates_wf cfg tbl c.raw.gates c.wf⟩
+  run := fun c => ⟨superOpt cfg murm c.raw, c.numQubits_eq, c.numCbits_eq,
+    superOptGates_wf cfg murm c.raw.gates c.wf⟩
   correct := by
     intro n m c
     rcases c with ⟨c, rfl, rfl, hc⟩
-    exact superOptGates_correct cfg tbl c.gates
+    exact superOptGates_correct cfg murm c.gates
 
-@[simp] theorem SuperOpt_run (cfg : SuperOptConfig) (tbl : SynthTable)
-    (c : Circuit n m) : ((SuperOpt cfg tbl).run c).raw = superOpt cfg tbl c.raw := rfl
+@[simp] theorem SuperOpt_run (cfg : SuperOptConfig) (murm : Murm)
+    (c : Circuit n m) : ((SuperOpt cfg murm).run c).raw = superOpt cfg murm c.raw := rfl
 
 end TzapLean

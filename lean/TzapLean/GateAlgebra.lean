@@ -306,6 +306,13 @@ theorem gateUnitary_cz_comm (n : Nat) (c tgt : Qubit) :
   funext b
   rw [Bool.and_comm]
 
+theorem gateUnitary_ccx_swap_controls (n : Nat) (a b t : Qubit) :
+    gateUnitary n (.ccx a b t) = gateUnitary n (.ccx b a t) := by
+  simp only [gateUnitary]
+  congr 1
+  funext bits
+  rw [Bool.and_comm]
+
 theorem gateUnitary_ccz_swap₁₂ (n : Nat) (a b c : Qubit) :
     gateUnitary n (.ccz a b c) = gateUnitary n (.ccz b a c) := by
   simp only [gateUnitary]

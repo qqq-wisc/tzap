@@ -1,23 +1,23 @@
 import TzapLean.ExactMat
 
 /-!
-# The Bounded Clifford+T Synthesis Table
+# The Bounded Minimal Unitary Representative Map
 
 `SuperOpt` asks a question — "is there a shorter circuit with this unitary?" — that has the
 same answer every time it is asked of the same unitary. So the answer is computed once, for
 every unitary reachable within the bounds, and stored: this is `src/super_opt/table.rs`.
 
-The table is built breadth-first, one gate at a time. Because layers are visited in
-gate-count order, **the first circuit to reach a unitary is a smallest one**, so a table hit
+The MURM is built breadth-first, one gate at a time. Because layers are visited in
+gate-count order, **the first circuit to reach a unitary is a smallest one**, so a MURM hit
 *is* the synthesis answer — no search at lookup time. Two prunes keep the frontier small
 without losing any unitary: a child never follows its parent's inverse, and among
 qubit-disjoint neighbours only the canonically ordered interleaving is expanded.
 
 The enumeration needs a *key*: a matrix, canonicalized so that any two representatives of the
 same operator hash alike. Normalize the `√2` denominator, rotate to the canonical global
-phase, flatten the coefficients, then hash them to the 64-bit fingerprint the table stores.
+phase, flatten the coefficients, then hash them to the 64-bit fingerprint the MURM stores.
 As in Rust, the pass independently re-verifies a candidate before rewriting, so a collision
-can cost an optimization but cannot make the output wrong. The table is a source of
+can cost an optimization but cannot make the output wrong. The MURM is a source of
 candidates and never load-bearing for correctness.
 
 Circuits are stored prefix-shared, as in `synthesis_arena.rs`: BFS only ever extends a
@@ -48,7 +48,7 @@ def lexLt : List Int → List Int → Bool
 
 /-- Multiply by `ω^p` in one step, as `src/super_opt/matrix.rs` does.
 
-`Cyc.timesOmega` recurses `p` times, allocating a tuple at each step; in the table builder it
+`Cyc.timesOmega` recurses `p` times, allocating a tuple at each step; in the MURM builder it
 runs once per matrix entry and was four fifths of the enumeration's cost. Reducing `p` mod 8
 and permuting once is the same function — `timesOmegaFast_eq` checks that exhaustively — and
 turns `O(p)` allocations into one. -/
@@ -113,11 +113,11 @@ def basisArray (n : Nat) : Array (Basis n) := (basisList n).toArray
 
 A matrix here is a *function*, so an entry re-walks every gate applied so far. That is fine
 for the handful of matrices the pass builds and hopeless for the hundreds of thousands the
-table enumerates, where each is one gate deeper than the last. Flattening once per candidate
+MURM enumerates, where each is one gate deeper than the last. Flattening once per candidate
 keeps the chain one level deep.
 
-Everything from here to `fingerprint` is used only by the table builder, which is unverified:
-a wrong answer here costs table hits, never correctness, since `accepts` re-derives every
+Everything from here to `fingerprint` is used only by the MURM builder, which is unverified:
+a wrong answer here costs MURM hits, never correctness, since `accepts` re-derives every
 candidate's matrix from scratch before a rewrite is taken. -/
 def flatten {n : Nat} (M : ExactMat n) : Array Cyc := Id.run do
   let bs := basisArray n
@@ -143,7 +143,7 @@ def normalizeFlat (den : Nat) (a : Array Cyc) : Nat × Array Cyc := Id.run do
     d := d - 1
   return (d, arr)
 
-/-- **The table key**: denominator and phase both canonicalized, coefficients flattened. Two
+/-- **The MURM key**: denominator and phase both canonicalized, coefficients flattened. Two
 gate lists with the same key denote the same operator up to global phase. This is the readable
 statement of what `fingerprint` hashes; the builder never materializes it. -/
 def key {n : Nat} (M : ExactMat n) : List Int :=
@@ -151,7 +151,7 @@ def key {n : Nat} (M : ExactMat n) : List Int :=
   let p := canonPhaseFlat arr
   (d : Int) :: (arr.toList.flatMap fun x => (x.timesOmegaFast p).toList)
 
-/-- A 64-bit hash of the canonical key — what the table is indexed by, as in Rust.
+/-- A 64-bit hash of the canonical key — what the MURM is indexed by, as in Rust.
 
 Safe for the same reason Rust's is: a hit is only ever a *candidate*, and `accepts` recomputes
 the replacement's matrix and compares it exactly before any rewrite is taken. A collision
@@ -161,22 +161,26 @@ def fingerprint {n : Nat} (M : ExactMat n) : UInt64 :=
   fingerprintFlat d arr
 
 /-- Flatten, normalize, hash, and hand back the flattened matrix — one traversal serving both
-the table key and the next frontier, where the builder previously made two. -/
+the MURM key and the next frontier, where the builder previously made two. -/
 def keyedReify {n : Nat} (M : ExactMat n) : UInt64 × ExactMat n :=
   let (d, arr) := normalizeFlat M.den (flatten M)
   (fingerprintFlat d arr, ofFlat n d arr)
 
 end ExactMat
 
-/-! ## The library gate set
+/-! ## The library gate set -/
 
-Deliberately **not** every gate the pass can read. `ccx` and `cz` are excluded so
-superoptimization never *introduces* them: a Toffoli costs about seven `T` once the pipeline
-lowers it, and `cz` would leave the `H`/`X`/`Z`/`S`/`T`/`CX` emission basis. Windows
-*containing* those gates are still matched and simplified — their unitaries come from the
-input — but such gates are never emitted. -/
+/-- The fixed Clifford+T base synthesis basis. -/
+def baseGateSet : GateSet :=
+  GateSet.ofKinds [.h, .x, .z, .s, .sdg, .t, .tdg, .cx]
 
-/-- A gate the table may emit. -/
+/-- Native controlled gates that may be added by `auto` or an explicit basis. -/
+def optionalGateSet : GateSet := GateSet.ofKinds [.cz, .ccx, .ccz]
+
+/-- Every gate family the MURM can emit. -/
+def supportedGateSet : GateSet := baseGateSet.union optionalGateSet
+
+/-- A gate the MURM may emit. -/
 inductive LibGate where
   /-- Pauli `X`. -/
   | x (q : Nat)
@@ -194,6 +198,12 @@ inductive LibGate where
   | tdg (q : Nat)
   /-- Controlled `X`. -/
   | cnot (control target : Nat)
+  /-- Controlled `Z`, stored with ordered operands. -/
+  | cz (a b : Nat)
+  /-- Toffoli, stored with ordered controls and a distinct target. -/
+  | ccx (control₁ control₂ target : Nat)
+  /-- Three-qubit controlled phase, stored with ordered operands. -/
+  | ccz (a b c : Nat)
 deriving DecidableEq, Repr, Inhabited, Ord, Hashable
 
 namespace LibGate
@@ -208,11 +218,21 @@ def toGate : LibGate → Gate
   | .t q => .t q
   | .tdg q => .tdg q
   | .cnot c tgt => .cnot c tgt
+  | .cz a b => .cz a b
+  | .ccx a b tgt => .ccx a b tgt
+  | .ccz a b c => .ccz a b c
+
+/-- Operand-free family used to validate a cached gate against its MURM basis. -/
+def kind : LibGate → GateKind
+  | .h _ => .h | .x _ => .x | .z _ => .z | .s _ => .s | .sdg _ => .sdg
+  | .t _ => .t | .tdg _ => .tdg | .cnot .. => .cx | .cz .. => .cz
+  | .ccx .. => .ccx | .ccz .. => .ccz
 
 /-- The wires a library gate touches. -/
 def qubits : LibGate → List Nat
   | .x q | .h q | .s q | .sdg q | .z q | .t q | .tdg q => [q]
-  | .cnot c tgt => [c, tgt]
+  | .cnot c tgt | .cz c tgt => [c, tgt]
+  | .ccx a b tgt | .ccz a b tgt => [a, b, tgt]
 
 /-- Whether two library gates share no wire. -/
 def isDisjoint (a b : LibGate) : Bool := a.qubits.all fun q => !b.qubits.contains q
@@ -223,26 +243,47 @@ def isInverseOf : LibGate → LibGate → Bool
   | .s q, .sdg r | .sdg q, .s r | .t q, .tdg r | .tdg q, .t r => q == r
   | .x q, .x r | .h q, .h r | .z q, .z r => q == r
   | .cnot c₁ t₁, .cnot c₂ t₂ => c₁ == c₂ && t₁ == t₂
+  | .cz a b, .cz c d => a == c && b == d
+  | .ccx a b target, .ccx c d target' =>
+      a == c && b == d && target == target'
+  | .ccz a b c, .ccz d e f => a == d && b == e && c == f
   | _, _ => false
 
 end LibGate
 
-/-- Every library gate on `k` wires: seven one-wire gates per wire, then every ordered pair
-of distinct wires as a `cnot`. -/
-def libGates (k : Nat) : List LibGate :=
-  (List.range k).flatMap
-      (fun q => [.x q, .h q, .s q, .sdg q, .z q, .t q, .tdg q]) ++
+/-- Every library gate enabled by `basis` on `k` wires. Symmetric operands are enumerated
+once: `a < b` for CZ, ordered controls for CCX, and `a < b < c` for CCZ. -/
+def libGates (k : Nat) (basis : GateSet := baseGateSet) : List LibGate :=
+  let one (kind : GateKind) (mk : Nat → LibGate) :=
+    if basis.contains kind then (List.range k).map mk else []
+  let cnot := if basis.contains .cx then
     (List.range k).flatMap fun c =>
       (List.range k).filterMap fun tgt => if c == tgt then none else some (.cnot c tgt)
+    else []
+  let cz := if basis.contains .cz then
+    (List.range k).flatMap fun a =>
+      (List.range k).filterMap fun b => if a < b then some (.cz a b) else none
+    else []
+  let ccx := if basis.contains .ccx then
+    (List.range k).flatMap fun a => (List.range k).flatMap fun b =>
+      (List.range k).filterMap fun t =>
+        if a < b && t != a && t != b then some (.ccx a b t) else none
+    else []
+  let ccz := if basis.contains .ccz then
+    (List.range k).flatMap fun a => (List.range k).flatMap fun b =>
+      (List.range k).filterMap fun c => if a < b && b < c then some (.ccz a b c) else none
+    else []
+  one .h .h ++ one .x .x ++ one .z .z ++ one .s .s ++ one .sdg .sdg ++
+    one .t .t ++ one .tdg .tdg ++ cnot ++ cz ++ ccx ++ ccz
 
 /-! ## The builder's matrices
 
 `ExactMat` is indexed by `Basis n`, which is right for the proofs and wrong for enumerating a
-table: every entry access goes through a function and an index computation. The builder
+MURM: every entry access goes through a function and an index computation. The builder
 therefore works on a flat array with the row operations of `src/super_opt/matrix.rs`, exactly
 as Rust does — row `r` encodes the basis state with wire `0` most significant.
 
-None of this is verified. A wrong answer here costs table hits, never correctness: `accepts`
+None of this is verified. A wrong answer here costs MURM hits, never correctness: `accepts`
 re-derives every candidate's matrix through `ExactMat` and compares it exactly before a
 rewrite is taken. -/
 
@@ -319,6 +360,9 @@ def applyLib (M : FlatMat) : LibGate → FlatMat
   | .t q => M.phaseMask (bit M.n q) 1
   | .tdg q => M.phaseMask (bit M.n q) 7
   | .cnot c tgt => M.xMask (bit M.n c) (bit M.n tgt)
+  | .cz a b => M.phaseMask (bit M.n a ||| bit M.n b) 4
+  | .ccx a b tgt => M.xMask (bit M.n a ||| bit M.n b) (bit M.n tgt)
+  | .ccz a b c => M.phaseMask (bit M.n a ||| bit M.n b ||| bit M.n c) 4
 
 /-- One circuit gate, applied on the left — the same actions as `ExactMat.applyGate`, on the
 flat representation. `none` for the gates `SuperOpt` treats as window barriers. -/
@@ -352,16 +396,18 @@ def normalize (M : FlatMat) : FlatMat := Id.run do
 
 end FlatMat
 
-/-! ## The table -/
+/-! ## The MURM -/
 
-/-- How far the table is built. -/
-structure SuperOptTableConfig where
-  /-- Widest table width, in wires. -/
+/-- How far the MURM is built. -/
+structure MurmConfig where
+  /-- Widest MURM width, in wires. -/
   maxQubits : Nat := 2
   /-- Deepest circuit the enumeration reaches. -/
   maxGates : Nat := 4
   /-- Cap on stored unitaries per width, so a build always terminates promptly. -/
   maxEntriesPerQubit : Nat := 200000
+  /-- Exact synthesis basis represented by this MURM. -/
+  basis : GateSet := baseGateSet
 deriving Repr, DecidableEq, Hashable
 
 /-- One stored circuit: its last gate plus the node holding the rest. The root — the empty
@@ -373,8 +419,8 @@ structure CircuitNode where
   gate : LibGate
 deriving Repr, Inhabited
 
-/-- One width of the table, stored as a prefix-sharing arena. -/
-structure WidthTable where
+/-- One width of the MURM, stored as a prefix-sharing arena. -/
+structure WidthMurm where
   /-- Fingerprint of each stored unitary, mapped to its node. -/
   keys : Std.HashMap UInt64 Nat := ∅
   /-- The arena; node `0` is the root. -/
@@ -385,10 +431,10 @@ structure WidthTable where
   depth : Nat := 0
 deriving Inhabited
 
-namespace WidthTable
+namespace WidthMurm
 
 /-- Recover a stored circuit by walking to the root. -/
-def circuitOf (w : WidthTable) (node : Nat) : List LibGate :=
+def circuitOf (w : WidthMurm) (node : Nat) : List LibGate :=
   go w.nodes.size node []
 where
   /-- Walk up the parent chain, accumulating gates front-first. -/
@@ -400,16 +446,16 @@ where
         | _ => acc
 
 /-- How many unitaries this width stores. -/
-def size (w : WidthTable) : Nat := w.keys.size
+def size (w : WidthMurm) : Nat := w.keys.size
 
-end WidthTable
+end WidthMurm
 
 /-- Build one width breadth-first. Layers are visited in gate-count order, so the first
 circuit reaching a unitary is a smallest one. -/
-def buildWidth (k : Nat) (cfg : SuperOptTableConfig) : WidthTable := Id.run do
+def buildWidth (k : Nat) (cfg : MurmConfig) : WidthMurm := Id.run do
   let idM := FlatMat.id k
-  let gates := libGates k
-  let mut tbl : WidthTable :=
+  let gates := libGates k cfg.basis
+  let mut widthMurm : WidthMurm :=
     { keys := (∅ : Std.HashMap UInt64 Nat).insert (fingerprintFlat idM.den idM.data) 0,
       nodes := #[none] }
   let mut frontier : Array (Nat × FlatMat) := #[(0, idM)]
@@ -419,7 +465,7 @@ def buildWidth (k : Nat) (cfg : SuperOptTableConfig) : WidthTable := Id.run do
     let mut accepted : Array (Nat × FlatMat) := #[]
     for (parent, base) in frontier do
       if stop then break
-      let last : Option LibGate := (tbl.nodes[parent]?.join).map (·.gate)
+      let last : Option LibGate := (widthMurm.nodes[parent]?.join).map (·.gate)
       for g in gates do
         if stop then break
         -- the two prunes
@@ -430,54 +476,55 @@ def buildWidth (k : Nat) (cfg : SuperOptTableConfig) : WidthTable := Id.run do
         if pruned then continue
         let child := (base.applyLib g).normalize
         let ky := fingerprintFlat child.den child.data
-        if tbl.keys.contains ky then pure ()
-        else if tbl.size ≥ cfg.maxEntriesPerQubit then
-          tbl := { tbl with saturated := true }
+        if widthMurm.keys.contains ky then pure ()
+        else if widthMurm.size ≥ cfg.maxEntriesPerQubit then
+          widthMurm := { widthMurm with saturated := true }
           stop := true
         else
-          let node := tbl.nodes.size
-          tbl := { tbl with keys := tbl.keys.insert ky node,
-                            nodes := tbl.nodes.push (some ⟨parent, g⟩) }
+          let node := widthMurm.nodes.size
+          widthMurm := { widthMurm with
+            keys := widthMurm.keys.insert ky node
+            nodes := widthMurm.nodes.push (some ⟨parent, g⟩) }
           accepted := accepted.push (node, child)
-    tbl := { tbl with depth := depth }
+    widthMurm := { widthMurm with depth := depth }
     if accepted.isEmpty then break
     frontier := accepted
-  return tbl
+  return widthMurm
 
-/-- The synthesis table: one `WidthTable` per width, indexed by wire count. -/
-structure SynthTable where
+/-- A minimal unitary representative map: one `WidthMurm` per width. -/
+structure Murm where
   /-- Widths `0 … maxQubits`; index `0` is unused. -/
-  widths : Array WidthTable
+  widths : Array WidthMurm
 deriving Inhabited
 
-/-- Build the table for a configuration.
+/-- Build the MURM for a configuration.
 
 Width `0` is built like the rest even though nothing ever queries it. There are no gates on
-zero wires, so it costs a single arena node — and it keeps every `WidthTable` self-consistent
+zero wires, so it costs a single arena node — and it keeps every `WidthMurm` self-consistent
 (a node for every key, a key for every node), which is what makes serializing and reading a
-table back the identity. Filling it with `default` instead left one node with no key, and the
+MURM back the identity. Filling it with `default` instead left one node with no key, and the
 round trip did not reproduce it. -/
-def buildTable (cfg : SuperOptTableConfig) : SynthTable :=
+def buildMurm (cfg : MurmConfig) : Murm :=
   { widths := (Array.range (cfg.maxQubits + 1)).map fun k => buildWidth k cfg }
 
-/-- Whether the table holds anything for this fingerprint — the cheap pre-filter `SuperOpt`
+/-- Whether the MURM holds anything for this fingerprint — the cheap pre-filter `SuperOpt`
 uses to decide whether the verified lookup is worth running at all. Unverified in both
 directions: a false negative costs an optimization, and a false positive costs one wasted
 verified lookup. -/
-def SynthTable.mayHold (tbl : SynthTable) (k : Nat) (M : FlatMat) : Bool :=
-  match tbl.widths[k]? with
+def Murm.mayHold (murm : Murm) (k : Nat) (M : FlatMat) : Bool :=
+  match murm.widths[k]? with
   | none => false
   | some w =>
       let N := M.normalize
       (w.keys.get? (fingerprintFlat N.den N.data)).isSome
 
-/-- Does the table hold a circuit for this unitary *strictly shorter* than `len`?
+/-- Does the MURM hold a circuit for this unitary *strictly shorter* than `len`?
 
 The question `SuperOpt` actually needs answered before paying for a verified lookup. Asking
-only whether the table holds the unitary at all is useless: it holds essentially every short
+only whether the MURM holds the unitary at all is useless: it holds essentially every short
 Clifford+T circuit, so the answer is almost always yes. -/
-def SynthTable.hasShorter (tbl : SynthTable) (k : Nat) (M : FlatMat) (len : Nat) : Bool :=
-  match tbl.widths[k]? with
+def Murm.hasShorter (murm : Murm) (k : Nat) (M : FlatMat) (len : Nat) : Bool :=
+  match murm.widths[k]? with
   | none => false
   | some w =>
       let N := M.normalize
@@ -491,8 +538,8 @@ The same lookup as `synthesize`, on the representation the search actually holds
 never builds an `ExactMat`, because the checker that vets its answer does that once per
 *selected* rewrite instead of once per window examined. Unverified, like every other part of
 the search. -/
-def SynthTable.synthesizeFlat (tbl : SynthTable) (k : Nat) (M : FlatMat) : Option (List Gate) :=
-  match tbl.widths[k]? with
+def Murm.synthesizeFlat (murm : Murm) (k : Nat) (M : FlatMat) : Option (List Gate) :=
+  match murm.widths[k]? with
   | none => none
   | some w =>
       let N := M.normalize
@@ -502,8 +549,8 @@ def SynthTable.synthesizeFlat (tbl : SynthTable) (k : Nat) (M : FlatMat) : Optio
 
 /-- Look a unitary up. A hit is the shortest circuit the enumeration found for it; the
 caller still re-verifies before rewriting. -/
-def SynthTable.synthesize (tbl : SynthTable) (k : Nat) (M : ExactMat k) : Option (List Gate) :=
-  match tbl.widths[k]? with
+def Murm.synthesize (murm : Murm) (k : Nat) (M : ExactMat k) : Option (List Gate) :=
+  match murm.widths[k]? with
   | none => none
   | some w =>
       match w.keys.get? M.fingerprint with

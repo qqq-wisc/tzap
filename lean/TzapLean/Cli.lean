@@ -7,8 +7,7 @@ A port of `src/cli.rs` and `src/main.rs`: flag parsing, `--help`, and the run ba
 keep Rust's names and meanings so a command line transfers between the two.
 
 What is absent, and says so when asked for: `--parallel` (deliberately not ported),
-`--decompose-rz` / `--decompose-cz` / `--epsilon` (no decomposition passes here), and the
-`DecomposeToffoli` / `DecomposeCz` / `DecomposeRz` / `CliffordResynth` pass names. Rather than
+`--decompose-rz` / `--epsilon`, and the `DecomposeRz` / `CliffordResynth` pass names. Rather than
 report those as unknown flags — which would read as a typo — each gets an error saying it is
 not in this build.
 
@@ -47,14 +46,13 @@ def unsupportedFlag (flag : String) : Option String :=
   match flag with
   | "--parallel" =>
       some "--parallel is not implemented in this build"
-  | "--decompose-rz" | "--decompose-cz" | "--epsilon" =>
-      some s!"{flag} is not available in this build — no decomposition passes are ported \
-              (angles here are exact rationals in units of π, and gridsynth is not ported)"
+  | "--decompose-rz" | "--epsilon" =>
+      some s!"{flag} is not available in this build — Rz decomposition is not part of tzap-lean"
   | _ => none
 
 /-- Pass names Rust has that this build does not. -/
 def unsupportedPass (name : String) : Bool :=
-  ["DecomposeToffoli", "DecomposeCz", "DecomposeRz", "CliffordResynth"].contains name
+  ["DecomposeRz", "CliffordResynth"].contains name
 
 /-- Parse a comma-separated pass list. -/
 def parsePassList (list : String) : IO (List PassName) := do
@@ -96,12 +94,15 @@ def printHelp : IO Unit := do
   IO.println "    \x1b[1m--passes\x1b[0m <list>  Run these passes in order, overriding the default pipeline"
   IO.println "                     (see PASSES)"
   IO.println "    \x1b[1m--fixpoint\x1b[0m       Repeat the pipeline until gate count stops decreasing"
+  IO.println "    \x1b[1m--decompose-ccx\x1b[0m   Decompose CCX and CCZ"
+  IO.println "    \x1b[1m--decompose-cz\x1b[0m    Decompose CZ"
+  IO.println "    \x1b[1m--superopt-gates\x1b[0m <auto|base|list>  Select the MURM synthesis basis"
   IO.println "    \x1b[1m--seed\x1b[0m <n>       Accepted for compatibility (OS entropy is used instead)"
-  IO.println "    \x1b[1m--verbose\x1b[0m        Report detailed input and table-loading information"
+  IO.println "    \x1b[1m--verbose\x1b[0m        Report detailed input and MURM-loading information"
   IO.println "    \x1b[1m-O1\x1b[0m              Fastest: phase folding + gate cancellation only"
   IO.println "    \x1b[1m-O2\x1b[0m              Adds a superoptimization pass to O1 (2 rounds)"
   IO.println "    \x1b[1m-O3\x1b[0m              Runs -O2 to a fixpoint (default)"
-  IO.println "                     (slower first run: the table is built from scratch)"
+  IO.println "                     (slower first run: the MURM is built from scratch)"
   IO.println "    \x1b[1m-h, --help\x1b[0m       Print this help message"
   IO.println "    \x1b[1m-v, --version\x1b[0m    Print the version"
   IO.println ""
@@ -123,6 +124,9 @@ partial def parseArgs (args : List String) : IO Opts := do
   let mut level : Option Level := none
   let mut seed : Option Nat := none
   let mut verbose := false
+  let mut decomposeCcx := false
+  let mut decomposeCz := false
+  let mut superoptGates : SuperOptGates := .auto
   let mut soQubits : Option Nat := none
   let mut soWindow : Option Nat := none
   let mut soEntries : Option Nat := none
@@ -134,6 +138,15 @@ partial def parseArgs (args : List String) : IO Opts := do
     | "--version" | "-v" => IO.println "tzap-lean 0.1.0"; IO.Process.exit 0
     | "--fixpoint" => fixpoint := true
     | "--verbose" => verbose := true
+    | "--decompose-ccx" => decomposeCcx := true
+    | "--decompose-cz" => decomposeCz := true
+    | "--superopt-gates" =>
+        i := i + 1
+        let some raw := args[i]? |
+          argError "--superopt-gates requires auto, base, or a comma-separated gate list"
+        superoptGates ← match SuperOptGates.parse raw with
+          | .ok mode => pure mode
+          | .error e => argError e
     | "--passes" =>
         i := i + 1
         let some first := args[i]? |
@@ -164,9 +177,9 @@ partial def parseArgs (args : List String) : IO Opts := do
     | "--superopt-window-gates" =>
         i := i + 1
         soWindow := some (← parseUsize args i "--superopt-window-gates")
-    | "--superopt-table-entries" =>
+    | "--superopt-murm-entries" | "--superopt-table-entries" =>
         i := i + 1
-        soEntries := some (← parseUsize args i "--superopt-table-entries")
+        soEntries := some (← parseUsize args i "--superopt-murm-entries")
     | _ =>
         if let some reason := unsupportedFlag arg then
           argError reason
@@ -185,9 +198,12 @@ partial def parseArgs (args : List String) : IO Opts := do
               Run `tzap-lean --help` for the full option list."
   if level.isSome && (passes.isSome || fixpoint) then
     argError "-O1, -O2 and -O3 cannot be combined with --passes or --fixpoint"
+  if passes.isSome && (decomposeCcx || decomposeCz) then
+    argError "--passes cannot be combined with --decompose-ccx or --decompose-cz"
   return { inputPath := inPath, outputPath,
            options := { level := level.getD .O3, passes, fixpoint, seed, verbose,
-                        superopt := ⟨soQubits, soWindow, soEntries⟩ } }
+                        superopt := ⟨soQubits, soWindow, soEntries⟩,
+                        superoptGates, decomposeCcx, decomposeCz } }
 
 /-! ## The run -/
 
@@ -213,6 +229,7 @@ def readCircuit (verbose : Bool) (path : String) : IO RawCircuit := do
       if verbose then
         IO.eprintln s!"  Parsed {path} in {fmtSecs (t1 - t0)}s"
         IO.eprintln s!"\t└─ {fmtNum c.numQubits} qubits · {fmtNum c.gates.length} gates"
+        IO.eprintln s!"\t   └─ Circuit gates: {c.gateSet}"
         IO.eprintln ""
       return c
 

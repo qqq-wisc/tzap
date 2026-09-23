@@ -1,13 +1,19 @@
 import TzapLean.PhaseFoldRand
+import TzapLean.GF128
+import TzapLean.Decompose
 
 /-!
 # `PhaseFoldRand`: the Rust test suite, ported
 
-Every behavioural test from `src/phase_fold_rand.rs` that does not depend on a pass this
-development has not ported (the Toffoli decomposition). Rust checks gate *counts* plus a
-numerical `circuits_equiv`; here `phaseFoldGates_correct` proves equivalence whenever the tags
-are faithful, and `PhaseFoldRand.correct` bounds the probability that they are not. These
-`#guard`s pin down the exact gate list the pass produces, and the counts follow.
+The practical behavioural tests from `src/phase_fold_rand.rs`, including the
+Toffoli-decomposition pipelines, are reproduced below. The three ignored Rust cases are
+replayed separately in `PhaseFoldSlowTests.lean`. Rust checks gate *counts* plus a numerical
+`circuits_equiv`; these
+`#guard`s pin down the exact gate list or count the executable pass produces. The
+Clifford+T subset also has exact matrix-equivalence checks. Arbitrary-Rz examples use
+rational angles in units of π, so Rust's per-case floating-point equivalence assertions
+are not reproduced literally. `GF128Bridge.lean` supplies the nonlinear pass's general
+packed-field probability bound.
 
 Angles are rationals in units of `π`, so Rust's radian constants become the `π`-fraction with
 the same classification: `0.3` (not a quarter turn) becomes `3/10`, `PI/4` becomes `1/4`.
@@ -20,6 +26,57 @@ independent uniform samples, while the platform RNG assumption remains explicit.
 namespace TzapLean
 
 open Gate
+
+/-! ### Nonlinear fingerprint arithmetic
+
+These checks pin down the packed arithmetic, nonlinear transfer functions, and degree cutoff
+used by both Rust and the Lean executable. The quotient-field refinement and sharp
+probabilistic theorem are proved in `GF128Bridge.lean`. -/
+
+#guard GF128.add 0x1234 0 == 0x1234
+#guard GF128.mul 0 0xDEADBEEF == 0
+#guard GF128.mul 1 0xDEADBEEF == 0xDEADBEEF
+#guard GF128.mul (2 ^ 127) 2 == 0x87
+#guard GF128.mul 0x123456789ABCDEF 0xFEDCBA987654321 ==
+  GF128.mul 0xFEDCBA987654321 0x123456789ABCDEF
+#guard GF128.mul 0x12345 (GF128.add 0xABC 0xDEF) ==
+  GF128.add (GF128.mul 0x12345 0xABC) (GF128.mul 0x12345 0xDEF)
+
+def gf128Samples : List Nat := [0, 1, 0x123456789ABCDEF0, 2 ^ 128 - 1, 2 ^ 127]
+
+-- The complete finite sample matrix from Rust: zero/one, commutativity, and distributivity.
+#guard gf128Samples.all fun a =>
+  GF128.mul a 0 == 0 && GF128.mul a 1 == GF128.normalize a &&
+    gf128Samples.all fun b =>
+      GF128.mul a b == GF128.mul b a &&
+        gf128Samples.all fun c =>
+          GF128.mul a (GF128.add b c) == GF128.add (GF128.mul a b) (GF128.mul a c)
+
+def fpA : Fingerprint := ⟨0x123456, 9⟩
+def fpB : Fingerprint := ⟨0xABCDEF, 12⟩
+def fpTarget : Fingerprint := ⟨0x55AA, 7⟩
+
+-- Applying the same in-range CCX update twice restores the target field value.
+#guard
+  let once := Fingerprint.ccx fpTarget fpA fpB 0
+  let twice := Fingerprint.ccx once fpA fpB 0
+  twice.value == fpTarget.value
+
+/-- Successive nonlinear products can grow like Fibonacci numbers. -/
+def fibonacciDegrees : Nat → Nat × Nat
+  | 0 => (1, 1)
+  | n + 1 =>
+      let (a, b) := fibonacciDegrees n
+      (b, a + b)
+
+-- The synthetic sequence stays within the budget at step 45 and crosses `2^32` at step 46.
+#guard (fibonacciDegrees 45).2 ≤ Fingerprint.maxDegree
+#guard (fibonacciDegrees 46).2 > Fingerprint.maxDegree
+#guard
+  let a : Fingerprint := { value := 3, degree := (fibonacciDegrees 45).1 }
+  let b : Fingerprint := { value := 5, degree := (fibonacciDegrees 45).2 }
+  let freshValue := 0xC0FFEE
+  Fingerprint.ccx fpTarget a b freshValue == Fingerprint.fresh freshValue
 
 /-- A fixed draw stream: splitmix64 bit mixing, one 63-bit tag per variable. Reproducible,
 and *only* for these tests — see the module docstring. -/
@@ -37,7 +94,137 @@ def testWords : Nat → Tag := seedWords 63 0
 #guard natOfBytes (ByteArray.mk #[0x01, 0x02, 0x03]) 0 3 == 0x030201
 
 /-- Phase folding with those draws. -/
-def pf (n : Nat) (gs : List Gate) : List Gate := phaseFoldGates 63 testWords n gs
+def pf (n : Nat) (gs : List Gate) : List Gate := phaseFoldGatesNonlinear testWords n gs
+
+/-! ### Nonlinear CCX tracking -/
+
+-- An identical CCX pair restores the target polynomial, so the surrounding T/Tdg cancel.
+#guard pf 3 [.t 2, .ccx 0 1 2, .ccx 1 0 2, .tdg 2] ==
+  [.ccx 0 1 2, .ccx 1 0 2]
+
+-- One CCX changes the target to a genuinely nonlinear fingerprint and blocks the merge.
+#guard ((pf 3 [.t 2, .ccx 0 1 2, .tdg 2]).filter fun g => (rotAngle g).isSome).length == 2
+
+-- The transfer function uses target + left*right and the product-degree upper bound.
+#guard
+  let st := NState.initial testWords 3
+  let after := st.step testWords (.ccx 0 1 2)
+  (after.fpOf 2).value == GF128.add (st.fpOf 2).value
+    (GF128.mul (st.fpOf 0).value (st.fpOf 1).value)
+#guard
+  let st := NState.initial testWords 3
+  let after := st.step testWords (.ccx 0 1 2)
+  (after.fpOf 2).degree == 2
+
+-- Reset is the Boolean constant zero and does not consume a random variable.
+#guard
+  let st := (NState.initial testWords 1).step testWords (.reset 0)
+  st.fpOf 0 == Fingerprint.zero && st.fresh == 1
+
+-- Shared-control dependencies are not mistaken for an affine cancellation.
+#guard pf 3
+    [.t 2, .cnot 0 1, .ccx 0 1 2, .cnot 0 1, .ccx 0 1 2, .cnot 0 2, .tdg 2] ==
+  [.t 2, .cnot 0 1, .ccx 0 1 2, .cnot 0 1, .ccx 0 1 2, .cnot 0 2, .tdg 2]
+
+structure DegreeGrowth where
+  degrees : Array Nat
+  gates : List Gate
+  overflowControls : Qubit × Qubit
+  overflowTarget : Qubit
+  crossed : Bool
+deriving Repr
+
+def leastDegreeWire (degrees : Array Nat) : Qubit :=
+  if degrees[0]!.min degrees[1]! ≤ degrees[2]! then
+    if degrees[0]! ≤ degrees[1]! then 0 else 1
+  else 2
+
+def otherWires : Qubit → Qubit × Qubit
+  | 0 => (1, 2)
+  | 1 => (0, 2)
+  | _ => (0, 1)
+
+/-- Build Rust's synthetic Fibonacci-degree circuit, with a hard recursion bound that is
+itself checked below. -/
+def growDegrees : Nat → DegreeGrowth → DegreeGrowth
+  | 0, result => result
+  | fuel + 1, result =>
+      if result.crossed then result
+      else
+        let target := leastDegreeWire result.degrees
+        let controls := otherWires target
+        let productDegree := result.degrees[controls.1]! + result.degrees[controls.2]!
+        if productDegree > Fingerprint.maxDegree then
+          { result with overflowControls := controls, overflowTarget := target, crossed := true }
+        else
+          growDegrees fuel {
+            degrees := result.degrees.set! target (max result.degrees[target]! productDegree)
+            gates := result.gates ++ [.ccx controls.1 controls.2 target]
+            overflowControls := controls
+            overflowTarget := target
+            crossed := false }
+
+def extremeDegreeGrowth : DegreeGrowth :=
+  growDegrees 64 {
+    degrees := #[1, 1, 1]
+    gates := []
+    overflowControls := (0, 1)
+    overflowTarget := 2
+    crossed := false }
+
+#guard extremeDegreeGrowth.crossed
+#guard extremeDegreeGrowth.gates.length < 64
+#guard extremeDegreeGrowth.degrees.all (· ≤ Fingerprint.maxDegree)
+
+def extremeDegreeCircuit : List Gate :=
+  let growth := extremeDegreeGrowth
+  growth.gates ++ [.t growth.overflowTarget,
+    .ccx growth.overflowControls.1 growth.overflowControls.2 growth.overflowTarget,
+    .ccx growth.overflowControls.1 growth.overflowControls.2 growth.overflowTarget,
+    .tdg growth.overflowTarget]
+
+-- Each overflowing CCX refreshes the target independently, so folding stops conservatively.
+#guard pf 3 extremeDegreeCircuit == extremeDegreeCircuit
+
+/-! ### Replayable native-gate circuit sweep
+
+Every generated circuit contains CZ, CCX, and CCZ as well as phase and classical-update gates.
+The seed rotates gate and operand choices, giving a deterministic regression corpus. -/
+
+def nativePhaseGate (seed i : Nat) : Gate :=
+  let q := (seed + i) % 3
+  match (seed * 7 + i) % 10 with
+  | 0 => .t q
+  | 1 => .tdg q
+  | 2 => .x q
+  | 3 => .h q
+  | 4 => .cnot q ((q + 1) % 3)
+  | 5 => .cz q ((q + 1) % 3)
+  | 6 => .ccx q ((q + 1) % 3) ((q + 2) % 3)
+  | 7 => .ccz q ((q + 1) % 3) ((q + 2) % 3)
+  | 8 => .rz (3/10) q
+  | _ => .s q
+
+def nativePhaseCircuit (seed : Nat) : List Gate :=
+  [.cz 0 1, .ccx 0 1 2, .ccz 0 1 2] ++
+    (List.range 37).map (nativePhaseGate seed)
+
+def nativePhaseFuzzCase (seed : Nat) : Bool :=
+  let input := nativePhaseCircuit seed
+  let output := pf 3 input
+  input.any (fun g => g.kind == .ccx) && input.any (fun g => g.kind == .ccz) &&
+    output.all Gate.Wf
+
+#guard (List.range 256).all nativePhaseFuzzCase
+
+/-- Exact semantic differential checks on a replayable Clifford+T subset of the generated
+native-gate corpus. `ExactMat` intentionally treats arbitrary `rz` as a barrier. -/
+def nativePhaseMatrixCircuit (seed : Nat) : List Gate :=
+  [.cz 0 1, .ccx 0 1 2, .ccz 0 1 2] ++
+    (List.range 20).map (fun i =>
+      match nativePhaseGate seed i with
+      | .rz _ q => .tdg q
+      | gate => gate)
 
 /-- Rust's `count_phase_gates`. -/
 def countPhaseGates (gs : List Gate) : Nat := (gs.filter fun g => (rotAngle g).isSome).length
@@ -45,6 +232,110 @@ def countPhaseGates (gs : List Gate) : Nat := (gs.filter fun g => (rotAngle g).i
 /-- Rust's `count_t_gates`. -/
 def countTGates (gs : List Gate) : Nat :=
   (gs.filter fun g => match g with | .t _ | .tdg _ => true | _ => false).length
+
+/-- Exact Clifford+T equivalence up to global phase, rather than Rust's floating-point
+`circuits_equiv` tolerance. The checker is sound by `matrixOf_sound` and `phaseMatch_sound`. -/
+def exactMatrixEquivalent (n : Nat) (source output : List Gate) : Bool :=
+  match ExactMat.matrixOf n source, ExactMat.matrixOf n output with
+  | some sourceMat, some outputMat =>
+      (ExactMat.phaseMatch sourceMat.normalize outputMat.normalize).isSome
+  | _, _ => false
+
+/-- The executable exact-matrix check implies equality of the modeled channels. -/
+theorem exactMatrixEquivalent_sound {n m : Nat} {source output : List Gate}
+    (hsourceWf : ∀ gate ∈ source, gate.Wf)
+    (houtputWf : ∀ gate ∈ output, gate.Wf)
+    (hsourceUnitary : ∀ gate ∈ source, gate.isUnitary = true)
+    (houtputUnitary : ∀ gate ∈ output, gate.isUnitary = true)
+    (h : exactMatrixEquivalent n source output = true) :
+    Equivalent n m output source := by
+  unfold exactMatrixEquivalent at h
+  cases hsource : ExactMat.matrixOf n source with
+  | none => simp [hsource] at h
+  | some sourceMat =>
+      cases houtput : ExactMat.matrixOf n output with
+      | none => simp [hsource, houtput] at h
+      | some outputMat =>
+          cases hphase : ExactMat.phaseMatch sourceMat.normalize outputMat.normalize with
+          | none => simp [hsource, houtput, hphase] at h
+          | some phase =>
+              have hmat : unitary n output = ω ^ phase • unitary n source := by
+                have hs := ExactMat.matrixOf_sound hsourceWf hsource
+                have ho := ExactMat.matrixOf_sound houtputWf houtput
+                have hp := ExactMat.phaseMatch_sound hphase
+                simpa [hs, ho] using hp
+              exact equivalent_of_unitary_smul houtputUnitary hsourceUnitary
+                (ω ^ phase) (ExactMat.omega_pow_unit phase) hmat
+
+def nativePhaseMatrixCase (seed : Nat) : Bool :=
+  let input := nativePhaseMatrixCircuit seed
+  exactMatrixEquivalent 3 input (pf 3 input)
+
+#guard (List.range 64).all nativePhaseMatrixCase
+
+-- The CCX inverse-pair regression is exact-equivalent, not merely equal on the test seed.
+#guard
+  let input : List Gate := [.t 2, .ccx 0 1 2, .ccx 1 0 2, .tdg 2]
+  exactMatrixEquivalent 3 input (pf 3 input)
+
+-- The shared-control regression keeps its original channel.
+#guard
+  let input : List Gate :=
+    [.t 2, .cnot 0 1, .ccx 0 1 2, .cnot 0 1, .ccx 0 1 2, .cnot 0 2, .tdg 2]
+  exactMatrixEquivalent 3 input (pf 3 input)
+
+/-! ### Decompose-then-fold pipelines -/
+
+def sharedControlToffolis : List Gate :=
+  [.ccx 1 2 0, .cnot 2 0, .ccx 0 1 2]
+
+def smallToffoliPipeline : List Gate :=
+  [.x 4, .h 4, .h 4, .ccx 0 3 4, .h 4, .h 4, .ccx 2 3 4, .h 4, .h 4,
+    .cnot 3 4, .h 4, .h 4, .ccx 1 2 4, .h 4, .h 4, .cnot 2 4, .h 4, .h 4,
+    .ccx 0 1 4, .h 4, .h 4, .cnot 1 4, .cnot 0 4]
+
+-- `toffoli_decompose_then_phase_fold`: phase folding never raises the T count.
+#guard
+  let decomposed := decomposeToffoliGates [.ccx 0 1 2]
+  countTGates (pf 3 decomposed) ≤ countTGates decomposed
+#guard exactMatrixEquivalent 3 [.ccx 0 1 2]
+  (pf 3 (decomposeToffoliGates [.ccx 0 1 2]))
+
+-- `two_toffoli_shared_control`: port the exact Rust regression, 14 T/Tdg gates become 12.
+#guard countTGates (decomposeToffoliGates sharedControlToffolis) == 14
+#guard countTGates (pf 3 (decomposeToffoliGates sharedControlToffolis)) == 12
+#guard exactMatrixEquivalent 3 sharedControlToffolis
+  (pf 3 (decomposeToffoliGates sharedControlToffolis))
+
+-- `small_circuit_pipeline`: both folding rounds are monotone in T/Tdg count.
+#guard
+  let decomposed := decomposeToffoliGates smallToffoliPipeline
+  let once := pf 5 decomposed
+  let twice := pf 5 once
+  countTGates once ≤ countTGates decomposed && countTGates twice ≤ countTGates once
+
+-- Integer phases surrounding decomposed Toffolis remain stable under a second fold.
+#guard
+  let once := pf 3 (decomposeToffoliGates [.z 2, .ccx 0 1 2, .z 2])
+  pf 3 once == once
+#guard
+  let original : List Gate := [.z 2, .ccx 0 1 2, .z 2]
+  let once := pf 3 (decomposeToffoliGates original)
+  exactMatrixEquivalent 3 original (pf 3 once)
+#guard
+  let once := pf 3 (decomposeToffoliGates [.sdg 0, .ccx 0 1 2, .s 1])
+  pf 3 once == once
+#guard
+  let original : List Gate := [.sdg 0, .ccx 0 1 2, .s 1]
+  let once := pf 3 (decomposeToffoliGates original)
+  exactMatrixEquivalent 3 original (pf 3 once)
+#guard
+  let once := pf 3 (decomposeToffoliGates [.z 0, .sdg 1, .ccx 0 1 2, .z 2, .s 1])
+  pf 3 once == once
+#guard
+  let original : List Gate := [.z 0, .sdg 1, .ccx 0 1 2, .z 2, .s 1]
+  let once := pf 3 (decomposeToffoliGates original)
+  exactMatrixEquivalent 3 original (pf 3 once)
 
 
 /-! ### Basic merges (`two_t_merge_to_s` … `h_prevents_merge`) -/
@@ -304,42 +595,39 @@ def countTGates (gs : List Gate) : Nat :=
 
 /-! ### Measurement and reset
 
-Rust folds *through* both: a measurement preserves the value it measures, and a `reset`
-pins a wire's parity to the constant `0`. This port stops the lookahead at either gate, so
-it merges strictly less — never wrongly. Four of these agree with Rust exactly; the rest
-keep gates Rust removes, and the expectations below record that difference rather than
-paper over it. Lifting it needs the merge lemma restated on channels (a diagonal operator
-commutes with the measurement projectors) instead of on unitaries. -/
+The nonlinear executable matches Rust here: a measurement preserves the value it measures,
+and a `reset` pins a wire to the field constants `0` or (after X) `1`. Rotations on either
+known computational-basis constant are observationally irrelevant and are removed. -/
 
 -- measure_t_t
-#guard pf 1 [t 0, measure 0 0, t 0] == [Gate.t 0, Gate.measure 0 0, Gate.t 0]
+#guard pf 1 [t 0, measure 0 0, t 0] == [Gate.measure 0 0, Gate.s 0]
 
 -- reset_then_phase
-#guard pf 1 [t 0, reset 0, t 0] == [Gate.t 0, Gate.reset 0, Gate.t 0]
+#guard pf 1 [t 0, reset 0, t 0] == [Gate.t 0, Gate.reset 0]
 
 -- measure_t_tdg
-#guard pf 1 [t 0, measure 0 0, tdg 0] == [Gate.t 0, Gate.measure 0 0, Gate.tdg 0]
+#guard pf 1 [t 0, measure 0 0, tdg 0] == [Gate.measure 0 0]
 
 -- measure_other_qubit
-#guard pf 2 [t 0, measure 1 0, t 0] == [Gate.t 0, Gate.measure 1 0, Gate.t 0]
+#guard pf 2 [t 0, measure 1 0, t 0] == [Gate.measure 1 0, Gate.s 0]
 
 -- reset_other_qubit
-#guard pf 2 [t 0, reset 1, t 0] == [Gate.t 0, Gate.reset 1, Gate.t 0]
+#guard pf 2 [t 0, reset 1, t 0] == [Gate.reset 1, Gate.s 0]
 
 -- measure_no_rotations
 #guard pf 2 [h 0, cnot 0 1, measure 0 0, measure 1 1] == [Gate.h 0, Gate.cnot 0 1, Gate.measure 0 0, Gate.measure 1 1]
 
 -- measure_both_sides
-#guard pf 1 [t 0, t 0, measure 0 0, t 0, t 0] == [Gate.s 0, Gate.measure 0 0, Gate.s 0]
+#guard pf 1 [t 0, t 0, measure 0 0, t 0, t 0] == [Gate.measure 0 0, Gate.z 0]
 
 -- reset_then_phases
-#guard pf 1 [reset 0, t 0, s 0, z 0, rz (123/1000) 0] == [Gate.reset 0, Gate.rz ((1873 : Rat)/1000) 0]
+#guard pf 1 [reset 0, t 0, s 0, z 0, rz (123/1000) 0] == [Gate.reset 0]
 
 -- reset_then_x_then_t
-#guard pf 1 [reset 0, x 0, t 0] == [Gate.reset 0, Gate.x 0, Gate.t 0]
+#guard pf 1 [reset 0, x 0, t 0] == [Gate.reset 0, Gate.x 0]
 
 -- reset_zero_through_cnot
-#guard pf 2 [reset 1, cnot 0 1, t 0, t 1] == [Gate.reset 1, Gate.cnot 0 1, Gate.t 0, Gate.t 1]
+#guard pf 2 [reset 1, cnot 0 1, t 0, t 1] == [Gate.reset 1, Gate.cnot 0 1, Gate.s 1]
 
 -- hadamard_after_reset
 #guard pf 1 [reset 0, h 0, t 0] == [Gate.reset 0, Gate.h 0, Gate.t 0]
@@ -376,6 +664,22 @@ commutes with the measurement projectors) instead of on unitaries. -/
 
 -- cz_no_hadamard_hiding
 #guard pf 2 [t 0, cz 0 1, h 0, t 0] == [Gate.t 0, Gate.cz 0 1, Gate.h 0, Gate.t 0]
+
+-- phases_on_both_wires_fold_independently_across_cz_chain
+#guard pf 2 [t 0, tdg 1, cz 0 1, cz 1 0, t 0, t 1] ==
+  [Gate.cz 0 1, Gate.cz 1 0, Gate.s 0]
+
+-- cz_and_cnot_control_preserve_phase_parity_together
+#guard pf 3 [t 0, cz 0 1, cnot 0 2, cz 2 1, t 0] ==
+  [Gate.cz 0 1, Gate.cnot 0 2, Gate.cz 2 1, Gate.s 0]
+
+-- cz_does_not_mask_cnot_target_parity_change
+#guard pf 2 [t 1, cz 0 1, cnot 0 1, cz 1 0, t 1] ==
+  [Gate.t 1, Gate.cz 0 1, Gate.cnot 0 1, Gate.cz 1 0, Gate.t 1]
+
+-- phase_fold_preserves_cz_count_and_operand_order
+#guard pf 3 [t 2, cz 2 0, cz 1 2, t 2] ==
+  [Gate.cz 2 0, Gate.cz 1 2, Gate.s 2]
 
 /-! ### The count assertions Rust states as inequalities -/
 
