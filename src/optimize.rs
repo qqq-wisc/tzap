@@ -1961,10 +1961,11 @@ mod tests {
     }
 
     /// Bounded deterministic fuzzing: every optional-native input subset and
-    /// every decomposition subset gets a reproducible random circuit, basis,
-    /// and execution mode. Failure messages include the seed for replay.
+    /// every decomposition subset gets eight reproducible random circuits.
+    /// Basis and execution modes cycle across the samples, and failure
+    /// messages include the seed for replay.
     #[test]
-    fn bounded_native_pipeline_fuzz_covers_64_cross_feature_cases() {
+    fn bounded_native_pipeline_fuzz_covers_512_cross_feature_cases() {
         use crate::pass::Pass;
         use crate::unitary::circuits_equiv;
 
@@ -1991,97 +1992,101 @@ mod tests {
 
         for native_mask in 0u8..8 {
             for decompose_mask in 0u8..8 {
-                let replay_seed =
-                    0x4e41_5449_5645_0000u64 | ((native_mask as u64) << 8) | decompose_mask as u64;
-                let mut seed = replay_seed;
-                let mut input = native_subset_circuit(native_mask);
-                for _ in 0..24 {
-                    let q = (next(&mut seed) % 3) as u32;
-                    match next(&mut seed) % 12 {
-                        0 => input.apply(Gate::h(q)),
-                        1 => input.apply(Gate::x(q)),
-                        2 => input.apply(Gate::z(q)),
-                        3 => input.apply(Gate::s(q)),
-                        4 => input.apply(Gate::sdg(q)),
-                        5 => input.apply(Gate::t(q)),
-                        6 => input.apply(Gate::tdg(q)),
-                        7 => input.apply(Gate::rz((next(&mut seed) % 13 + 1) as f64 / 17.0, q)),
-                        8 => input.apply(Gate::cnot {
-                            control: q,
-                            target: (q + 1) % 3,
-                        }),
-                        9 if native_mask & 1 != 0 => input.apply(Gate::cz {
-                            control: q,
-                            target: (q + 1) % 3,
-                        }),
-                        10 if native_mask & 2 != 0 => input.apply(Gate::ccx {
-                            control1: q,
-                            control2: (q + 1) % 3,
-                            target: (q + 2) % 3,
-                        }),
-                        11 if native_mask & 4 != 0 => input.apply(Gate::ccz {
-                            control1: q,
-                            control2: (q + 1) % 3,
-                            target: (q + 2) % 3,
-                        }),
-                        _ => input.apply(Gate::h(q)),
+                for sample in 0u64..8 {
+                    let replay_seed = 0x4e41_5449_5645_0000u64
+                        | (sample << 12)
+                        | ((native_mask as u64) << 8)
+                        | decompose_mask as u64;
+                    let mut seed = replay_seed;
+                    let mut input = native_subset_circuit(native_mask);
+                    for _ in 0..24 {
+                        let q = (next(&mut seed) % 3) as u32;
+                        match next(&mut seed) % 12 {
+                            0 => input.apply(Gate::h(q)),
+                            1 => input.apply(Gate::x(q)),
+                            2 => input.apply(Gate::z(q)),
+                            3 => input.apply(Gate::s(q)),
+                            4 => input.apply(Gate::sdg(q)),
+                            5 => input.apply(Gate::t(q)),
+                            6 => input.apply(Gate::tdg(q)),
+                            7 => input.apply(Gate::rz((next(&mut seed) % 13 + 1) as f64 / 17.0, q)),
+                            8 => input.apply(Gate::cnot {
+                                control: q,
+                                target: (q + 1) % 3,
+                            }),
+                            9 if native_mask & 1 != 0 => input.apply(Gate::cz {
+                                control: q,
+                                target: (q + 1) % 3,
+                            }),
+                            10 if native_mask & 2 != 0 => input.apply(Gate::ccx {
+                                control1: q,
+                                control2: (q + 1) % 3,
+                                target: (q + 2) % 3,
+                            }),
+                            11 if native_mask & 4 != 0 => input.apply(Gate::ccz {
+                                control1: q,
+                                control2: (q + 1) % 3,
+                                target: (q + 2) % 3,
+                            }),
+                            _ => input.apply(Gate::h(q)),
+                        }
                     }
-                }
 
-                let mode = match next(&mut seed) % 3 {
-                    0 => SuperOptGates::Auto,
-                    1 => SuperOptGates::Base,
-                    _ => {
-                        let mask = (next(&mut seed) as u16) & 0x07ff;
-                        let nonempty = if mask == 0 { 1 } else { mask };
-                        SuperOptGates::Explicit(GateSet::from_kinds(
-                            candidates
-                                .into_iter()
-                                .enumerate()
-                                .filter_map(|(bit, kind)| {
-                                    (nonempty & (1 << bit) != 0).then_some(kind)
-                                }),
-                        ))
+                    let mode = match sample % 3 {
+                        0 => SuperOptGates::Auto,
+                        1 => SuperOptGates::Base,
+                        _ => {
+                            let mask = (next(&mut seed) as u16) & 0x07ff;
+                            let nonempty = if mask == 0 { 1 } else { mask };
+                            SuperOptGates::Explicit(GateSet::from_kinds(
+                                candidates
+                                    .into_iter()
+                                    .enumerate()
+                                    .filter_map(|(bit, kind)| {
+                                        (nonempty & (1 << bit) != 0).then_some(kind)
+                                    }),
+                            ))
+                        }
+                    };
+                    let options = Options {
+                        level: Level::O2,
+                        decompose_ccx: decompose_mask & 1 != 0,
+                        decompose_cz: decompose_mask & 2 != 0,
+                        decompose_rz: decompose_mask & 4 != 0,
+                        rz_epsilon: 1e-3,
+                        parallel: sample & 1 != 0,
+                        superopt: SuperOptBounds {
+                            qubits: Some(3),
+                            window_gates: Some(4),
+                            murm_entries: Some(128),
+                        },
+                        superopt_gates: mode,
+                        ..Options::default()
+                    };
+                    let (output, _) = optimize(&input, &options).unwrap();
+                    assert!(
+                        circuits_equiv(&input, &output, 2e-2),
+                        "seed {replay_seed:#018x}, native {native_mask:#05b}, decomposition {decompose_mask:#05b}"
+                    );
+                    assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
+                    if options.decompose_ccx {
+                        assert!(!output.gate_set().contains(GateKind::Ccx));
+                        assert!(!output.gate_set().contains(GateKind::Ccz));
                     }
-                };
-                let options = Options {
-                    level: Level::O2,
-                    decompose_ccx: decompose_mask & 1 != 0,
-                    decompose_cz: decompose_mask & 2 != 0,
-                    decompose_rz: decompose_mask & 4 != 0,
-                    rz_epsilon: 1e-3,
-                    parallel: next(&mut seed) & 1 != 0,
-                    superopt: SuperOptBounds {
-                        qubits: Some(3),
-                        window_gates: Some(4),
-                        murm_entries: Some(128),
-                    },
-                    superopt_gates: mode,
-                    ..Options::default()
-                };
-                let (output, _) = optimize(&input, &options).unwrap();
-                assert!(
-                    circuits_equiv(&input, &output, 2e-2),
-                    "seed {replay_seed:#018x}, native {native_mask:#05b}, decomposition {decompose_mask:#05b}"
-                );
-                assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
-                if options.decompose_ccx {
-                    assert!(!output.gate_set().contains(GateKind::Ccx));
-                    assert!(!output.gate_set().contains(GateKind::Ccz));
-                }
-                if options.decompose_cz {
-                    assert!(!output.gate_set().contains(GateKind::Cz));
-                }
-                if options.decompose_rz {
-                    assert!(!output.gate_set().contains(GateKind::Rz));
-                }
+                    if options.decompose_cz {
+                        assert!(!output.gate_set().contains(GateKind::Cz));
+                    }
+                    if options.decompose_rz {
+                        assert!(!output.gate_set().contains(GateKind::Rz));
+                    }
 
-                let once = CancelGates.run(&output);
-                let twice = CancelGates.run(&once);
-                assert_eq!(
-                    once.gates, twice.gates,
-                    "CancelGates not idempotent for seed {replay_seed:#018x}"
-                );
+                    let once = CancelGates.run(&output);
+                    let twice = CancelGates.run(&once);
+                    assert_eq!(
+                        once.gates, twice.gates,
+                        "CancelGates not idempotent for seed {replay_seed:#018x}"
+                    );
+                }
             }
         }
     }

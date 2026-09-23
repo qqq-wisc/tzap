@@ -11,12 +11,12 @@ This report covers the native controlled-gate work on
 | SuperOpt basis selection | 80 | Normal | 8 input subsets × `auto`, `base`, and 8 explicit native subsets |
 | Optimization levels | 32 | Normal | 4 levels × 8 input subsets |
 | Parallel execution | 24 | Normal | 8 input subsets × 3 basis modes |
-| Deterministic cross-feature fuzz | 64 | Normal | Every input/decomposition subset with randomized gates, basis, and execution mode |
+| Deterministic cross-feature fuzz | 512 | Normal | Eight random samples for every input/decomposition subset, cycling basis and execution modes |
 | Explicit basis parser | 2,048 | Normal | All 2,047 non-empty masks plus the empty-basis error |
 | Native MURM cache round trips | 8 | Normal | Cold build and warm read for every optional-native mask |
 | Full Cartesian matrix | 5,120 | Ignored/manual | 8 inputs × 10 bases × 8 decompositions × 4 levels × 2 execution modes |
 
-The normal-CI matrix contains 264 end-to-end pipeline/fuzz cases before the
+The normal-CI matrix contains 712 end-to-end pipeline/fuzz cases before the
 focused pass, CLI, JSON, cache, and Python regressions are counted.
 
 ## Tests added
@@ -47,7 +47,7 @@ Source: [`src/phase_fold_rand.rs`](../src/phase_fold_rand.rs).
 | `nonlinear_shared_control_dependencies_remain_equivalent` | CCX controls that share algebraic variables after CNOT propagation remain sound through phase folding. |
 | `extreme_polynomial_degree_conservatively_stops_phase_folding` | A synthetic Fibonacci-degree CCX circuit crosses the `2^32` safety limit and proves that PhaseFoldRand forgets the target instead of making a probabilistically weak phase merge. |
 | Existing CZ/CCZ transparency tests | Rotations fold across every diagonal operand while CZ/CCZ gate order and multiplicity are preserved. |
-| 64-case deterministic fuzz suite | Random nonlinear CCX/CCZ dependencies remain equivalent through the full staged driver. |
+| 512-case deterministic fuzz suite | Random nonlinear CCX/CCZ dependencies remain equivalent through the full staged driver. |
 
 ### CancelGates
 
@@ -97,15 +97,16 @@ Source: [`src/optimize.rs`](../src/optimize.rs).
 | `optimization_level_matrix_covers_32_end_to_end_cases` | 32 | O1/O2/O3/Osuper preserve every optional-native input subset. |
 | `parallel_superopt_matrix_covers_24_end_to_end_cases` | 24 | Sequential and parallel results are mutually equivalent for auto/base/explicit modes. |
 | `parallel_fixpoint_reports_the_maximum_chunk_round` | 1 | Parallel chunk telemetry collapses to one stage record with the maximum round count and convergence only when every chunk converged. |
-| `bounded_native_pipeline_fuzz_covers_64_cross_feature_cases` | 64 | Deterministic random circuits cover every native/decomposition subset, with basis modes and sequential/parallel execution distributed across those 64 cases, plus QASM round trip, CancelGates idempotence, and every requested CCX/CCZ/CZ/Rz output postcondition. |
+| `bounded_native_pipeline_fuzz_covers_512_cross_feature_cases` | 512 | Eight deterministic random circuits cover every native/decomposition subset, cycling basis modes and sequential/parallel execution, plus QASM round trip, CancelGates idempotence, and every requested CCX/CCZ/CZ/Rz output postcondition. |
 | `extended_full_native_configuration_matrix_has_5120_cases` | 5,120 | Ignored exhaustive Cartesian product with equivalence and every requested decomposition postcondition. |
 
 The bounded fuzz seed is
-`0x4e41544956450000 | (native_mask << 8) | decomposition_mask`; every failure
+`0x4e41544956450000 | (sample << 12) | (native_mask << 8) | decomposition_mask`;
+every failure
 prints the complete seed. Run it with:
 
 ```bash
-cargo test --lib bounded_native_pipeline_fuzz_covers_64_cross_feature_cases -- --nocapture
+cargo test --lib bounded_native_pipeline_fuzz_covers_512_cross_feature_cases -- --nocapture
 ```
 
 Run the extended matrix manually with:
