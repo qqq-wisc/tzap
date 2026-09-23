@@ -1,11 +1,16 @@
-//! Exact, bounded reference semantics for small measurement-free circuits.
+//! Exact, bounded reference semantics for small quantum circuits.
 //!
 //! Test-only: this is an independent oracle, not part of optimization. PBC
 //! rotations use V(P,k) = (I+P)/2 + omega^k (I-P)/2, omega = exp(i*pi/4).
 //! Thus the returned matrix is a unitary representative up to global phase,
 //! not necessarily the literal exp(-i*k*pi*P/8). All arithmetic is exact in
 //! Q(sqrt(2), i). Qubit 0 is the most significant basis bit.
+//! [`channel`] extends this to exact quantum-classical maps with terminal
+//! measurements, for an explicit initial classical store and arbitrary quantum
+//! input. Gate inputs reject resets and mid-circuit measurements; PBC outputs
+//! may have rotations after measurement to restore their quantum output frame.
 
+pub(crate) mod channel;
 mod matrix;
 mod scalar;
 use crate::circuit::{Circuit, Gate, qubit_operands};
@@ -38,6 +43,8 @@ pub(crate) enum Error {
     LimitExceeded,
     UnsupportedOperation { index: usize },
     InvalidOperand { index: usize },
+    InvalidInitialStore,
+    GateAfterMeasurement { index: usize },
 }
 
 // Conservatively covers the accumulator, identity, gate, and intermediate
@@ -195,6 +202,35 @@ fn reference(values: &[Matrix], r: PauliRef) -> Matrix {
     values[r.node_index()].scale(&phase(r.phase()))
 }
 
+fn referenced_nodes(circuit: &PbcCircuit) -> usize {
+    circuit
+        .operations()
+        .iter()
+        .map(|op| op.axis().as_ref().node_index() + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Independent dense interpretation, not the production Pauli materializer.
+fn pauli_matrices(circuit: &PbcCircuit, nodes: usize, dim: usize) -> Vec<Matrix> {
+    let mut values = Vec::with_capacity(nodes);
+    for node in &circuit.pauli_nodes()[..nodes] {
+        values.push(match *node {
+            PauliNode::Identity => Matrix::identity(dim),
+            PauliNode::Single { qubit, pauli: p } => pauli(circuit.num_qubits(), qubit, p),
+            PauliNode::Product(a, b) => reference(&values, a).mul(&reference(&values, b)),
+        });
+    }
+    values
+}
+
+fn rotation(axis: &Matrix, eighths: u8) -> Matrix {
+    let omega = Scalar::omega(eighths);
+    let a = Scalar::integer(1).add(&omega).half();
+    let b = Scalar::integer(1).add(&omega.neg()).half();
+    Matrix::identity(axis.dim).scale(&a).add(&axis.scale(&b))
+}
+
 pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix, Error> {
     // Reject dynamic operations rather than silently ignoring a measurement or
     // guessing the classical branch of a conditional rotation.
@@ -203,12 +239,7 @@ pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix
             return Err(Error::UnsupportedOperation { index: i });
         }
     }
-    let nodes = circuit
-        .operations()
-        .iter()
-        .map(|op| op.axis().as_ref().node_index() + 1)
-        .max()
-        .unwrap_or(0);
+    let nodes = referenced_nodes(circuit);
     let operations = circuit
         .operations()
         .len()
@@ -223,28 +254,13 @@ pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix
         operations,
         limits,
     )?;
-    let mut values = Vec::with_capacity(nodes);
-    // Deliberately interpret the DAG as matrices, independent of the production
-    // Pauli materializer and its multiplication/sign logic.
-    for node in &circuit.pauli_nodes()[..nodes] {
-        values.push(match *node {
-            PauliNode::Identity => Matrix::identity(dim),
-            PauliNode::Single { qubit, pauli: p } => pauli(circuit.num_qubits(), qubit, p),
-            PauliNode::Product(a, b) => reference(&values, a).mul(&reference(&values, b)),
-        });
-    }
-    let identity = Matrix::identity(dim);
-    let mut result = identity.clone();
+    let values = pauli_matrices(circuit, nodes, dim);
+    let mut result = Matrix::identity(dim);
     for op in circuit.operations() {
         let PbcOp::Rotate { axis, angle } = op else {
             unreachable!("validated above")
         };
-        let omega = Scalar::omega(angle.eighths());
-        let a = Scalar::integer(1).add(&omega).half();
-        let b = Scalar::integer(1).add(&omega.neg()).half();
-        let rotation = identity
-            .scale(&a)
-            .add(&reference(&values, axis.as_ref()).scale(&b));
+        let rotation = rotation(&reference(&values, axis.as_ref()), angle.eighths());
         result = rotation.mul(&result);
     }
     for (i, gate) in circuit.output_cliffords().iter().enumerate() {

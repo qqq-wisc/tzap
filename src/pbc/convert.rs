@@ -18,8 +18,10 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
     }
 }
 
-/// Convert Clifford+T, CZ, CCX, CCZ, measurement, and reset to logical PBC.
-/// Arbitrary Rz must be decomposed by the caller first.
+/// Convert Clifford+T, CZ, CCX, CCZ, and terminal measurements to logical PBC.
+/// Resets and gates after measurements are rejected. Arbitrary Rz must be
+/// decomposed by the caller first. The suffix is always retained to preserve
+/// quantum outputs, including circuits with no or partial measurements.
 ///
 /// Time and space are O(G + Q): each gate creates at most four shared Pauli
 /// nodes, seven PBC operations, and one suffix gate. No axis is expanded, no
@@ -42,11 +44,21 @@ pub fn to_pbc(circuit: &Circuit) -> Result<PbcCircuit, PbcError> {
     let qubits = u32::try_from(circuit.num_qubits).map_err(|_| PbcError::TooManyQubits)?;
     // Validate before building output so invalid public Circuit data cannot
     // cause indexing panics or silently lose unsupported operations.
+    let mut measuring = false;
     for (index, gate) in circuit.gates.iter().enumerate() {
-        validate(circuit, gate).map_err(|cause| PbcError::InvalidInput {
-            index,
-            cause: Box::new(cause),
-        })?;
+        validate(circuit, gate)
+            .and_then(|()| {
+                if matches!(gate, Gate::measure { .. }) {
+                    measuring = true;
+                } else if measuring {
+                    return Err(PbcError::GateAfterMeasurement);
+                }
+                Ok(())
+            })
+            .map_err(|cause| PbcError::InvalidInput {
+                index,
+                cause: Box::new(cause),
+            })?;
     }
     let mut output = PbcCircuit::new(circuit.num_qubits, circuit.num_cbits);
     let mut frame = Vec::with_capacity(circuit.num_qubits);
@@ -66,6 +78,9 @@ pub fn to_pbc(circuit: &Circuit) -> Result<PbcCircuit, PbcError> {
 fn validate(circuit: &Circuit, gate: &Gate) -> Result<(), PbcError> {
     if matches!(gate, Gate::rz(..)) {
         return Err(PbcError::UnsupportedGate(GateKind::Rz));
+    }
+    if matches!(gate, Gate::reset(_)) {
+        return Err(PbcError::UnsupportedGate(GateKind::Reset));
     }
     let (n, qs) = qubit_operands(gate);
     for (i, &q) in qs[..n].iter().enumerate() {
@@ -199,13 +214,7 @@ impl Converter {
                     .measure(PauliAxis(self.frame[qubit as usize].z), Some(cbit))?;
                 return Ok(());
             }
-            Gate::reset(q) => {
-                let f = self.frame[q as usize];
-                let outcome = self.output.measure(PauliAxis(f.z), None)?;
-                self.output.conditional_pauli(PauliAxis(f.x), outcome)?;
-                return Ok(());
-            }
-            Gate::rz(..) => unreachable!("input validated before conversion"),
+            Gate::rz(..) | Gate::reset(_) => unreachable!("input validated before conversion"),
         }
         // Only Clifford arms reach here. Append once; do not simplify or scan.
         self.output.output_cliffords.push(gate.clone());

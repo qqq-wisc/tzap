@@ -4,7 +4,7 @@ use std::io::{self, Read};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tzap::circuit::{Circuit, GateSet};
+use tzap::circuit::{Circuit, Gate, GateSet};
 use tzap::optimize::{Metrics, Observer, Report, StageKind, optimize_with};
 #[cfg(test)]
 use tzap::super_opt::BASE_GATE_SET;
@@ -258,15 +258,55 @@ impl Observer for Terminal {
     }
 }
 
-/// Write a circuit to the output destination (if any), exiting on error.
-/// `-` writes it to stdout, so tzap can sit in the middle of a pipeline;
-/// every message tzap prints goes to stderr, which is what keeps that
-/// stdout stream clean enough to pipe into a parser.
-fn write_output(ui: &Ui, run: &Run, circuit: &Circuit) {
+/// Prepare the final representation before reporting success or writing a file.
+fn prepare_output(ui: &Ui, run: &Run, circuit: &Circuit) -> Option<String> {
+    // Conversion is terminal: optimization and requested decompositions have
+    // already finished. Validate even when no output destination was requested.
+    if run.to_pbc {
+        use tzap::pbc::{OutputSemantics, TextOptions, to_pbc};
+        let pbc = to_pbc(circuit).unwrap_or_else(|e| {
+            let hint = if circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
+                " Rz gates require --decompose-rz (or DecomposeRz in --passes)."
+            } else {
+                ""
+            };
+            ui.abort(&format!("Error converting to PBC: {e}.{hint}"))
+        });
+        let mut measured = vec![false; circuit.num_qubits];
+        for gate in &circuit.gates {
+            if let Gate::measure { qubit, .. } = gate {
+                measured[*qubit as usize] = true;
+            }
+        }
+        let classical_only = !measured.is_empty() && measured.iter().all(|&m| m);
+        let options = TextOptions {
+            output_semantics: if classical_only {
+                OutputSemantics::Classical
+            } else {
+                OutputSemantics::Quantum
+            },
+            ..TextOptions::default()
+        };
+        ui.info(if classical_only {
+            "  Converting to PBC (classical outputs only)"
+        } else {
+            "  Converting to PBC (retaining quantum outputs)"
+        });
+        Some(
+            pbc.to_text_with(options)
+                .unwrap_or_else(|e| ui.abort(&format!("Error exporting PBC: {e}"))),
+        )
+    } else {
+        run.output_path.as_ref().map(|_| circuit.to_qasm())
+    }
+}
+
+/// Write to the requested file or stdout; diagnostics remain on stderr.
+fn write_output(ui: &Ui, run: &Run, output: Option<String>) {
     let Some(path) = &run.output_path else {
         return;
     };
-    let output = circuit.to_qasm();
+    let output = output.expect("requested output was prepared");
     if run.writes_stdout() {
         ui.write_stdout(&output);
         return;
@@ -390,6 +430,7 @@ fn clear_cache(ui: &Ui, json: bool) {
 /// Print the result banner against the original input baseline and write the
 /// output file (if requested).
 fn finish(ui: &Ui, report: &Report, result: &Circuit, run: &Run, start: Instant) {
+    let output = prepare_output(ui, run, result);
     ui.print_result(
         report.baseline.gates,
         report.output.gates,
@@ -404,7 +445,7 @@ fn finish(ui: &Ui, report: &Report, result: &Circuit, run: &Run, start: Instant)
         start.elapsed().as_secs_f64(),
     );
 
-    write_output(ui, run, result);
+    write_output(ui, run, output);
 }
 
 fn main() {

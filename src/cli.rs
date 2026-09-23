@@ -78,6 +78,7 @@ pub(crate) struct Run {
     /// Where to write the optimized circuit: a path, [`STREAM_PATH`] for
     /// stdout, or `None` to discard it.
     pub(crate) output_path: Option<String>,
+    pub(crate) to_pbc: bool,
     /// `--parallel`/`--no-parallel` as asked for, or `None` to decide from
     /// the circuit's size (see [`Run::resolve_parallel`]). Distinct from
     /// `options.parallel`, which is the answer rather than the request.
@@ -192,6 +193,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     let args = split_flag_values(args);
     let mut input_path: Option<String> = None;
     let mut output_path: Option<String> = None;
+    let mut to_pbc = false;
     let mut decompose_rz = false;
     let mut decompose_cz = false;
     let mut decompose_ccx = false;
@@ -220,6 +222,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
             "--help" | "-h" => help = true,
             "--version" | "-v" | "-V" => version = true,
             "--decompose-rz" => decompose_rz = true,
+            "--to-pbc" => to_pbc = true,
             "--decompose-cz" => decompose_cz = true,
             "--decompose-ccx" => decompose_ccx = true,
             "--superopt-gates" => {
@@ -428,6 +431,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
         action: Action::Optimize(Run {
             input_path,
             output_path,
+            to_pbc,
             parallel,
             // An absent `-O` flag means O3 too; the distinction only ever
             // mattered for the validation above, which has already run.
@@ -477,14 +481,14 @@ fn print_help(ui: &Ui) {
     ));
     out.push('\n');
     out.push_str(&format!("  {heading}USAGE{reset}\n"));
-    out.push_str("    tzap <input.qasm> [output.qasm] [options]\n");
+    out.push_str("    tzap <input.qasm> [output] [options]\n");
     out.push('\n');
     out.push_str(&format!("  {heading}ARGS{reset}\n"));
     out.push_str(&format!(
         "    {bold}<input.qasm>{reset}     Input OpenQASM 2.0 file, or - for stdin\n"
     ));
     out.push_str(&format!(
-        "    {bold}[output.qasm]{reset}    Output file, or - for stdout (no output if omitted)\n"
+        "    {bold}[output]{reset}         Output file, or - for stdout (no output if omitted)\n"
     ));
     out.push('\n');
     out.push_str(&format!("  {heading}OPTIONS{reset}\n"));
@@ -494,6 +498,12 @@ fn print_help(ui: &Ui) {
     out.push_str(&format!(
         "    {bold}--decompose-ccx{reset}  Decompose CCX and CCZ gates into Clifford+T\n"
     ));
+    out.push_str(&format!(
+        "    {bold}--to-pbc{reset}         Convert final circuit to PBC (-o output.pbc)\n"
+    ));
+    out.push_str(
+        "                     Full readout keeps classical results only; otherwise preserves quantum outputs.\n",
+    );
     out.push_str(&format!(
         "    {bold}--decompose-cz{reset}   Decompose CZ gates into H+CX+H\n"
     ));

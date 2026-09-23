@@ -4,6 +4,119 @@ use crate::semantics::test_support::assert_equivalent;
 
 mod fuzz;
 
+#[test]
+fn litinski_four_wire_rotation_commutation_example() {
+    use Pauli::{I, X, Y, Z};
+
+    // Figure wires q1..q4 map to 0..3. Linked Z--X means CX,
+    // with Z the control. X rotations are H S^{+/-1} H.
+    let rx = |q, inverse| {
+        [
+            Gate::h(q),
+            if inverse { Gate::sdg(q) } else { Gate::s(q) },
+            Gate::h(q),
+        ]
+    };
+    let mut gates = vec![
+        Gate::t(0),
+        Gate::cnot {
+            control: 2,
+            target: 1,
+        },
+    ];
+    gates.extend(rx(3, true));
+    gates.push(Gate::cnot {
+        control: 1,
+        target: 0,
+    });
+    gates.extend(rx(2, false));
+    gates.extend([
+        Gate::t(3),
+        Gate::cnot {
+            control: 3,
+            target: 0,
+        },
+        Gate::t(0),
+        Gate::s(1),
+        Gate::t(2),
+        Gate::s(3),
+    ]);
+    for q in 0..4 {
+        gates.extend(rx(q, q == 0));
+    }
+    let original = input(4, gates);
+    let converted = check(&original);
+    let expected = [
+        ([Z, I, I, I], 1),
+        ([I, I, I, Y], -1),
+        ([Z, Z, Z, Y], -1),
+        ([I, X, Y, I], 1),
+    ];
+    for (op, (factors, eighths)) in converted.operations().iter().zip(expected) {
+        let PbcOp::Rotate { axis, angle } = op else {
+            panic!("expected rotation")
+        };
+        let expanded = converted.expand(axis.as_ref(), 10_000).unwrap();
+        assert_eq!(expanded.factors, factors);
+        let normalized = match expanded.phase {
+            Phase::One => *angle,
+            Phase::MinusOne => angle.inverse(),
+            _ => panic!("non-Hermitian axis"),
+        };
+        assert_eq!(normalized, PauliAngle::new(eighths));
+    }
+    assert_eq!(converted.operations().len(), 4);
+
+    // Independently construct the figure's right side, including its different
+    // order of commuting rotations and the original Clifford skeleton.
+    let mut pictured = PbcCircuit::new(4, 0);
+    for index in [0, 3, 1, 2] {
+        let (factors, eighths) = expected[index];
+        let mut product = pictured.identity().as_ref();
+        for (q, factor) in factors.into_iter().enumerate() {
+            let single = pictured.single(q as u32, factor).unwrap();
+            product = pictured.product(product, single.as_ref()).unwrap();
+        }
+        let axis = pictured.hermitian_axis(product, 10_000).unwrap();
+        pictured.rotate(axis, PauliAngle::new(eighths)).unwrap();
+    }
+    let skeleton: Vec<_> = original
+        .gates
+        .iter()
+        .filter(|g| !matches!(g, Gate::t(_) | Gate::tdg(_)))
+        .cloned()
+        .collect();
+    assert_eq!(converted.output_cliffords(), skeleton);
+    for gate in skeleton {
+        pictured.push_output_clifford(gate).unwrap();
+    }
+    // Exact operator equality (up to global phase) before the common final
+    // measurements establishes equality after those measurements as well.
+    assert_equivalent(&original, &pictured);
+
+    let mut measured = original;
+    measured.num_cbits = 4;
+    for q in 0..4 {
+        measured.gates.push(Gate::measure { qubit: q, cbit: q });
+    }
+    let output = to_pbc(&measured).unwrap();
+    assert_eq!(output.operations().len(), 8);
+    assert_eq!(output.output_cliffords(), converted.output_cliffords());
+    // Check terminal measurement signs and retained quantum outputs via exact
+    // channels, one readout at a time to bound dense Choi storage.
+    use crate::semantics::channel::{ChannelLimits, circuit_channel, pbc_channel};
+    for q in 0..4 {
+        let mut partial = input(4, measured.gates[..measured.gates.len() - 4].to_vec());
+        partial.num_cbits = 1;
+        partial.gates.push(Gate::measure { qubit: q, cbit: 0 });
+        let actual = to_pbc(&partial).unwrap();
+        let limits = ChannelLimits::default();
+        let expected = circuit_channel(&partial, &[false], limits).unwrap();
+        let actual = pbc_channel(&actual, &[false], limits).unwrap();
+        assert_eq!(expected.compare(&actual), Ok(()));
+    }
+}
+
 fn input(n: usize, gates: Vec<Gate>) -> Circuit {
     Circuit {
         num_qubits: n,
@@ -293,7 +406,7 @@ fn emitted_axes_are_snapshots_not_mutable_frame_entries() {
 }
 
 #[test]
-fn measurements_and_resets_keep_frame_and_immutable_outcomes() {
+fn terminal_measurements_preserve_suffix_and_immutable_outcomes() {
     let c = Circuit {
         num_qubits: 2,
         num_cbits: 1,
@@ -304,61 +417,55 @@ fn measurements_and_resets_keep_frame_and_immutable_outcomes() {
                 target: 1,
             },
             Gate::measure { qubit: 1, cbit: 0 },
-            Gate::reset(1),
-            Gate::x(0),
             Gate::measure { qubit: 1, cbit: 0 },
-            Gate::t(1),
         ],
     };
     let output = to_pbc(&c).unwrap();
-    assert_eq!(output.num_cbits(), 1);
-    assert_eq!(output.measurement_count(), 3);
-    assert_eq!(output.operations().len(), 5);
-    let ops = output.operations();
-    let PbcOp::Measure {
-        outcome: first,
-        target: Some(0),
-        ..
-    } = ops[0]
-    else {
-        panic!("measurement")
-    };
-    let PbcOp::Measure {
-        outcome: hidden,
-        target: None,
-        ..
-    } = ops[1]
-    else {
-        panic!("reset measurement")
-    };
-    let PbcOp::ConditionalRotate { if_one, angle, .. } = ops[2] else {
-        panic!("reset correction")
-    };
-    let PbcOp::Measure {
-        outcome: last,
-        target: Some(0),
-        ..
-    } = ops[3]
-    else {
-        panic!("overwrite")
-    };
-    assert_eq!((first.index(), hidden.index(), last.index()), (0, 1, 2));
-    assert_eq!(if_one, hidden);
-    assert_eq!(angle, PauliAngle::new(4));
-    for i in [0, 1, 3, 4] {
+    assert_eq!(output.measurement_count(), 2);
+    assert_eq!(output.operations().len(), 2);
+    assert_eq!(output.output_cliffords(), &c.gates[..2]);
+    for (index, op) in output.operations().iter().enumerate() {
+        let PbcOp::Measure {
+            outcome,
+            target: Some(0),
+            ..
+        } = op
+        else {
+            panic!("measurement");
+        };
+        assert_eq!(outcome.index(), index);
         assert_eq!(
-            output.expand(ops[i].axis().as_ref(), 100).unwrap(),
+            output.expand(op.axis().as_ref(), 100).unwrap(),
             ExpandedPauli {
                 phase: Phase::One,
                 factors: vec![Pauli::X, Pauli::Z]
             }
         );
     }
-    assert_eq!(
-        output.expand(ops[2].axis().as_ref(), 100).unwrap().factors,
-        vec![Pauli::I, Pauli::X]
-    );
     assert_linear_size(&c, &output);
+}
+
+#[test]
+fn reject_resets_and_any_gate_after_measurement() {
+    let mut c = input(1, vec![Gate::h(0), Gate::reset(0)]);
+    assert_eq!(
+        to_pbc(&c).unwrap_err(),
+        PbcError::InvalidInput {
+            index: 1,
+            cause: Box::new(PbcError::UnsupportedGate(GateKind::Reset))
+        }
+    );
+    c.num_cbits = 1;
+    for gate in [Gate::h(0), Gate::x(0), Gate::t(0), Gate::sdg(0)] {
+        c.gates = vec![Gate::measure { qubit: 0, cbit: 0 }, gate];
+        assert_eq!(
+            to_pbc(&c).unwrap_err(),
+            PbcError::InvalidInput {
+                index: 1,
+                cause: Box::new(PbcError::GateAfterMeasurement)
+            }
+        );
+    }
 }
 
 #[test]
@@ -370,7 +477,7 @@ fn invalid_inputs_report_instruction_index() {
             Gate::measure { qubit: 0, cbit: 0 },
             PbcError::ClassicalBitOutOfRange(0),
         ),
-        (Gate::reset(2), PbcError::QubitOutOfRange(2)),
+        (Gate::reset(2), PbcError::UnsupportedGate(GateKind::Reset)),
         (
             Gate::cnot {
                 control: 0,

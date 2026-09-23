@@ -110,6 +110,40 @@ CCX, CCZ, CZ, and Rz stay native by default. To decompose them, use:
 - `--decompose-cz` to decompose CZ into CX+H
 - `--decompose-rz` to decompose Rz via gridsynth
 
+**PBC output**
+
+See the [PBC exchange format](docs/pbc.md) for syntax and measurement examples.
+
+```bash
+tzap input.qasm --to-pbc -o output.pbc
+```
+
+Conversion runs last, after optimization and requested decompositions. Inputs
+must have no resets and only terminal measurements; use `--decompose-rz` for Rz.
+When every qubit is measured, export preserves classical results and omits the
+remaining Cliffords. Otherwise it lowers them to Pauli rotations, preserving
+quantum outputs, including after partial readout.
+
+```text
+qubits 2
+registers 1
+r 1 1 X0 Z1
+m -1 Z1 -> c0
+r 2 1 Z0
+r 2 1 X0
+r 2 1 Z0
+```
+
+`r <k> <sign> <factors>` rotates by `k*pi/8` using `exp(-i*k*pi/8*P)`.
+`m <sign> <factors> -> cN` measures the signed Pauli product: +1 gives bit 0,
+-1 gives bit 1. Signs are `1` or `-1`; omitted factors are identity (an empty
+list is the identity). Register writes may overwrite earlier values. Only `r` and
+`m` instructions appear; rotations restoring quantum outputs may follow measurements.
+`-o -` writes PBC to stdout. JSON metrics describe the optimized gate circuit
+before conversion.
+Export materializes Pauli strings and is bounded to 16 million expansion cells;
+unlike compressed conversion, expanded output is not guaranteed linear in size.
+
 ## Circuit support
 
 tzap supports a subset of OpenQASM 2.0:

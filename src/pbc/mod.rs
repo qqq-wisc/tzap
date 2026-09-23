@@ -21,10 +21,12 @@
 mod ascii;
 mod convert;
 mod pauli;
+mod text;
 
 pub use ascii::AsciiOptions;
 pub use convert::{ToPbc, to_pbc};
 pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
+pub use text::{OutputSemantics, TextOptions};
 
 use crate::circuit::{CBit, Gate, GateKind, Qubit, qubit_operands};
 use pauli::PauliArena;
@@ -84,7 +86,7 @@ pub enum PbcOp {
         angle: PauliAngle,
     },
     /// +1 eigenvalue yields bit 0; -1 yields bit 1. None keeps the outcome
-    /// internal, as required by reset lowering.
+    /// internal, without writing a user classical bit.
     Measure {
         axis: PauliAxis,
         outcome: MeasId,
@@ -117,6 +119,7 @@ pub enum PbcError {
         cause: Box<PbcError>,
     },
     UnsupportedGate(GateKind),
+    GateAfterMeasurement,
     TooManyQubits,
     QubitOutOfRange(Qubit),
     ClassicalBitOutOfRange(CBit),
@@ -127,6 +130,9 @@ pub enum PbcError {
     RepeatedOperand,
     ExpansionLimit,
     DrawingLimit,
+    UnsupportedTextOperation {
+        index: usize,
+    },
 }
 
 impl fmt::Display for PbcError {
@@ -134,6 +140,9 @@ impl fmt::Display for PbcError {
         match self {
             Self::InvalidInput { index, cause } => write!(f, "input gate {index}: {cause}"),
             Self::UnsupportedGate(gate) => write!(f, "unsupported PBC input gate: {gate:?}"),
+            Self::GateAfterMeasurement => {
+                f.write_str("measurements must form the final input block")
+            }
             Self::TooManyQubits => f.write_str("PBC qubit count exceeds the supported u32 range"),
             Self::QubitOutOfRange(q) => write!(f, "PBC qubit {q} is out of range"),
             Self::ClassicalBitOutOfRange(c) => write!(f, "PBC classical bit {c} is out of range"),
@@ -146,6 +155,10 @@ impl fmt::Display for PbcError {
             Self::RepeatedOperand => f.write_str("gate operands must be distinct"),
             Self::ExpansionLimit => f.write_str("Pauli expansion exceeds the cell budget"),
             Self::DrawingLimit => f.write_str("circuit exceeds the ASCII drawing limits"),
+            Self::UnsupportedTextOperation { index } => write!(
+                f,
+                "PBC operation {index} cannot be exported: expected rotations or measurements into classical registers"
+            ),
         }
     }
 }
