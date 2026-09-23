@@ -37,6 +37,27 @@ OPTIMIZER_CONFIGS = (
     pytest.param({"level": "O3", "fixpoint": True}, id="O3-fixpoint"),
     pytest.param({"level": "O3", "parallel": True}, id="O3-parallel"),
     pytest.param({"level": "O1", "decompose_cz": True}, id="O1-decompose-cz"),
+    pytest.param({"level": "O1", "decompose_ccx": True}, id="O1-decompose-ccx"),
+    pytest.param(
+        {
+            "level": "O2",
+            "superopt_gates": "base",
+            "superopt_qubits": 3,
+            "superopt_window_gates": 4,
+            "superopt_murm_entries": 500,
+        },
+        id="O2-superopt-base",
+    ),
+    pytest.param(
+        {
+            "level": "O2",
+            "superopt_gates": "h,t,tdg,cx,cz,ccx,ccz",
+            "superopt_qubits": 3,
+            "superopt_window_gates": 4,
+            "superopt_murm_entries": 500,
+        },
+        id="O2-superopt-explicit-native",
+    ),
 )
 
 
@@ -53,8 +74,8 @@ OPTIMIZER_CONFIGS = (
 def test_randomized_python_adapter_equivalence(adapter, seed, options):
     """Exercise every pipeline through both third-party circuit adapters.
 
-    Eight deterministic programs, seven optimizer configurations, and two
-    adapters produce 112 independent QCEC proofs per Python version.
+    Eight deterministic programs, ten optimizer configurations, and two
+    adapters produce 160 independent QCEC proofs per Python version.
     """
 
     num_qubits, program = _random_program(seed)

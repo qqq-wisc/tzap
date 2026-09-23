@@ -25,7 +25,7 @@ class Metrics:
 
 @dataclass(frozen=True)
 class OptimizationReport:
-    """Metrics before, after eager decomposition, and after optimization."""
+    """Input/baseline metrics and metrics after the staged optimization."""
 
     input: Metrics
     baseline: Metrics
@@ -52,17 +52,23 @@ def optimize_qasm(
     fixpoint: bool = False,
     decompose_rz: bool = False,
     decompose_cz: bool = False,
+    decompose_ccx: bool = False,
     rz_epsilon: float = 1e-10,
     parallel: bool = False,
     superopt_qubits: int | None = None,
     superopt_window_gates: int | None = None,
-    superopt_table_entries: int | None = None,
+    superopt_murm_entries: int | None = None,
+    superopt_gates: str = "auto",
 ) -> OptimizationResult:
     """Optimize an OpenQASM 2 program with tzap.
 
     ``level`` accepts ``"O1"``, ``"O2"``, ``"O3"`` (the default), or
     ``"Osuper"``. Supplying ``passes`` replaces the level's default pipeline.
     Pass names are the same as the CLI's ``--passes`` names.
+
+    Native ``ccx``, ``ccz``, ``cz``, and ``rz`` gates are preserved unless
+    their matching ``decompose_*`` option is enabled. ``superopt_gates`` is
+    ``"auto"``, ``"base"``, or an explicit comma-separated synthesis basis.
 
     The CPU-heavy optimizer releases Python's GIL while it runs.
     """
@@ -76,11 +82,13 @@ def optimize_qasm(
         fixpoint=fixpoint,
         decompose_rz=decompose_rz,
         decompose_cz=decompose_cz,
+        decompose_ccx=decompose_ccx,
         rz_epsilon=rz_epsilon,
         parallel=parallel,
         superopt_qubits=superopt_qubits,
         superopt_window_gates=superopt_window_gates,
-        superopt_table_entries=superopt_table_entries,
+        superopt_murm_entries=superopt_murm_entries,
+        superopt_gates=superopt_gates,
     )
     report = OptimizationReport(
         input=_metrics(raw_report[0]),

@@ -11,7 +11,7 @@ from ._native import __version__
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="tzap", description="fast Clifford+T circuit optimizer"
+        prog="tzap", description="fast Clifford+T/Rz circuit optimizer"
     )
     parser.add_argument("input", help="input OpenQASM 2.0 file")
     parser.add_argument("output_positional", nargs="?", help=argparse.SUPPRESS)
@@ -26,6 +26,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixpoint", action="store_true")
     parser.add_argument("--decompose-rz", action="store_true")
     parser.add_argument("--decompose-cz", action="store_true")
+    parser.add_argument("--decompose-ccx", action="store_true")
+    parser.add_argument("--superopt-gates", default="auto")
     parser.add_argument("--epsilon", type=float, default=1e-10)
     parser.add_argument("--parallel", action="store_true")
     parser.add_argument(
@@ -50,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
             fixpoint=args.fixpoint,
             decompose_rz=args.decompose_rz,
             decompose_cz=args.decompose_cz,
+            decompose_ccx=args.decompose_ccx,
+            superopt_gates=args.superopt_gates,
             rz_epsilon=args.epsilon,
             parallel=args.parallel,
         )

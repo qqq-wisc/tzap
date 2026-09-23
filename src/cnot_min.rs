@@ -1370,7 +1370,7 @@ mod tests {
             target: 1,
         });
         let out = cnot_min(&c);
-        assert!(out.has_measurement);
+        assert!(out.has_measurement());
         assert_eq!(out.num_cbits, 1);
         assert!(matches!(out.gates[1], Gate::measure { qubit: 0, cbit: 0 }));
         assert!(matches!(out.gates[2], Gate::reset(1)));

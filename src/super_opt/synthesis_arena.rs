@@ -1,17 +1,19 @@
-//! Prefix-sharing storage for the synthesis table's circuits.
+//! Prefix-sharing storage for the MURM's circuits.
 //!
 //! Breadth-first enumeration only ever extends an existing circuit by one
 //! gate, so the hundreds of thousands of stored circuits form a tree: each
 //! node records just its final gate and its parent. A full circuit is
-//! recovered by walking to the root and reversing — done only on a table
+//! recovered by walking to the root and reversing — done only on a MURM
 //! hit, never during enumeration.
 
 use std::io::{self, Read, Write};
 
 use rustc_hash::FxHashMap;
 
+use crate::circuit::GateSet;
+
 use super::matrix::UnitaryFingerprint;
-use super::table::LibraryGate;
+use super::murm::LibraryGate;
 
 /// Sentinel gate tag marking the root node (no gate, no parent) in the
 /// on-disk format; distinct from every real `LibraryGate::to_bytes` tag.
@@ -25,7 +27,7 @@ pub(super) struct CircuitNode {
     pub(super) gate: Option<LibraryGate>,
 }
 
-/// One synthesis-table width stored as a prefix-sharing circuit arena.
+/// One MURM width stored as a prefix-sharing circuit arena.
 #[derive(Clone, Debug, Default)]
 pub(super) struct WidthTable {
     fingerprints: FxHashMap<UnitaryFingerprint, usize>,
@@ -96,7 +98,7 @@ impl WidthTable {
     }
 
     /// Persist this width's table verbatim: each node's fingerprint (8
-    /// bytes), parent index (`u32`, `u32::MAX` for none), and gate (3-byte
+    /// bytes), parent index (`u32`, `u32::MAX` for none), and gate (4-byte
     /// encoding). Node order is preserved so parent indices stay valid on
     /// read; the fingerprint map is rebuilt from the same pairs on load,
     /// so no BFS re-derivation is needed.
@@ -112,16 +114,34 @@ impl WidthTable {
             out.write_all(&fingerprint.to_bits().to_le_bytes())?;
             let parent = node.parent.map_or(u32::MAX, |p| p as u32);
             out.write_all(&parent.to_le_bytes())?;
-            let gate_bytes = node.gate.map_or([NO_GATE_TAG, 0, 0], LibraryGate::to_bytes);
+            let gate_bytes = node
+                .gate
+                .map_or([NO_GATE_TAG, 0, 0, 0], LibraryGate::to_bytes);
             out.write_all(&gate_bytes)?;
         }
         Ok(())
     }
 
-    pub(super) fn read_from(input: &mut impl Read) -> io::Result<Self> {
+    pub(super) fn read_from(
+        input: &mut impl Read,
+        num_qubits: usize,
+        max_nodes: usize,
+        basis: GateSet,
+        identity_fingerprint: Option<UnitaryFingerprint>,
+    ) -> io::Result<Self> {
+        let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_owned());
         let mut len_buf = [0u8; 8];
         input.read_exact(&mut len_buf)?;
-        let len = u64::from_le_bytes(len_buf) as usize;
+        let len = usize::try_from(u64::from_le_bytes(len_buf))
+            .map_err(|_| invalid("MURM width table length does not fit usize"))?;
+        if len > max_nodes {
+            return Err(invalid(
+                "MURM width table exceeds its configured or file-size bound",
+            ));
+        }
+        if (num_qubits == 0 && len != 0) || (num_qubits > 0 && len == 0) {
+            return Err(invalid("MURM width table has an invalid root count"));
+        }
 
         let mut nodes = Vec::with_capacity(len);
         let mut fingerprints = FxHashMap::with_capacity_and_hasher(len, Default::default());
@@ -135,18 +155,45 @@ impl WidthTable {
             let parent_raw = u32::from_le_bytes(parent_buf);
             let parent = (parent_raw != u32::MAX).then_some(parent_raw as usize);
 
-            let mut gate_buf = [0u8; 3];
+            let mut gate_buf = [0u8; 4];
             input.read_exact(&mut gate_buf)?;
-            let gate = if gate_buf[0] == NO_GATE_TAG {
+            let gate = if gate_buf == [NO_GATE_TAG, 0, 0, 0] {
                 None
+            } else if gate_buf[0] == NO_GATE_TAG {
+                return Err(invalid("invalid MURM root-gate encoding"));
             } else {
-                Some(LibraryGate::from_bytes(gate_buf).ok_or_else(|| {
+                let gate = LibraryGate::from_bytes(gate_buf).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "unknown library gate tag")
-                })?)
+                })?;
+                if gate.to_bytes() != gate_buf {
+                    return Err(invalid("non-canonical MURM library gate encoding"));
+                }
+                Some(gate)
             };
 
+            if index == 0 {
+                if parent.is_some() || gate.is_some() || Some(fingerprint) != identity_fingerprint {
+                    return Err(invalid("MURM width table has an invalid identity root"));
+                }
+            } else {
+                let Some(parent) = parent else {
+                    return Err(invalid("non-root MURM node has no parent"));
+                };
+                let Some(gate) = gate else {
+                    return Err(invalid("non-root MURM node has no gate"));
+                };
+                if parent >= index {
+                    return Err(invalid("MURM parent must precede its child"));
+                }
+                if !gate.is_valid_for(num_qubits, basis) {
+                    return Err(invalid("MURM gate is outside its width or synthesis basis"));
+                }
+            }
+
+            if fingerprints.insert(fingerprint, index).is_some() {
+                return Err(invalid("duplicate MURM fingerprint"));
+            }
             nodes.push(CircuitNode { parent, gate });
-            fingerprints.insert(fingerprint, index);
         }
         Ok(Self {
             fingerprints,

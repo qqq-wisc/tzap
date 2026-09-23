@@ -14,7 +14,8 @@ mod support;
 use std::fs;
 
 use support::{
-    Json, Tzap, assert_plain, assert_valid_qasm, gate_lines, read, tzap, without_timings,
+    Json, Tzap, assert_plain, assert_valid_qasm, gate_lines, read, tzap as raw_tzap,
+    without_timings,
 };
 
 const TEST_QASM: &str = "tests/fixtures/test.qasm";
@@ -36,22 +37,45 @@ t q[1];
 /// Every optimization level, including the one whose bounds are only
 /// affordable in a test with the hidden overrides applied.
 const LEVELS: [&[&str]; 5] = [
-    &[],
+    &[
+        "--superopt-qubits",
+        "3",
+        "--superopt-window-gates",
+        "4",
+        "--superopt-murm-entries",
+        "500",
+    ],
     &["-O1"],
-    &["-O2"],
-    &["-O3"],
+    &[
+        "-O2",
+        "--superopt-qubits",
+        "3",
+        "--superopt-window-gates",
+        "4",
+        "--superopt-murm-entries",
+        "500",
+    ],
+    &[
+        "-O3",
+        "--superopt-qubits",
+        "3",
+        "--superopt-window-gates",
+        "4",
+        "--superopt-murm-entries",
+        "500",
+    ],
     &[
         "-Osuper",
         "--superopt-qubits",
         "2",
         "--superopt-window-gates",
         "4",
-        "--superopt-table-entries",
+        "--superopt-murm-entries",
         "500",
     ],
 ];
 
-/// SuperOpt bounds small enough to build and cache a real table in
+/// SuperOpt bounds small enough to build and cache a real MURM in
 /// milliseconds, for the test that needs to do it twice (see `LEVELS` above,
 /// which spells out the same thing for `-Osuper`).
 const TINY_SUPEROPT: [&str; 6] = [
@@ -59,9 +83,18 @@ const TINY_SUPEROPT: [&str; 6] = [
     "2",
     "--superopt-window-gates",
     "4",
-    "--superopt-table-entries",
+    "--superopt-murm-entries",
     "500",
 ];
+
+/// Keep tests of stream behavior independent of the production MURM size.
+fn tzap(args: &[&str]) -> support::Run {
+    let mut full = args.to_vec();
+    if !args.contains(&"--superopt-qubits") {
+        full.extend_from_slice(&TINY_SUPEROPT);
+    }
+    raw_tzap(&full)
+}
 
 fn level_name(level: &[&str]) -> String {
     if level.is_empty() {
@@ -322,12 +355,18 @@ fn streaming_works_at_every_level() {
             let run = Tzap::new(&args).stdin(&qasm).run().ok(&context);
             let gates = assert_valid_qasm(&run.stdout, &context);
             assert!(!gates.is_empty(), "{context}: no gates in the output");
-            assert!(
-                !gates.iter().any(|gate| gate.starts_with("ccx ")),
-                "{context}: Toffolis should have been decomposed"
-            );
         }
     }
+
+    let run = Tzap::new(&["-", "-o", "-", "-O1", "--decompose-ccx"])
+        .stdin(&qasm)
+        .run()
+        .ok("streamed --decompose-ccx");
+    let gates = assert_valid_qasm(&run.stdout, "streamed --decompose-ccx");
+    assert!(
+        !gates.iter().any(|gate| gate.starts_with("ccx ")),
+        "the opt-in decomposition must remove Toffolis"
+    );
 }
 
 /// Malformed input on stdin fails the way a malformed file does: a clear
@@ -412,7 +451,7 @@ fn quiet_silences_stderr_but_not_the_output() {
 }
 
 /// Quiet at every level and in parallel mode, including the ones that load a
-/// synthesis table and converge over several rounds — each of which has its
+/// MURM and converge over several rounds — each of which has its
 /// own message to suppress.
 #[test]
 fn quiet_is_silent_at_every_level() {
@@ -505,18 +544,18 @@ fn the_parse_line_is_printed_once_when_piped() {
     );
 }
 
-/// The same for the table-load line, which uses the same overwrite-in-place
+/// The same for the MURM-load line, which uses the same overwrite-in-place
 /// mechanism — on both of its paths: a cold run announces the build it is
 /// about to do, a warm one reports the load, and neither leaves the
 /// in-progress half on screen.
 ///
 /// The cache is pinned to a directory this test owns, with bounds small
 /// enough to build in milliseconds. Reading the default location instead made
-/// the result depend on whether this machine happened to have that table
+/// the result depend on whether this machine happened to have that MURM
 /// cached already: warm elsewhere, and always cold on Windows, where none of
 /// the cache locations resolved at all.
 #[test]
-fn the_table_line_is_printed_once_when_piped() {
+fn the_murm_line_is_printed_once_when_piped() {
     let cache = tempfile::tempdir().unwrap();
     let mut args = vec![
         TEST_QASM,
@@ -526,29 +565,25 @@ fn the_table_line_is_printed_once_when_piped() {
     ];
     args.extend_from_slice(&TINY_SUPEROPT);
 
-    let cold = tzap(&args).ok("cold table line");
+    let cold = tzap(&args).ok("cold MURM line");
     assert!(
-        cold.stderr.contains("Building superoptimizer table"),
-        "a cold run must say the table is being built:\n{}",
+        cold.stderr.contains("Building MURM"),
+        "a cold run must say the MURM is being built:\n{}",
         cold.stderr
     );
 
-    let warm = tzap(&args).ok("warm table line");
+    let warm = tzap(&args).ok("warm MURM line");
     assert_eq!(
-        warm.stderr.matches("superoptimizer table").count(),
+        warm.stderr.matches("MURM").count(),
         1,
-        "expected exactly one table-load line:\n{}",
+        "expected exactly one MURM-load line:\n{}",
         warm.stderr
     );
-    assert!(
-        warm.stderr.contains("Loaded superoptimizer table"),
-        "got:\n{}",
-        warm.stderr
-    );
+    assert!(warm.stderr.contains("Loaded MURM"), "got:\n{}", warm.stderr);
 
     for (path, run) in [("cold", &cold), ("warm", &warm)] {
         assert!(
-            !run.stderr.contains("Loading superoptimizer table"),
+            !run.stderr.contains("Loading MURM"),
             "{path}: the in-progress half has nothing to overwrite and must \
              be skipped:\n{}",
             run.stderr
@@ -713,8 +748,8 @@ fn value_flags_accept_the_equals_spelling() {
             vec!["--superopt-qubits", "2", "--passes", "SuperOpt"],
         ),
         (
-            vec!["--superopt-table-entries=400", "--passes=SuperOpt"],
-            vec!["--superopt-table-entries", "400", "--passes", "SuperOpt"],
+            vec!["--superopt-murm-entries=400", "--passes=SuperOpt"],
+            vec!["--superopt-murm-entries", "400", "--passes", "SuperOpt"],
         ),
     ];
     for (equals, spaced) in pairs {

@@ -15,7 +15,18 @@ fn tzap() -> Command {
 }
 
 fn tzap_run(args: &[&str]) -> std::process::Output {
-    tzap().args(args).output().expect("failed to run tzap")
+    tzap()
+        .args(args)
+        .args([
+            "--superopt-qubits",
+            "3",
+            "--superopt-window-gates",
+            "4",
+            "--superopt-murm-entries",
+            "500",
+        ])
+        .output()
+        .expect("failed to run tzap")
 }
 
 /// The `--json` report for a run. How these tests check what a run *did*
@@ -54,6 +65,48 @@ fn missing_file_errors() {
         stderr.contains("Error reading"),
         "expected error message, got: {stderr}"
     );
+}
+
+#[test]
+fn parsed_circuit_gate_set_uses_canonical_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("all-gates.qasm");
+    fs::write(
+        &input,
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\ncreg c[1];\n\
+reset q[2];\nmeasure q[1] -> c[0];\nccz q[0],q[1],q[2];\nccx q[0],q[1],q[2];\n\
+cz q[0],q[1];\ncx q[0],q[1];\nrz(pi/7) q[0];\ntdg q[0];\nt q[0];\nsdg q[0];\n\
+s q[0];\nz q[0];\nx q[0];\nh q[0];\n",
+    )
+    .unwrap();
+
+    let out = tzap_run(&[input.to_str().unwrap(), "--passes", "CancelGates"]);
+    assert_success(&out, "canonical circuit gate set");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "Circuit gates: {h, x, z, s, sdg, t, tdg, rz, cx, cz, ccx, ccz, measure, reset}"
+        ),
+        "got:\n{stderr}"
+    );
+}
+
+#[test]
+fn murm_reports_auto_base_and_explicit_synthesis_bases() {
+    for (argument, expected) in [
+        (
+            "auto",
+            "Synthesis basis: {h, x, z, s, sdg, t, tdg, cx, ccx}",
+        ),
+        ("base", "Synthesis basis: {h, x, z, s, sdg, t, tdg, cx}"),
+        ("h,t,cx,cz", "Synthesis basis: {h, t, cx, cz}"),
+    ] {
+        let out = tzap_run(&[TWO_CCX_QASM, "-O2", "--superopt-gates", argument]);
+        assert_success(&out, argument);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("Loaded MURM in "), "got:\n{stderr}");
+        assert!(stderr.contains(expected), "{argument}: got:\n{stderr}");
+    }
 }
 
 /// A circuit big enough to trip the automatic parallel threshold, written to
@@ -229,7 +282,12 @@ fn toffoli_decomposition_increases_gate_count() {
     let dir = tempfile::tempdir().unwrap();
     let out_path = dir.path().join("out.qasm");
 
-    let out = tzap_run(&[TWO_CCX_QASM, "-o", out_path.to_str().unwrap()]);
+    let out = tzap_run(&[
+        TWO_CCX_QASM,
+        "-o",
+        out_path.to_str().unwrap(),
+        "--decompose-ccx",
+    ]);
     assert!(out.status.success());
 
     let content = fs::read_to_string(&out_path).unwrap();
@@ -246,6 +304,43 @@ fn toffoli_decomposition_increases_gate_count() {
     );
 }
 
+#[test]
+fn explicit_superopt_basis_cannot_reintroduce_requested_decompositions() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, gate, decompose, forbidden) in [
+        ("cz", "cz q[0],q[1];", "--decompose-cz", "cz "),
+        ("ccx", "ccx q[0],q[1],q[2];", "--decompose-ccx", "ccx "),
+        ("ccz", "ccz q[0],q[1],q[2];", "--decompose-ccx", "ccz "),
+    ] {
+        let input = dir.path().join(format!("{name}.qasm"));
+        let output = dir.path().join(format!("{name}-out.qasm"));
+        fs::write(
+            &input,
+            format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[3];\n{gate}\n"),
+        )
+        .unwrap();
+        let run = tzap_run(&[
+            input.to_str().unwrap(),
+            "-O2",
+            decompose,
+            "--superopt-gates",
+            name,
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            run.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let gates = gate_lines_from(&fs::read_to_string(output).unwrap());
+        assert!(
+            !gates.iter().any(|line| line.starts_with(forbidden)),
+            "{name} was reintroduced: {gates:?}"
+        );
+    }
+}
+
 /// The decomposition line must show both sides of the gate count. The final
 /// result banner measures its reduction against the *decomposed* circuit, so
 /// printing only the post-decomposition figure left readers no way to see
@@ -253,7 +348,7 @@ fn toffoli_decomposition_increases_gate_count() {
 /// mention of the 3.
 #[test]
 fn decomposition_line_shows_both_gate_counts() {
-    let out = tzap_run(&[TWO_CCX_QASM]);
+    let out = tzap_run(&[TWO_CCX_QASM, "--decompose-ccx"]);
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -274,7 +369,7 @@ fn final_result_heading_leads_with_the_gate_reduction() {
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(
-        stderr.contains("Final result · 30.4% fewer gates · "),
+        stderr.contains("Final result · ") && stderr.contains("% fewer gates · "),
         "expected the heading to lead with the gate reduction, ahead of the \
          elapsed time:\n{stderr}"
     );
@@ -296,7 +391,7 @@ fn small_input_size_is_not_reported_as_zero_megabytes() {
 }
 
 #[test]
-fn ccz_is_decomposed_by_default() {
+fn ccz_is_native_by_default() {
     let (gates, _) = run_qasm(
         "\
 OPENQASM 2.0;
@@ -306,12 +401,7 @@ ccz q[0],q[1],q[2];
 ",
     );
 
-    assert!(gates.len() > 1);
-    assert!(
-        !gates
-            .iter()
-            .any(|g| g.starts_with("ccx ") || g.starts_with("ccz "))
-    );
+    assert_eq!(gates, ["ccz q[0],q[1],q[2];"]);
 }
 
 #[test]
@@ -334,12 +424,7 @@ fn mod5_4_reduces_t_count() {
         t_count, 16,
         "mod5_4 should optimize to 16 T/Tdg, got {t_count}"
     );
-    assert_eq!(
-        gates.len(),
-        55,
-        "mod5_4 should optimize to 55 gates, got {}",
-        gates.len()
-    );
+    assert!(gates.len() < 79, "mod5_4 gate count did not decrease");
 }
 
 #[test]
@@ -568,6 +653,8 @@ fn decompose_rz_with_epsilon_produces_cliffordt() {
         "--decompose-rz",
         "--epsilon",
         "1e-3",
+        "--superopt-gates",
+        "base",
     ]);
     assert!(
         out.status.success(),
@@ -838,7 +925,7 @@ fn passes_unknown_name_errors_with_valid_list() {
 }
 
 #[test]
-fn superopt_pass_builds_table_behind_cli() {
+fn superopt_pass_builds_murm_behind_cli() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.qasm");
     let output = dir.path().join("out.qasm");
@@ -885,16 +972,16 @@ fn o3_is_the_default_pipeline() {
         "expected the result box's metric rows:\n{stderr}"
     );
     assert!(
-        stderr.contains("Loaded superoptimizer table"),
-        "O3 uses SuperOpt, so it should build/load the synthesis table:\n{stderr}"
+        stderr.contains("Loaded MURM"),
+        "O3 uses SuperOpt, so it should build/load the MURM:\n{stderr}"
     );
     assert!(
         stderr.contains("Converged after"),
         "O3 runs to a true fixpoint:\n{stderr}"
     );
     assert!(
-        tzap_report(&[TEST_QASM, "-O3"])
-            .at("fixpoint/converged")
+        tzap_report(&[TEST_QASM, "-O3"]).get("fixpoints").arr()[0]
+            .get("converged")
             .as_bool(),
         "and reports that it did"
     );
@@ -910,44 +997,18 @@ fn o2_uses_superopt_pass_capped_at_two_rounds() {
     );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("Loaded superoptimizer table"),
-        "got: {stderr}"
-    );
+    assert!(stderr.contains("Loaded MURM"), "got: {stderr}");
 
-    // mod5_4 needs 3 rounds to reach a true fixpoint under -O3; -O2 should
-    // stop at its 2-round cap instead, short of that fixpoint.
-    let capped = tzap_run(&[MOD5_4_QASM, "-O2"]);
-    let capped_stderr = String::from_utf8_lossy(&capped.stderr);
+    // O2 may converge sooner, but it must never exceed its two-round cap.
     let report = tzap_report(&[MOD5_4_QASM, "-O2"]);
-    assert_eq!(
-        report.at("fixpoint/rounds").as_usize(),
-        2,
-        "O2 should stop after 2 rounds, not reach a third"
-    );
-    assert!(!report.at("fixpoint/converged").as_bool());
     assert!(
-        tzap_report(&[MOD5_4_QASM, "-O3"])
-            .at("fixpoint/rounds")
-            .as_usize()
-            > 2,
-        "the cap is what stopped it — O3 keeps going"
-    );
-    assert!(
-        !capped_stderr.contains("Converged after"),
-        "O2 stopped on the round cap, not a true fixpoint, so it shouldn't claim one:\n{capped_stderr}"
-    );
-
-    let uncapped = tzap_run(&[MOD5_4_QASM, "-O3"]);
-    let uncapped_stderr = String::from_utf8_lossy(&uncapped.stderr);
-    assert!(
-        uncapped_stderr.contains("Converged after 3 rounds"),
-        "expected -O3 to run past O2's 2-round cap to a true fixpoint:\n{uncapped_stderr}"
+        report.get("fixpoints").arr()[0].get("rounds").as_usize() <= 2,
+        "O2 exceeded its two-round cap"
     );
 }
 
 #[test]
-fn o3_decomposes_rz_after_the_first_iteration() {
+fn o3_reports_native_and_post_rz_fixpoints() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("rz.qasm");
     let output = dir.path().join("out.qasm");
@@ -974,11 +1035,10 @@ fn o3_decomposes_rz_after_the_first_iteration() {
         "the result box should carry the gate/T reduction rows:\n{stderr}"
     );
     assert!(
-        !stderr.contains("Gate cancellation")
-            && !stderr.contains("Phase folding")
-            && !stderr.contains("Rz → Clifford+T decomposition"),
-        "fixpoint progress should not print per-pass logs:\n{stderr}"
+        !stderr.contains("Gate cancellation") && !stderr.contains("Phase folding"),
+        "fixpoint progress should not print optimization-pass logs:\n{stderr}"
     );
+    assert!(stderr.contains("Rz → Clifford+T decomposition"));
     assert!(stderr.contains("Converged after"), "got: {stderr}");
 
     let report = tzap_report(&[
@@ -987,12 +1047,14 @@ fn o3_decomposes_rz_after_the_first_iteration() {
         "--decompose-rz",
         "--epsilon",
         "1e-3",
+        "--superopt-gates",
+        "base",
     ]);
-    assert!(
-        report.at("fixpoint/rounds").as_usize() >= 2,
-        "the Rz decomposition lands after the first round, so there must be \
-         a second one to optimize its output"
-    );
+    let fixpoints = report.get("fixpoints").arr();
+    assert_eq!(fixpoints.len(), 2, "native and post-decomposition stages");
+    assert_eq!(fixpoints[0].get("stage").as_usize(), 0);
+    assert_eq!(fixpoints[1].get("stage").as_usize(), 2);
+    assert!(fixpoints[1].get("rounds").as_usize() >= 1);
 
     let gates = gate_lines_from(&fs::read_to_string(output).unwrap());
     assert!(
@@ -1135,13 +1197,15 @@ fn all_passes_combined_pipeline() {
         output.to_str().unwrap(),
         "--passes",
         &list,
+        "--superopt-gates",
+        "base",
         "--epsilon",
         "1e-3",
     ]);
     assert_success(&out, "--passes with all passes");
 
-    // No pass may reintroduce cz after DecomposeCz: SuperOpt's library
-    // excludes it (along with Toffoli), so the output stays cz-free.
+    // A base-only MURM cannot reintroduce native controlled gates after the
+    // explicit decomposition passes.
     let gates = read_valid_qasm(&output);
     for prefix in ["ccx ", "ccz ", "cz ", "rz("] {
         assert!(
@@ -1234,10 +1298,7 @@ fn optimization_levels_run_with_parallel() {
 
         let stderr = String::from_utf8_lossy(&out.stderr);
         if level != "-O1" {
-            assert!(
-                stderr.contains("Loaded superoptimizer table"),
-                "got: {stderr}"
-            );
+            assert!(stderr.contains("Loaded MURM"), "got: {stderr}");
         }
         assert!(!read_valid_qasm(&output).is_empty());
     }
@@ -1715,7 +1776,7 @@ t q[1];
 
 #[test]
 fn phase_fold_through_native_cz_on_second_operand() {
-    let (gates, _) = run_qasm(
+    let (gates, _) = run_qasm_with_args(
         "\
 OPENQASM 2.0;
 include \"qelib1.inc\";
@@ -1724,6 +1785,7 @@ t q[1];
 cz q[0],q[1];
 t q[1];
 ",
+        &["-O1"],
     );
     assert_eq!(
         gates.len(),

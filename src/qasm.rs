@@ -1152,7 +1152,7 @@ t q[0];
         assert_eq!(c.num_cbits, 1);
         assert_eq!(c.gates.len(), 1);
         assert!(matches!(&c.gates[0], Gate::measure { qubit: 0, cbit: 0 }));
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
     }
 
     #[test]
@@ -1231,7 +1231,7 @@ t q[0];
             cbit: 99,
         });
         assert_eq!(c.gates.len(), 1);
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
         // But serialize → parse will fail to round-trip because the indices reference
         // bits outside the declared `qreg q[1]` / `creg c[1]`.
         let qasm = serialize(&c);
@@ -1244,7 +1244,7 @@ t q[0];
         let mut c = Circuit::new(1);
         c.apply(Gate::reset(42));
         assert_eq!(c.gates.len(), 1);
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
         let qasm = serialize(&c);
         let err = parse(&qasm).unwrap_err();
         assert!(err.contains("out of range"));
@@ -1357,7 +1357,7 @@ t q[0];
         assert_eq!(c.num_qubits, 1);
         assert_eq!(c.gates.len(), 1);
         assert!(matches!(&c.gates[0], Gate::reset(0)));
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
     }
 
     #[test]
@@ -1393,7 +1393,7 @@ t q[0];
         assert!(matches!(&c2.gates[1], Gate::reset(1)));
         assert!(matches!(&c2.gates[2], Gate::measure { qubit: 0, cbit: 0 }));
         assert!(matches!(&c2.gates[3], Gate::measure { qubit: 1, cbit: 1 }));
-        assert!(c2.has_measurement);
+        assert!(c2.has_measurement());
     }
 
     #[test]
@@ -1561,7 +1561,7 @@ measure q[1] -> c[1];
             &parsed.gates[2],
             Gate::measure { qubit: 2, cbit: 2 }
         ));
-        assert!(parsed.has_measurement);
+        assert!(parsed.has_measurement());
     }
 
     #[test]
@@ -1633,7 +1633,7 @@ measure q[1] -> c[1];
         assert!(matches!(&parsed.gates[0], Gate::reset(0)));
         assert!(matches!(&parsed.gates[1], Gate::reset(1)));
         assert!(matches!(&parsed.gates[2], Gate::reset(2)));
-        assert!(parsed.has_measurement);
+        assert!(parsed.has_measurement());
     }
 
     #[test]
@@ -1749,8 +1749,8 @@ measure q[1] -> c[1];
                 target: 1
             }
         ));
-        assert!(!c.has_toffoli);
-        assert!(c.has_ccz);
+        assert!(!c.has_toffoli());
+        assert!(c.has_ccz());
 
         let serialized = serialize(&c);
         assert!(serialized.contains("ccz q[2],q[0],q[1];"));
@@ -1811,7 +1811,7 @@ measure q[1] -> c[1];
         let parsed = parse(qasm).unwrap();
 
         assert_eq!(parsed.gates.len(), 2);
-        assert!(parsed.has_ccz);
+        assert!(parsed.has_ccz());
         assert!(matches!(
             parsed.gates[1],
             Gate::ccz {

@@ -42,8 +42,10 @@ def test_module_help():
     completed = run_module("--help")
 
     assert completed.returncode == 0
-    assert "fast Clifford+T circuit optimizer" in completed.stdout
+    assert "fast Clifford+T/Rz circuit optimizer" in completed.stdout
     assert "--decompose-rz" in completed.stdout
+    assert "--decompose-ccx" in completed.stdout
+    assert "--superopt-gates" in completed.stdout
 
 
 def test_module_optimizes_to_output_flag(tmp_path):
@@ -157,6 +159,9 @@ def test_main_forwards_every_optimizer_flag(monkeypatch, tmp_path):
             "--fixpoint",
             "--decompose-rz",
             "--decompose-cz",
+            "--decompose-ccx",
+            "--superopt-gates",
+            "base",
             "--epsilon",
             "0.001",
             "--parallel",
@@ -172,6 +177,8 @@ def test_main_forwards_every_optimizer_flag(monkeypatch, tmp_path):
             "fixpoint": True,
             "decompose_rz": True,
             "decompose_cz": True,
+            "decompose_ccx": True,
+            "superopt_gates": "base",
             "rz_epsilon": 0.001,
             "parallel": True,
         },

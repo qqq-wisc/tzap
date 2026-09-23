@@ -4,7 +4,7 @@
 //! `omega = exp(i*pi/4)`, `omega^4 = -1`, and one denominator exponent is
 //! shared by the whole matrix. Numerators use four symmetric `i8` coefficients
 //! (`-127..=127`); arithmetic widens to `i16`, and an unrepresentable window or
-//! table child is conservatively skipped.
+//! MURM child is conservatively skipped.
 //!
 //! Hadamards add and subtract row pairs and increment `k`; phase gates multiply
 //! rows by powers of `omega`; controlled-X gates permute rows. Common factors of

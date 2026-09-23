@@ -10,7 +10,7 @@
 
 [**Installation**](#installation) · [**Using tzap**](#running-tzap) &nbsp;**|**&nbsp;  [Qiskit integration](https://github.com/qqq-wisc/tzap/blob/main/docs/qiskit.md) · [PennyLane integration](https://github.com/qqq-wisc/tzap/blob/main/docs/pennylane.md)
 
-A super fast, Rust-based optimizer for large Clifford+T circuits.
+A super fast, Rust-based optimizer for large Clifford+T/Rz circuits.
 - tzap is state-of-the-art in *speed*, *scalability*, and *gate-count reduction*.
 - tzap **minimizes T-count** with a new linear-time phase folding algorithm, based on [this paper](https://arxiv.org/abs/2605.13929).
 - tzap implements a new and fast **superoptimization** pass, based on [this paper](https://ia.cr/2026/2115).
@@ -70,19 +70,22 @@ For example, using a benchmark in this repo:
 
 ```console
 $ tzap benchmarks/feynman/hwb12.qasm -o optimized.qasm
-⚡️ tzap v0.6.0
-  Parsed benchmarks/feynman/hwb12.qasm (5.5 MB) in 0.080s
-	└─ 20 qubits · 514,412 gates
-  Loaded superoptimizer table in 0.021s
+⚡️ tzap v0.6.1
+  Parsed benchmarks/feynman/hwb12.qasm (5.5 MB) in 0.079s
+	├─ 20 qubits · 514,412 gates
+	└─ Circuit gates: {h, x, t, tdg, cx}
+  Optimizing input circuit
+  Loaded MURM in 0.039s
+	└─ Synthesis basis: {h, x, z, s, sdg, t, tdg, cx}
 
   Converged after 6 rounds
 
-  ┌─ Final result · 43.7% fewer gates · 1.595s ──────────────────────────┐
-  │ Gates    ━━━━━━━━━━━━━╸────────────────── ↓43.7% · 514,412 → 289,484 │
-  │ 2q gates ━━━━━╸────────────────────────── ↓18.7% · 191,803 → 155,914 │
-  │ T/Tdg    ━━━━━━━━━━━━━━━╸──────────────── ↓49.9% · 171,465 →  85,897 │
-  │ Depth    ━━━━━━━╸──────────────────────── ↓24.3% · 274,781 → 207,940 │
-  └──────────────────────────────────────────────────────────────────────┘
+  ┌─ Final result · 44.6% fewer gates · 1.379s ────────────────┐
+  │ Gates    ━━━━━━━━━╸──────────── ↓44.6% · 514,412 → 284,848 │
+  │ 2q gates ━━━━╸───────────────── ↓22.1% · 191,803 → 149,500 │
+  │ T/Tdg    ━━━━━━━━━━╸─────────── ↓49.9% · 171,465 →  85,889 │
+  │ Depth    ━━━━━━╸─────────────── ↓28.4% · 274,781 → 196,865 │
+  └────────────────────────────────────────────────────────────┘
   wrote optimized.qasm
 ```
 
@@ -99,25 +102,13 @@ $ tzap benchmarks/feynman/hwb12.qasm -o optimized.qasm
 tzap benchmarks/feynman/hwb12.qasm -O1 -o optimized.qasm
 ```
 
-**Decompose Rz into Clifford+T**
+**Optional decomposition**
 
-Use `--decompose-rz` when the target backend only accepts Clifford+T; tzap uses [gridsynth](https://crates.io/crates/rsgridsynth). `--epsilon` trades approximation accuracy for circuit size (default `1e-10`; larger is coarser).
+CCX, CCZ, CZ, and Rz stay native by default. To decompose them, use:
 
-```bash
-tzap input.qasm -o output.qasm --decompose-rz --epsilon 1e-6
-```
-
-Use `--decompose-cz` to decompose CZ gates into `H`+`CX`+`H` before the
-optimization pipeline.
-
-**Custom pipeline**
-
-`--passes` runs an explicit, ordered sequence of passes in place of the default pipeline.
-
-```bash
-tzap input.qasm -o output.qasm --passes CancelGates,PhaseFoldRand
-tzap input.qasm -o output.qasm --passes DecomposeCz,CancelGates,PhaseFoldRand
-```
+- `--decompose-ccx` to decompose CCX and CCZ
+- `--decompose-cz` to decompose CZ into CX+H
+- `--decompose-rz` to decompose Rz via gridsynth
 
 ## Circuit support
 
@@ -127,8 +118,6 @@ tzap supports a subset of OpenQASM 2.0:
 - **Declarations:** `qreg`, `creg`
 - **Not supported:** classical conditionals (`if`), custom gate definitions (`gate`), barriers, `include` files (besides `qelib1.inc`, which is ignored)
 - Unrecognized lines produce an error
-
-Toffoli (`ccx`) and doubly controlled-Z (`ccz`) are auto-decomposed into Clifford+T. Controlled-Z (`cz`) is kept native so phase folding and cancellation can operate through it; use `--decompose-cz` for `H`+`CX` output. `Rz` is left as-is unless you pass `--decompose-rz`.
 
 ## Correctness
 

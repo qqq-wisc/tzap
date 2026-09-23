@@ -2,9 +2,9 @@
 //!   * `DecomposeToffoli` — rewrites every `ccx` and `ccz` into Clifford+T.
 //!   * `DecomposeCz` — rewrites every `cz` into `H · CNOT · H`.
 //!   * `DecomposeRz` — synthesizes each `rz(θ)` into Clifford+T via
-//!     gridsynth (`rsgridsynth`), in parallel across the gate list.
+//!     gridsynth (`rsgridsynth`).
 
-use rayon::prelude::*;
+use std::sync::Mutex;
 
 use crate::circuit::{Circuit, Gate, Qubit};
 use crate::pass::Pass;
@@ -125,6 +125,10 @@ pub struct DecomposeRz {
     pub epsilon: f64,
 }
 
+// rsgridsynth stores working precision in process-global state. Serialize
+// configuration and synthesis so one call cannot change another's precision.
+static GRIDSYNTH_BATCH_LOCK: Mutex<()> = Mutex::new(());
+
 impl Default for DecomposeRz {
     fn default() -> Self {
         Self { epsilon: 1e-10 }
@@ -138,11 +142,14 @@ impl Pass for DecomposeRz {
 
     fn run(&self, circuit: &Circuit) -> Circuit {
         let epsilon = self.epsilon;
+        let _batch_guard = GRIDSYNTH_BATCH_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Synthesize all Rz gates in parallel.
+        // Keep gridsynth calls serial: the dependency has process-global state.
         let expanded: Vec<Vec<Gate>> = circuit
             .gates
-            .par_iter()
+            .iter()
             .map(|gate| {
                 match gate {
                     Gate::rz(theta, q) => {
@@ -223,8 +230,8 @@ mod tests {
                 .iter()
                 .any(|g| matches!(g, Gate::ccx { .. } | Gate::ccz { .. }))
         );
-        assert!(!dec.has_toffoli);
-        assert!(!dec.has_ccz);
+        assert!(!dec.has_toffoli());
+        assert!(!dec.has_ccz());
         assert!(circuits_equiv(&c, &dec, 1e-10));
     }
 
@@ -305,7 +312,7 @@ mod tests {
         let dec = DecomposeToffoli.run(&c);
 
         assert_eq!(dec.num_cbits, 1);
-        assert!(dec.has_measurement);
+        assert!(dec.has_measurement());
         assert!(matches!(dec.gates.first(), Some(Gate::reset(0))));
         assert!(matches!(
             dec.gates.last(),
@@ -543,7 +550,7 @@ mod tests {
         c.apply(Gate::measure { qubit: 1, cbit: 0 });
         let dec = DecomposeCz.run(&c);
         assert_eq!(dec.num_cbits, 1);
-        assert!(dec.has_measurement);
+        assert!(dec.has_measurement());
         assert!(matches!(dec.gates[0], Gate::reset(0)));
         assert!(matches!(
             dec.gates.last(),
@@ -620,6 +627,19 @@ mod tests {
     }
 
     #[test]
+    fn rz_multiple_angles_do_not_reuse_an_invalid_gridsynth_solution() {
+        // rsgridsynth 0.2.0 cached these by coefficients alone and could reuse
+        // a result with the wrong denominator exponent for the second angle.
+        let mut c = Circuit::new(1);
+        c.apply(Gate::rz(0.02, 0));
+        c.apply(Gate::rz(0.03, 0));
+
+        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
+        assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
+        assert!(circuits_equiv(&c, &dec, 2e-3));
+    }
+
+    #[test]
     fn rz_preserves_non_rz() {
         let mut c = Circuit::new(2);
         c.apply(Gate::h(0));
@@ -674,7 +694,7 @@ mod tests {
                 .any(|g| matches!(g, Gate::measure { qubit: 1, cbit: 0 }))
         );
         assert_eq!(dec.num_cbits, 1);
-        assert!(dec.has_measurement);
+        assert!(dec.has_measurement());
     }
 
     #[test]

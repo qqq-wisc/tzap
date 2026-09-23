@@ -5,7 +5,7 @@
 
 use std::process;
 
-use tzap::optimize::{DEFAULT_RZ_EPSILON, Level, Options, PassName, SuperOptBounds};
+use tzap::optimize::{DEFAULT_RZ_EPSILON, Level, Options, PassName, SuperOptBounds, SuperOptGates};
 
 use crate::ui::{Ui, Verbosity};
 
@@ -51,7 +51,7 @@ fn looks_like_pass_list_fragment(token: &str) -> bool {
 /// leaves behind, and take no input circuit.
 pub(crate) enum Action {
     Optimize(Run),
-    /// `--cache-info`: report where the on-disk synthesis tables live and
+    /// `--cache-info`: report where the on-disk MURMs live and
     /// what they cost.
     CacheInfo,
     /// `--clear-cache`: delete them.
@@ -66,9 +66,8 @@ pub(crate) enum Action {
 /// serial run takes tens of seconds, so the default follows the size.
 ///
 /// Measured against the circuit *as parsed*, which is the number tzap has
-/// just printed and the one a user would predict from the file. An eager
-/// ccx/ccz decomposition can push a smaller circuit past this on its way
-/// into the pipeline; that doesn't retroactively make the run parallel.
+/// just printed and the one a user would predict from the file. A later
+/// opt-in decomposition does not retroactively change this decision.
 pub(crate) const AUTO_PARALLEL_GATES: usize = 1_000_000;
 
 /// One optimization run: the file paths the CLI itself owns, plus the
@@ -154,13 +153,14 @@ fn parse_string_arg(args: &[String], i: usize, flag_name: &str, what: &str) -> S
 
 /// Every long flag that takes a separate value, and so may also be written
 /// `--flag=value` (see [`split_flag_values`]).
-const VALUE_FLAGS: [&str; 6] = [
+const VALUE_FLAGS: [&str; 7] = [
     "--epsilon",
     "--passes",
     "--cache-dir",
     "--superopt-qubits",
     "--superopt-window-gates",
-    "--superopt-table-entries",
+    "--superopt-murm-entries",
+    "--superopt-gates",
 ];
 
 /// Rewrite `--flag=value` into two arguments, so every value-taking long
@@ -194,6 +194,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     let mut output_path: Option<String> = None;
     let mut decompose_rz = false;
     let mut decompose_cz = false;
+    let mut decompose_ccx = false;
     let mut rz_epsilon: f64 = DEFAULT_RZ_EPSILON;
     let mut parallel: Option<bool> = None;
     let mut passes: Option<Vec<PassName>> = None;
@@ -201,7 +202,8 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     let mut optimization_level = None;
     let mut superopt_qubits: Option<usize> = None;
     let mut superopt_window_gates: Option<usize> = None;
-    let mut superopt_table_entries: Option<usize> = None;
+    let mut superopt_murm_entries: Option<usize> = None;
+    let mut superopt_gates = SuperOptGates::Auto;
     let mut quiet = false;
     let mut json = false;
     let mut cache_dir: Option<String> = None;
@@ -219,6 +221,14 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
             "--version" | "-v" | "-V" => version = true,
             "--decompose-rz" => decompose_rz = true,
             "--decompose-cz" => decompose_cz = true,
+            "--decompose-ccx" => decompose_ccx = true,
+            "--superopt-gates" => {
+                i += 1;
+                let value =
+                    parse_string_arg(&args, i, "--superopt-gates", "a basis mode or gate list");
+                superopt_gates =
+                    SuperOptGates::parse(&value).unwrap_or_else(|error| arg_error(error));
+            }
             "--epsilon" => {
                 i += 1;
                 let value: f64 = args
@@ -291,7 +301,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
                 );
             }
             // Hidden: not listed in --help, for experimentation with SuperOpt's
-            // window/table bounds without a rebuild.
+            // window/MURM bounds without a rebuild.
             "--superopt-qubits" => {
                 i += 1;
                 superopt_qubits = Some(parse_usize_arg(&args, i, "--superopt-qubits"));
@@ -300,10 +310,9 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
                 i += 1;
                 superopt_window_gates = Some(parse_usize_arg(&args, i, "--superopt-window-gates"));
             }
-            "--superopt-table-entries" => {
+            "--superopt-murm-entries" => {
                 i += 1;
-                superopt_table_entries =
-                    Some(parse_usize_arg(&args, i, "--superopt-table-entries"));
+                superopt_murm_entries = Some(parse_usize_arg(&args, i, "--superopt-murm-entries"));
             }
             // A bare "-" is a positional, not a flag: stdin as the input,
             // stdout as the output. Checked before the unknown-flag arm,
@@ -347,7 +356,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
         process::exit(0);
     }
 
-    // Installed before anything can touch a table, so `--cache-dir` governs
+    // Installed before anything can touch a MURM, so `--cache-dir` governs
     // this whole process — including the cache actions below, which report on
     // and clear whichever directory is in force.
     if let Some(dir) = &cache_dir
@@ -389,7 +398,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
         arg_error(
             "missing required <input.qasm> argument\n\n  \
              Usage: tzap <input.qasm> [-o output.qasm] [-O1|-O2|-O3|-Osuper] \
-             [--decompose-cz] [--decompose-rz] [--passes <list>] \
+             [--decompose-ccx] [--decompose-cz] [--decompose-rz] [--passes <list>] \
              [--parallel|--no-parallel] [--fixpoint]\n  \
              Pass - to read the circuit from stdin.\n  \
              Run `tzap --help` for the full option list.",
@@ -399,10 +408,10 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     if optimization_level.is_some() && (passes.is_some() || fixpoint) {
         arg_error("-O1, -O2, -O3, and -Osuper cannot be combined with --passes or --fixpoint");
     }
-    if passes.is_some() && (decompose_rz || decompose_cz) {
+    if passes.is_some() && (decompose_rz || decompose_cz || decompose_ccx) {
         arg_error(
-            "--passes cannot be combined with --decompose-rz or --decompose-cz \
-             — list DecomposeRz/DecomposeCz as pass names instead",
+            "--passes cannot be combined with --decompose-rz, --decompose-cz, or --decompose-ccx \
+             — list the corresponding decomposition passes instead",
         );
     }
     // Two writers, one stream: whichever won, the other's output would be
@@ -428,6 +437,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
                 fixpoint,
                 decompose_rz,
                 decompose_cz,
+                decompose_ccx,
                 rz_epsilon,
                 // Only what was asked for outright; [`Run::resolve_parallel`]
                 // settles the rest once the circuit's size is known.
@@ -437,8 +447,9 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
                 superopt: SuperOptBounds {
                     qubits: superopt_qubits,
                     window_gates: superopt_window_gates,
-                    table_entries: superopt_table_entries,
+                    murm_entries: superopt_murm_entries,
                 },
+                superopt_gates,
             },
         }),
         ui,
@@ -468,10 +479,6 @@ fn print_help(ui: &Ui) {
     out.push_str(&format!("  {heading}USAGE{reset}\n"));
     out.push_str("    tzap <input.qasm> [output.qasm] [options]\n");
     out.push('\n');
-    out.push_str("  Decomposes Toffoli (ccx) gates into Clifford+T by default.\n");
-    out.push_str("  Pass --decompose-cz to decompose CZ gates into H+CX+H.\n");
-    out.push_str("  Pass --decompose-rz to also decompose Rz gates via gridsynth.\n");
-    out.push('\n');
     out.push_str(&format!("  {heading}ARGS{reset}\n"));
     out.push_str(&format!(
         "    {bold}<input.qasm>{reset}     Input OpenQASM 2.0 file, or - for stdin\n"
@@ -485,12 +492,19 @@ fn print_help(ui: &Ui) {
         "    {bold}-o{reset} <file>        Write output to <file> (- for stdout)\n"
     ));
     out.push_str(&format!(
-        "    {bold}--decompose-rz{reset}   Decompose Rz gates into Clifford+T (gridsynth)\n"
+        "    {bold}--decompose-ccx{reset}  Decompose CCX and CCZ gates into Clifford+T\n"
     ));
     out.push_str(&format!(
         "    {bold}--decompose-cz{reset}   Decompose CZ gates into H+CX+H\n"
     ));
+    out.push_str(&format!(
+        "    {bold}--decompose-rz{reset}   Decompose Rz gates into Clifford+T (gridsynth)\n"
+    ));
     out.push_str(&format!("    {bold}--epsilon{reset} <eps>  Approximation epsilon for --decompose-rz (default: 1e-10)\n"));
+    out.push_str(&format!(
+        "    {bold}--superopt-gates{reset} <basis>  MURM basis: auto (default), base, or a\n"
+    ));
+    out.push_str("                     comma-separated gate list (for example h,t,tdg,cx,cz)\n");
     out.push_str(&format!(
         "    {bold}--parallel{reset}       Optimize chunks of the circuit concurrently. On by\n"
     ));
@@ -502,9 +516,9 @@ fn print_help(ui: &Ui) {
         "    {bold}--no-parallel{reset}    Keep the run sequential at any size\n"
     ));
     out.push_str(&format!("    {bold}--passes{reset} <list>  Run these passes in order, overriding the default pipeline\n"));
-    out.push_str("                     (see PASSES). Excludes --decompose-rz and\n");
-    out.push_str("                     --decompose-cz — list DecomposeRz/DecomposeCz as pass\n");
-    out.push_str("                     names instead. --epsilon still configures DecomposeRz.\n");
+    out.push_str("                     (see PASSES). Excludes --decompose-* — list the\n");
+    out.push_str("                     corresponding decomposition pass names directly.\n");
+    out.push_str("                     --epsilon still configures DecomposeRz.\n");
     out.push_str(&format!(
         "    {bold}--fixpoint{reset}       Repeat the pipeline until gate count stops decreasing\n"
     ));
@@ -516,9 +530,9 @@ fn print_help(ui: &Ui) {
     ));
     out.push_str(&format!("    {bold}-O3{reset}              Like -O2, run to a fixpoint instead of 2 rounds (default)\n"));
     out.push_str(&format!(
-        "    {bold}-Osuper{reset}          Like -O3, with a larger SuperOpt window/table (slower\n"
+        "    {bold}-Osuper{reset}          Like -O3, with a larger SuperOpt window/MURM (slower\n"
     ));
-    out.push_str("                     first run; the table is cached to disk afterward)\n");
+    out.push_str("                     first run; the MURM is cached to disk afterward)\n");
     out.push_str(&format!(
         "    {bold}--json{reset}           Write a machine-readable report of the run to stdout\n"
     ));
@@ -526,13 +540,13 @@ fn print_help(ui: &Ui) {
         "    {bold}-q, --quiet{reset}      Print nothing but errors (output is still written)\n"
     ));
     out.push_str(&format!(
-        "    {bold}--cache-dir{reset} <d>  Keep the SuperOpt table cache under <d>\n"
+        "    {bold}--cache-dir{reset} <d>  Keep the MURM cache under <d>\n"
     ));
     out.push_str(&format!(
-        "    {bold}--cache-info{reset}     Report the cache location and the tables in it\n"
+        "    {bold}--cache-info{reset}     Report the cache location and MURMs in it\n"
     ));
     out.push_str(&format!(
-        "    {bold}--clear-cache{reset}    Delete every cached SuperOpt table\n"
+        "    {bold}--clear-cache{reset}    Delete every cached MURM\n"
     ));
     out.push_str(&format!(
         "    {bold}-h, --help{reset}       Print this help message\n"

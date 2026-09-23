@@ -166,12 +166,27 @@ def test_decompose_cz_option_reaches_native_optimizer():
     assert optimized.count_ops() == {"h": 2, "cx": 1}
 
 
-def test_default_qiskit_pipeline_decomposes_toffoli_gates():
+def test_default_qiskit_pipeline_preserves_native_toffoli_gates():
     circuit = QuantumCircuit(3)
     circuit.ccx(0, 1, 2)
     circuit.ccz(0, 1, 2)
 
     optimized = optimize(circuit, level="O1")
+
+    assert optimized.count_ops() == {"ccx": 1, "ccz": 1}
+
+
+def test_qiskit_decompose_ccx_option_removes_toffoli_gates():
+    circuit = QuantumCircuit(3)
+    circuit.ccx(0, 1, 2)
+    circuit.ccz(0, 1, 2)
+
+    optimized = optimize(
+        circuit,
+        level="O1",
+        decompose_ccx=True,
+        superopt_gates="base",
+    )
 
     assert "ccx" not in optimized.count_ops()
     assert "ccz" not in optimized.count_ops()

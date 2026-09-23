@@ -7,6 +7,145 @@ pub type Qubit = u32;
 /// Index of a classical bit within a [`Circuit`].
 pub type CBit = u32;
 
+/// A supported gate kind, ordered canonically for user-facing gate-set output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum GateKind {
+    H,
+    X,
+    Z,
+    S,
+    Sdg,
+    T,
+    Tdg,
+    Rz,
+    Cx,
+    Cz,
+    Ccx,
+    Ccz,
+    Measure,
+    Reset,
+}
+
+impl GateKind {
+    pub const ALL: [GateKind; 14] = [
+        Self::H,
+        Self::X,
+        Self::Z,
+        Self::S,
+        Self::Sdg,
+        Self::T,
+        Self::Tdg,
+        Self::Rz,
+        Self::Cx,
+        Self::Cz,
+        Self::Ccx,
+        Self::Ccz,
+        Self::Measure,
+        Self::Reset,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::H => "h",
+            Self::X => "x",
+            Self::Z => "z",
+            Self::S => "s",
+            Self::Sdg => "sdg",
+            Self::T => "t",
+            Self::Tdg => "tdg",
+            Self::Rz => "rz",
+            Self::Cx => "cx",
+            Self::Cz => "cz",
+            Self::Ccx => "ccx",
+            Self::Ccz => "ccz",
+            Self::Measure => "measure",
+            Self::Reset => "reset",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+}
+
+/// Compact set of [`GateKind`] values with stable canonical iteration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct GateSet(u16);
+
+impl GateSet {
+    pub const EMPTY: Self = Self(0);
+
+    /// Construct a set from already-validated bits in a constant context.
+    pub(crate) const fn from_bits_const(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub const fn singleton(kind: GateKind) -> Self {
+        Self(1 << kind as u8)
+    }
+
+    pub fn from_kinds(kinds: impl IntoIterator<Item = GateKind>) -> Self {
+        let mut set = Self::EMPTY;
+        for kind in kinds {
+            set.insert(kind);
+        }
+        set
+    }
+
+    pub fn insert(&mut self, kind: GateKind) {
+        self.0 |= 1 << kind as u8;
+    }
+
+    pub const fn contains(self, kind: GateKind) -> bool {
+        self.0 & (1 << kind as u8) != 0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    pub const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    pub const fn is_subset(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub fn from_bits(bits: u16) -> Option<Self> {
+        (bits & !((1 << GateKind::ALL.len()) - 1) == 0).then_some(Self(bits))
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = GateKind> {
+        GateKind::ALL
+            .into_iter()
+            .filter(move |kind| self.contains(*kind))
+    }
+
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        self.iter().map(GateKind::name)
+    }
+}
+
+impl fmt::Display for GateSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{{{}}}", self.names().collect::<Vec<_>>().join(", "))
+    }
+}
+
 /// A single quantum (or classical `measure`/`reset`) operation.
 ///
 /// Variants are lowercase to mirror their QASM gate names.
@@ -48,16 +187,14 @@ pub enum Gate {
 
 /// An ordered sequence of [`Gate`]s over a fixed number of qubits.
 ///
-/// The `has_*` flags are maintained by [`Circuit::apply`] and let passes
-/// cheaply skip circuits that don't contain a given gate kind.
+/// Gate metadata is derived from `gates` rather than cached beside it. This
+/// keeps the public `gates` vector safe to mutate without silently leaving
+/// optimizer policy decisions out of sync with the actual circuit.
 #[derive(Clone, Debug)]
 pub struct Circuit {
     pub num_qubits: usize,
     pub num_cbits: usize,
     pub gates: Vec<Gate>,
-    pub has_toffoli: bool,
-    pub has_ccz: bool,
-    pub has_measurement: bool,
 }
 
 impl Circuit {
@@ -67,9 +204,6 @@ impl Circuit {
             num_qubits,
             num_cbits: 0,
             gates: Vec::new(),
-            has_toffoli: false,
-            has_ccz: false,
-            has_measurement: false,
         }
     }
 
@@ -81,21 +215,35 @@ impl Circuit {
             num_qubits,
             num_cbits,
             gates: Vec::new(),
-            has_toffoli: false,
-            has_ccz: false,
-            has_measurement: false,
         }
     }
 
-    /// Append `gate`, updating the `has_*` flags as needed.
+    /// Append `gate`.
     pub fn apply(&mut self, gate: Gate) {
-        match &gate {
-            Gate::ccx { .. } => self.has_toffoli = true,
-            Gate::ccz { .. } => self.has_ccz = true,
-            Gate::measure { .. } | Gate::reset(_) => self.has_measurement = true,
-            _ => {}
-        }
         self.gates.push(gate);
+    }
+
+    /// Gate kinds currently present, derived from the circuit's actual gates.
+    pub fn gate_set(&self) -> GateSet {
+        GateSet::from_kinds(self.gates.iter().map(Gate::kind))
+    }
+
+    pub fn has_toffoli(&self) -> bool {
+        self.gates
+            .iter()
+            .any(|gate| matches!(gate, Gate::ccx { .. }))
+    }
+
+    pub fn has_ccz(&self) -> bool {
+        self.gates
+            .iter()
+            .any(|gate| matches!(gate, Gate::ccz { .. }))
+    }
+
+    pub fn has_measurement(&self) -> bool {
+        self.gates
+            .iter()
+            .any(|gate| matches!(gate, Gate::measure { .. } | Gate::reset(_)))
     }
 
     /// Serialize to OpenQASM 2.0. See [`crate::qasm`] for the supported subset.
@@ -110,6 +258,11 @@ impl Circuit {
 }
 
 impl Gate {
+    /// This gate's kind, independent of its operands.
+    pub fn kind(&self) -> GateKind {
+        GateKind::of(self)
+    }
+
     /// The same gate with every qubit operand sent through `f`. Classical
     /// bits are untouched.
     pub fn map_qubits(&self, mut f: impl FnMut(Qubit) -> Qubit) -> Gate {
@@ -153,6 +306,45 @@ impl Gate {
                 cbit: *cbit,
             },
             Gate::reset(q) => Gate::reset(f(*q)),
+        }
+    }
+}
+
+/// Canonical operand order for a symmetric two-qubit gate.
+pub(crate) fn canonical_pair<T: Copy + Ord>(a: T, b: T) -> (T, T) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Canonical operand order for a Toffoli: sorted controls and fixed target.
+pub(crate) fn canonical_ccx<T: Copy + Ord>(control1: T, control2: T, target: T) -> (T, T, T) {
+    let (control1, control2) = canonical_pair(control1, control2);
+    (control1, control2, target)
+}
+
+/// Canonical operand order for a fully symmetric three-qubit gate.
+pub(crate) fn canonical_triple<T: Copy + Ord>(a: T, b: T, c: T) -> (T, T, T) {
+    let mut operands = [a, b, c];
+    operands.sort_unstable();
+    (operands[0], operands[1], operands[2])
+}
+
+impl GateKind {
+    pub const fn of(gate: &Gate) -> Self {
+        match gate {
+            Gate::h(_) => Self::H,
+            Gate::x(_) => Self::X,
+            Gate::z(_) => Self::Z,
+            Gate::s(_) => Self::S,
+            Gate::sdg(_) => Self::Sdg,
+            Gate::t(_) => Self::T,
+            Gate::tdg(_) => Self::Tdg,
+            Gate::rz(..) => Self::Rz,
+            Gate::cnot { .. } => Self::Cx,
+            Gate::cz { .. } => Self::Cz,
+            Gate::ccx { .. } => Self::Ccx,
+            Gate::ccz { .. } => Self::Ccz,
+            Gate::measure { .. } => Self::Measure,
+            Gate::reset(_) => Self::Reset,
         }
     }
 }
@@ -202,6 +394,57 @@ impl fmt::Display for Circuit {
             writeln!(f, "  {i}: {gate}")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod gate_set_tests {
+    use super::*;
+    use crate::super_opt::{BASE_GATE_SET, SUPPORTED_GATE_SET};
+
+    #[test]
+    fn gate_set_uses_the_canonical_qasm_order() {
+        let mut circuit = Circuit::with_cbits(3, 1);
+        circuit.apply(Gate::reset(2));
+        circuit.apply(Gate::ccz {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        circuit.apply(Gate::h(0));
+        circuit.apply(Gate::rz(0.3, 1));
+        circuit.apply(Gate::measure { qubit: 0, cbit: 0 });
+        assert_eq!(
+            circuit.gate_set().to_string(),
+            "{h, rz, ccz, measure, reset}"
+        );
+    }
+
+    #[test]
+    fn superopt_gate_sets_are_exact() {
+        assert_eq!(BASE_GATE_SET.to_string(), "{h, x, z, s, sdg, t, tdg, cx}");
+        assert_eq!(
+            SUPPORTED_GATE_SET.to_string(),
+            "{h, x, z, s, sdg, t, tdg, cx, cz, ccx, ccz}"
+        );
+    }
+
+    #[test]
+    fn metadata_tracks_direct_public_gate_mutation() {
+        let mut circuit = Circuit::new(3);
+        circuit.gates.push(Gate::ccx {
+            control1: 0,
+            control2: 1,
+            target: 2,
+        });
+        assert_eq!(circuit.gate_set(), GateSet::singleton(GateKind::Ccx));
+        assert!(circuit.has_toffoli());
+
+        circuit.gates.clear();
+        circuit.gates.push(Gate::reset(1));
+        assert_eq!(circuit.gate_set(), GateSet::singleton(GateKind::Reset));
+        assert!(!circuit.has_toffoli());
+        assert!(circuit.has_measurement());
     }
 }
 
@@ -366,8 +609,8 @@ mod tests {
         });
 
         assert!(format!("{c}").contains("ccz q2, q0, q1"));
-        assert!(!c.has_toffoli);
-        assert!(c.has_ccz);
+        assert!(!c.has_toffoli());
+        assert!(c.has_ccz());
         assert_eq!(qubits_of(&c.gates[0]), vec![2, 0, 1]);
     }
 
@@ -439,8 +682,8 @@ mod tests {
             target: 0,
         });
         assert!(format!("{c}").contains("cz q2, q0"));
-        assert!(!c.has_toffoli);
-        assert!(!c.has_measurement);
+        assert!(!c.has_toffoli());
+        assert!(!c.has_measurement());
     }
 
     #[test]
@@ -495,7 +738,7 @@ mod tests {
         c.apply(Gate::measure { qubit: 0, cbit: 0 });
         let s = format!("{c}");
         assert!(s.contains("measure q0 -> c0"));
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
     }
 
     #[test]
@@ -504,7 +747,7 @@ mod tests {
         c.apply(Gate::reset(0));
         let s = format!("{c}");
         assert!(s.contains("reset q0"));
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
     }
 
     #[test]
@@ -541,9 +784,9 @@ mod tests {
         let c = Circuit::with_cbits(2, 3);
         assert_eq!(c.num_qubits, 2);
         assert_eq!(c.num_cbits, 3);
-        assert!(!c.has_measurement);
-        assert!(!c.has_toffoli);
-        assert!(!c.has_ccz);
+        assert!(!c.has_measurement());
+        assert!(!c.has_toffoli());
+        assert!(!c.has_ccz());
         assert_eq!(c.gates.len(), 0);
     }
 
@@ -551,8 +794,8 @@ mod tests {
     fn has_measurement_flag_set_by_reset_alone() {
         // reset has no cbits but still counts as measurement
         let mut c = Circuit::new(1);
-        assert!(!c.has_measurement);
+        assert!(!c.has_measurement());
         c.apply(Gate::reset(0));
-        assert!(c.has_measurement);
+        assert!(c.has_measurement());
     }
 }
