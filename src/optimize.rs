@@ -7,6 +7,7 @@
 //! parsing, file I/O, and terminal rendering; it plugs the latter in through
 //! [`Observer`].
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -418,32 +419,30 @@ impl Metrics {
             rz: adjust(self.rz, before.rz, after.rz),
         }
     }
+
+    /// Accumulate the metrics that are additive across independent chunks.
+    fn add_counts(&mut self, other: Metrics) {
+        self.gates += other.gates;
+        self.two_qubit += other.two_qubit;
+        self.t += other.t;
+        self.rz += other.rz;
+    }
 }
 
-/// Running totals of the per-chunk metrics a parallel run reports, each chunk
-/// adding its own as it finishes.
+/// A consistent snapshot of the completed chunks' contributions to progress.
 #[derive(Default)]
-struct MetricSums {
-    gates: AtomicUsize,
-    two_qubit: AtomicUsize,
-    t: AtomicUsize,
-    rz: AtomicUsize,
+struct ChunkProgress {
+    done: usize,
+    before: Metrics,
+    after: Metrics,
 }
 
-impl MetricSums {
-    /// Add `m` to the totals and return them, this addition included. Fields
-    /// are summed independently, so a concurrent add can land between two of
-    /// them: the result is a live reading, not a consistent snapshot. Depth
-    /// is not summed (see [`Metrics::adjusted`]) and reads back as 0.
-    fn add(&self, m: Metrics) -> Metrics {
-        let add = |total: &AtomicUsize, n: usize| total.fetch_add(n, Ordering::Relaxed) + n;
-        Metrics {
-            gates: add(&self.gates, m.gates),
-            two_qubit: add(&self.two_qubit, m.two_qubit),
-            depth: 0,
-            t: add(&self.t, m.t),
-            rz: add(&self.rz, m.rz),
-        }
+impl ChunkProgress {
+    fn record(&mut self, before: Metrics, after: Metrics, baseline: Metrics) -> (usize, Metrics) {
+        self.before.add_counts(before);
+        self.after.add_counts(after);
+        self.done += 1;
+        (self.done, baseline.adjusted(self.before, self.after))
     }
 }
 
@@ -488,10 +487,11 @@ impl From<SuperOptError> for Error {
 /// doing nothing; implement only the events you care about.
 ///
 /// Events fire from whichever thread reached them: in a `parallel` run,
-/// `chunk_done` is called concurrently from rayon workers, which is why an
-/// `Observer` must be `Sync`. The chunk workers themselves are always
-/// observed by [`Silent`] — their pipelines run concurrently, so their
-/// progress events would interleave into garbage.
+/// `chunk_done` is called from rayon workers, in completion order. An
+/// `Observer` must still be `Sync` because it is shared across workers and
+/// other callbacks can run from different threads. The chunk workers
+/// themselves are always observed by [`Silent`] — their pipelines run
+/// concurrently, so their progress events would interleave into garbage.
 pub trait Observer: Sync {
     /// Whether this observer consumes the per-chunk events. When false (the
     /// default), a parallel run skips `chunks_start`/`chunk_done`/`chunks_end`
@@ -842,9 +842,7 @@ fn run_map_reduce(
     // O(chunks x circuit) and serialized the workers behind it: ~20% of a
     // parallel run on a 4M-gate circuit, all of it to move a progress bar.
     let baseline = Metrics::of(circuit);
-    let done = AtomicUsize::new(0);
-    let sum_before = MetricSums::default();
-    let sum_after = MetricSums::default();
+    let progress = Mutex::new(ChunkProgress::default());
     let fixpoint = ParallelFixpointAggregate::new();
 
     if tracking {
@@ -858,9 +856,12 @@ fn run_map_reduce(
             let before = tracking.then(|| Metrics::of(chunk));
             let result = optimize(chunk, &fixpoint)?;
             if let Some(before) = before {
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                let current =
-                    baseline.adjusted(sum_before.add(before), sum_after.add(Metrics::of(&result)));
+                // Keep the totals, completion number, and callback in one
+                // critical section. Otherwise workers can report mixed
+                // before/after snapshots or deliver callbacks out of order.
+                let after = Metrics::of(&result);
+                let mut progress = progress.lock().unwrap();
+                let (n, current) = progress.record(before, after, baseline);
                 observer.chunk_done(n, total, current, baseline);
             }
             Ok(result)
@@ -1361,6 +1362,44 @@ mod tests {
         assert_eq!(reported.two_qubit, actual.two_qubit);
         assert_eq!(reported.t, actual.t);
         assert_eq!(reported.rz, actual.rz);
+    }
+
+    /// A slow first callback must not let later workers publish their progress
+    /// ahead of it, even when their optimization has already finished.
+    #[test]
+    fn chunk_progress_callbacks_are_ordered() {
+        #[derive(Default)]
+        struct OrderedChunks {
+            reported: Mutex<Vec<usize>>,
+        }
+        impl Observer for OrderedChunks {
+            fn tracks_chunks(&self) -> bool {
+                true
+            }
+            fn chunk_done(&self, done: usize, _total: usize, _: Metrics, _: Metrics) {
+                if done == 1 {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                self.reported.lock().unwrap().push(done);
+            }
+        }
+
+        let mut circuit = Circuit::new(16);
+        for qubit in 0..16 {
+            circuit.apply(Gate::h(qubit));
+        }
+        let observer = OrderedChunks::default();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| run_map_reduce(&circuit, true, 16, &observer, |chunk, _| Ok(chunk.clone())))
+            .unwrap();
+
+        assert_eq!(
+            *observer.reported.lock().unwrap(),
+            (1..=16).collect::<Vec<_>>()
+        );
     }
 
     /// Depth is not a sum over chunks, so a chunk reporting its own depth
