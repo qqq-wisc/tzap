@@ -5,6 +5,8 @@ use crate::circuit::Qubit;
 
 use super::PbcError;
 
+mod materialize;
+
 /// Exact phase multiplying a Pauli expression, distinct from a rotation angle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -157,62 +159,10 @@ impl PauliArena {
         self.nodes.push(node);
         reference
     }
-
-    /// Evaluate each dependency once in arena order. This deliberately has an
-    /// explicit size budget and is separate from constant-time node creation.
-    pub fn expand(
-        &self,
-        num_qubits: usize,
-        through: usize,
-        max_cells: usize,
-    ) -> Result<Vec<ExpandedPauli>, PbcError> {
-        let nodes = through.checked_add(1).ok_or(PbcError::ExpansionLimit)?;
-        let cells = nodes
-            .checked_mul(num_qubits.max(1))
-            .ok_or(PbcError::ExpansionLimit)?;
-        if cells > max_cells {
-            return Err(PbcError::ExpansionLimit);
-        }
-        let mut expanded: Vec<ExpandedPauli> = Vec::with_capacity(nodes);
-        for node in &self.nodes[..nodes] {
-            let value = match *node {
-                PauliNode::Identity => ExpandedPauli {
-                    phase: Phase::One,
-                    factors: vec![Pauli::I; num_qubits],
-                },
-                PauliNode::Single { qubit, pauli } => {
-                    let mut factors = vec![Pauli::I; num_qubits];
-                    factors[qubit as usize] = pauli;
-                    ExpandedPauli {
-                        phase: Phase::One,
-                        factors,
-                    }
-                }
-                PauliNode::Product(a, b) => {
-                    let left = &expanded[a.node];
-                    let right = &expanded[b.node];
-                    let mut phase = left.phase.times(a.phase).times(right.phase).times(b.phase);
-                    let factors = left
-                        .factors
-                        .iter()
-                        .zip(&right.factors)
-                        .map(|(&l, &r)| {
-                            let (p, factor) = l.times(r);
-                            phase = phase.times(p);
-                            factor
-                        })
-                        .collect();
-                    ExpandedPauli { phase, factors }
-                }
-            };
-            expanded.push(value);
-        }
-        Ok(expanded)
-    }
 }
 
 /// Explicit dense Pauli factors in increasing qubit order. Materialization is
-/// intended for inspection of small circuits, not the future linear converter.
+/// intended for inspection of small circuits, not part of linear-time conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpandedPauli {
     pub phase: Phase,

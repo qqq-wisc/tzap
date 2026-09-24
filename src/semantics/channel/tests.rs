@@ -3,6 +3,31 @@ use crate::pbc::{PauliAngle, to_pbc};
 
 mod fuzz;
 
+#[test]
+fn classical_projection_of_signed_y_has_transposed_complex_entries() {
+    for negative in [false, true] {
+        let mut circuit = PbcCircuit::new(1, 1);
+        let y = circuit.y(0).unwrap();
+        circuit
+            .measure(if negative { y.negated() } else { y }, Some(0))
+            .unwrap();
+        let blocks = pbc(&circuit, &[false]).classical_blocks();
+        for outcome in [false, true] {
+            // Effect = (I +/- Y)/2; tracing row-major Choi output gives
+            // its transpose, so the upper-right entry is +/- i/2.
+            let mut expected = Matrix::identity(2).scale(&Scalar::integer(1).half());
+            let upper = if negative ^ outcome {
+                Scalar::i().neg().half()
+            } else {
+                Scalar::i().half()
+            };
+            expected.set(0, 1, upper.clone());
+            expected.set(1, 0, upper.conj());
+            assert_eq!(blocks[&vec![outcome]], expected);
+        }
+    }
+}
+
 fn circuit(n: usize, cbits: usize, gates: Vec<Gate>) -> Circuit {
     Circuit {
         num_qubits: n,
@@ -469,6 +494,71 @@ fn partial_measurement_suffix_preserves_unmeasured_qubits() {
     let z = wrong.z(0).unwrap();
     wrong.measure(z, Some(0)).unwrap();
     assert!(expected.compare(&pbc(&wrong, &[false])).is_err());
+}
+
+#[test]
+fn full_bell_readout_absorbs_cliffords_into_joint_measurement_axes() {
+    let input = circuit(
+        2,
+        2,
+        vec![Gate::h(0), cx(0, 1), measure(0, 0), measure(1, 1)],
+    );
+    let expected = check(&input, &[false, false]);
+    let mut absorbed = PbcCircuit::new(2, 2);
+    let x = absorbed.x(0).unwrap();
+    let z = absorbed.z(1).unwrap();
+    let product = absorbed.product(x.as_ref(), z.as_ref()).unwrap();
+    let xz = absorbed.hermitian_axis(product, 100).unwrap();
+    absorbed.measure(x, Some(0)).unwrap();
+    absorbed.measure(xz, Some(1)).unwrap();
+    assert!(absorbed.output_cliffords().is_empty());
+    let actual = pbc(&absorbed, &[false, false]);
+    assert_eq!(expected.classical_blocks(), actual.classical_blocks());
+    // This is classical-output equivalence, not equality of post-measurement states.
+    assert!(expected.compare(&actual).is_err());
+}
+
+#[test]
+fn partial_bell_readout_needs_entangling_suffix_even_if_measured_wire_is_discarded() {
+    let input = circuit(2, 1, vec![Gate::h(0), cx(0, 1), measure(1, 0)]);
+    let converted = to_pbc(&input).unwrap();
+    assert_eq!(converted.output_cliffords(), &[Gate::h(0), cx(0, 1)]);
+    let expected = check(&input, &[false]);
+    let mut wrong = PbcCircuit::new(2, 1);
+    let x = wrong.x(0).unwrap();
+    let z = wrong.z(1).unwrap();
+    let product = wrong.product(x.as_ref(), z.as_ref()).unwrap();
+    let axis = wrong.hermitian_axis(product, 100).unwrap();
+    wrong.measure(axis, Some(0)).unwrap();
+    let wrong = pbc(&wrong, &[false]);
+    assert_eq!(expected.classical_blocks(), wrong.classical_blocks());
+    // For input |00> and outcome 0, trace out measured q1. The required
+    // unnormalized q0 state is |0><0|/2, not |+><+|/2.
+    let retained_q0 = |channel: &Channel| {
+        let rho = basis_output(channel, &[false], 0);
+        let mut reduced = Matrix::zero(2);
+        for r in 0..2 {
+            for c in 0..2 {
+                reduced.set(
+                    r,
+                    c,
+                    rho.get(2 * r, 2 * c).add(rho.get(2 * r + 1, 2 * c + 1)),
+                );
+            }
+        }
+        reduced
+    };
+    let mut correct_state = Matrix::zero(2);
+    correct_state.set(0, 0, Scalar::integer(1).half());
+    assert_eq!(retained_q0(&expected), correct_state);
+    let mut wrong_state = Matrix::zero(2);
+    for r in 0..2 {
+        for c in 0..2 {
+            wrong_state.set(r, c, Scalar::integer(1).half().half());
+        }
+    }
+    assert_eq!(retained_q0(&wrong), wrong_state);
+    assert_ne!(correct_state, wrong_state);
 }
 
 #[test]

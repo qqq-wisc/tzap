@@ -222,9 +222,9 @@ fn shared_deep_dag_expands_and_drops_without_recursion() {
         p = c.product(p, p).unwrap();
     }
     assert_eq!(c.pauli_nodes().len(), 20_002);
-    assert_eq!(c.expand(p, 20_001), Err(PbcError::ExpansionLimit));
-    assert_eq!(c.expand(p, 20_002).unwrap().factors, vec![Pauli::I]);
-    assert_eq!(c.expand(x.as_ref(), 2).unwrap().factors, vec![Pauli::X]);
+    assert_eq!(c.expand(p, 20_004), Err(PbcError::ExpansionLimit));
+    assert_eq!(c.expand(p, 20_005).unwrap().factors, vec![Pauli::I]);
+    assert_eq!(c.expand(x.as_ref(), 4).unwrap().factors, vec![Pauli::X]);
 }
 
 #[test]

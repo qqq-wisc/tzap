@@ -1,4 +1,4 @@
-use super::{Pauli, PbcCircuit, PbcError, PbcOp};
+use super::{PbcCircuit, PbcError, PbcOp};
 use crate::circuit::Gate;
 
 /// Explicit limits for the diagnostic renderer, which expands shared axes.
@@ -6,6 +6,7 @@ use crate::circuit::Gate;
 pub struct AsciiOptions {
     pub max_qubits: usize,
     pub max_operations: usize,
+    /// Work limit for sparse dependency evaluation (not dense qubit cells).
     pub max_expansion_cells: usize,
 }
 
@@ -50,48 +51,38 @@ impl PbcCircuit {
             .checked_mul(2)
             .ok_or(PbcError::DrawingLimit)?
             .max(1);
-        let expanded = match self.operations.iter().map(|op| op.axis().0.node).max() {
-            Some(last) => self
-                .arena
-                .expand(self.num_qubits, last, options.max_expansion_cells)?,
-            None => Vec::new(),
-        };
         let mut columns = Vec::new();
-        for op in &self.operations {
-            let reference = op.axis().0;
-            let value = &expanded[reference.node];
-            let sign = value.phase.times(reference.phase);
-            let identity = if value.factors.iter().all(|p| *p == Pauli::I) {
-                "I"
-            } else {
-                ""
-            };
-            let axis = format!("{sign}{identity}");
-            let label = match op {
-                PbcOp::Rotate { angle, .. } => format!("R({angle},{axis})"),
-                PbcOp::Measure {
-                    outcome, target, ..
-                } => match target {
-                    Some(c) => format!("M({axis})->{outcome}/c{c}"),
-                    None => format!("M({axis})->{outcome}"),
-                },
-                PbcOp::ConditionalRotate { angle, if_one, .. } => {
-                    format!("R({angle},{axis}) if {if_one}=1")
-                }
-            };
-            let wires = value
-                .factors
-                .iter()
-                .map(|p| {
-                    if *p == Pauli::I {
-                        String::new()
-                    } else {
-                        format!("[{p}]")
+        let roots: Vec<_> = self
+            .operations
+            .iter()
+            .map(|op| op.axis().as_ref())
+            .collect();
+        let mut operations = self.operations.iter();
+        self.arena
+            .materialize(&roots, options.max_expansion_cells, |reference, value| {
+                let op = operations.next().unwrap();
+                let sign = value.phase.times(reference.phase);
+                let identity = if value.factors.is_empty() { "I" } else { "" };
+                let axis = format!("{sign}{identity}");
+                let label = match op {
+                    PbcOp::Rotate { angle, .. } => format!("R({angle},{axis})"),
+                    PbcOp::Measure {
+                        outcome, target, ..
+                    } => match target {
+                        Some(c) => format!("M({axis})->{outcome}/c{c}"),
+                        None => format!("M({axis})->{outcome}"),
+                    },
+                    PbcOp::ConditionalRotate { angle, if_one, .. } => {
+                        format!("R({angle},{axis}) if {if_one}=1")
                     }
-                })
-                .collect();
-            columns.push(Column { label, wires });
-        }
+                };
+                let mut wires = vec![String::new(); self.num_qubits];
+                for (&q, p) in &value.factors {
+                    wires[q as usize] = format!("[{p}]");
+                }
+                columns.push(Column { label, wires });
+                Ok(())
+            })?;
         if !self.output_cliffords.is_empty() {
             columns.push(Column {
                 label: "suffix".into(),

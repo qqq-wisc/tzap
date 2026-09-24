@@ -26,7 +26,7 @@ mod text;
 pub use ascii::AsciiOptions;
 pub use convert::{ToPbc, to_pbc};
 pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
-pub use text::{OutputSemantics, TextOptions};
+pub use text::TextOptions;
 
 use crate::circuit::{CBit, Gate, GateKind, Qubit, qubit_operands};
 use pauli::PauliArena;
@@ -252,15 +252,27 @@ impl PbcCircuit {
         Ok(self.arena.push(PauliNode::Product(left, right)))
     }
 
-    /// Explicitly inspect an expression. Cost and storage are O(D * Q) for the
-    /// arena prefix of D nodes; max_cells bounds D * max(Q, 1).
+    /// Inspect one expression using sparse reachable dependencies, then allocate
+    /// the requested dense Q-qubit result. The budget charges Q output cells
+    /// plus sparse evaluation work; unrelated arena nodes are never expanded.
     pub fn expand(&self, reference: PauliRef, max_cells: usize) -> Result<ExpandedPauli, PbcError> {
         self.arena.check(reference)?;
-        let mut values = self
-            .arena
-            .expand(self.num_qubits, reference.node, max_cells)?;
-        let mut result = values.pop().expect("every reference has a node");
-        result.phase = result.phase.times(reference.phase);
+        let budget = max_cells
+            .checked_sub(self.num_qubits)
+            .ok_or(PbcError::ExpansionLimit)?;
+        let mut result = ExpandedPauli {
+            phase: Phase::One,
+            factors: Vec::new(),
+        };
+        self.arena
+            .materialize(&[reference], budget, |reference, value| {
+                result.phase = value.phase.times(reference.phase);
+                result.factors = vec![Pauli::I; self.num_qubits];
+                for (&q, &p) in &value.factors {
+                    result.factors[q as usize] = p;
+                }
+                Ok(())
+            })?;
         Ok(result)
     }
 
@@ -273,7 +285,12 @@ impl PbcCircuit {
         reference: PauliRef,
         max_cells: usize,
     ) -> Result<PauliAxis, PbcError> {
-        let phase = self.expand(reference, max_cells)?.phase;
+        let mut phase = Phase::One;
+        self.arena
+            .materialize(&[reference], max_cells, |reference, value| {
+                phase = value.phase.times(reference.phase);
+                Ok(())
+            })?;
         if !matches!(phase, Phase::One | Phase::MinusOne) {
             return Err(PbcError::NonHermitianAxis);
         }

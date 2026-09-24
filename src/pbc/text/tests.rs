@@ -1,9 +1,8 @@
 use super::*;
 use crate::circuit::Circuit;
-use crate::pbc::{PauliAngle, to_pbc};
+use crate::pbc::{Pauli, PauliAngle, to_pbc};
 
-/// Test-only reader: reconstruct exactly what the exported r/m instructions say,
-/// without consulting the original circuit or the Clifford lowering identities.
+/// Test-only reader, independent of the original circuit and converter.
 fn read_text(text: &str) -> PbcCircuit {
     let mut lines = text.lines();
     let n = lines
@@ -24,6 +23,32 @@ fn read_text(text: &str) -> PbcCircuit {
     for line in lines {
         let mut words = line.split_whitespace();
         let op = words.next().unwrap();
+        if !matches!(op, "r" | "m") {
+            let q = words.next().unwrap().parse().unwrap();
+            let gate = match op {
+                "h" => Gate::h(q),
+                "x" => Gate::x(q),
+                "z" => Gate::z(q),
+                "s" => Gate::s(q),
+                "sdg" => Gate::sdg(q),
+                "cx" => Gate::cnot {
+                    control: q,
+                    target: words.next().unwrap().parse().unwrap(),
+                },
+                "cz" => Gate::cz {
+                    control: q,
+                    target: words.next().unwrap().parse().unwrap(),
+                },
+                _ => panic!("bad Clifford"),
+            };
+            assert!(words.next().is_none());
+            p.push_output_clifford(gate).unwrap();
+            continue;
+        }
+        assert!(
+            p.output_cliffords().is_empty(),
+            "Cliffords must be trailing"
+        );
         assert!(matches!(op, "r" | "m"));
         let k = if op == "r" {
             words.next().unwrap().parse().unwrap()
@@ -99,7 +124,7 @@ fn clifford_alphabet() -> Vec<Gate> {
 }
 
 #[test]
-fn exported_rotations_match_exact_unitaries_for_every_clifford_pair() {
+fn exported_programs_match_exact_unitaries_for_every_clifford_pair() {
     use crate::semantics::test_support::assert_equivalent;
     for a in clifford_alphabet() {
         for b in clifford_alphabet() {
@@ -115,7 +140,7 @@ fn exported_rotations_match_exact_unitaries_for_every_clifford_pair() {
 }
 
 #[test]
-fn exported_rotations_preserve_exact_partial_readout_channels() {
+fn exported_programs_preserve_exact_partial_readout_channels() {
     use crate::semantics::channel::{ChannelLimits, circuit_channel, pbc_channel};
     for gate in clifford_alphabet() {
         for q in 0..2 {
@@ -131,13 +156,138 @@ fn exported_rotations_preserve_exact_partial_readout_channels() {
             };
             let text = to_pbc(&input).unwrap().to_text().unwrap();
             let actual = read_text(&text);
-            assert!(actual.output_cliffords().is_empty());
+            assert!(!actual.output_cliffords().is_empty());
             let initial = [true, false];
             let limits = ChannelLimits::default();
             let expected = circuit_channel(&input, &initial, limits).unwrap();
             let actual = pbc_channel(&actual, &initial, limits).unwrap();
             assert_eq!(expected.compare(&actual), Ok(()), "{text}");
         }
+    }
+}
+
+fn assert_full_export(input: &Circuit, initial: &[bool]) {
+    use crate::semantics::channel::{ChannelLimits, circuit_channel, pbc_channel};
+    let text = to_pbc(input).unwrap().to_text().unwrap();
+    let exported = read_text(&text);
+    let limits = ChannelLimits::default();
+    let expected = circuit_channel(input, initial, limits).unwrap();
+    let actual = pbc_channel(&exported, initial, limits).unwrap();
+    assert_eq!(expected.compare(&actual), Ok(()), "{text}");
+    assert_eq!(
+        expected.classical_blocks(),
+        actual.classical_blocks(),
+        "{text}"
+    );
+}
+
+#[test]
+fn export_preserves_full_readout_channel_for_every_clifford_pair() {
+    for a in clifford_alphabet() {
+        for b in clifford_alphabet() {
+            let input = Circuit {
+                num_qubits: 2,
+                num_cbits: 3,
+                gates: vec![
+                    a.clone(),
+                    Gate::t(0),
+                    b,
+                    Gate::tdg(1),
+                    Gate::measure { qubit: 0, cbit: 1 },
+                    Gate::measure { qubit: 1, cbit: 0 },
+                ],
+            };
+            assert_full_export(&input, &[false, true, true]);
+        }
+    }
+}
+
+#[test]
+fn export_preserves_native_gates_and_overwritten_registers() {
+    for native in [
+        Gate::ccx {
+            control1: 0,
+            control2: 2,
+            target: 1,
+        },
+        Gate::ccz {
+            control1: 2,
+            control2: 1,
+            target: 0,
+        },
+    ] {
+        for overwrite in [false, true] {
+            let input = Circuit {
+                num_qubits: 3,
+                num_cbits: 3,
+                gates: vec![
+                    Gate::h(0),
+                    Gate::s(0),
+                    Gate::x(2),
+                    native.clone(),
+                    Gate::tdg(1),
+                    Gate::h(1),
+                    Gate::measure { qubit: 2, cbit: 2 },
+                    Gate::measure { qubit: 0, cbit: 0 },
+                    Gate::measure {
+                        qubit: 1,
+                        cbit: if overwrite { 0 } else { 1 },
+                    },
+                ],
+            };
+            assert_full_export(&input, &[true, false, true]);
+        }
+    }
+}
+
+#[test]
+fn classical_projection_distinguishes_readout_axes_but_discards_output_frame() {
+    use crate::semantics::channel::{ChannelLimits, circuit_channel, pbc_channel};
+    let input = Circuit {
+        num_qubits: 1,
+        num_cbits: 1,
+        gates: vec![Gate::h(0), Gate::measure { qubit: 0, cbit: 0 }],
+    };
+    let limits = ChannelLimits::default();
+    let expected = circuit_channel(&input, &[false], limits).unwrap();
+    let correct = pbc_channel(
+        &read_text("qubits 1\nregisters 1\nm 1 X0 -> c0\n"),
+        &[false],
+        limits,
+    )
+    .unwrap();
+    let wrong = pbc_channel(
+        &read_text("qubits 1\nregisters 1\nm 1 Z0 -> c0\n"),
+        &[false],
+        limits,
+    )
+    .unwrap();
+    assert!(
+        expected.compare(&correct).is_err(),
+        "quantum outputs differ"
+    );
+    assert_eq!(expected.classical_blocks(), correct.classical_blocks());
+    assert_ne!(expected.classical_blocks(), wrong.classical_blocks());
+    assert_full_export(&input, &[false]);
+}
+
+#[test]
+fn export_preserves_partial_and_absent_readout_channels() {
+    for measurements in [vec![], vec![Gate::measure { qubit: 1, cbit: 0 }]] {
+        let mut input = Circuit {
+            num_qubits: 2,
+            num_cbits: 2,
+            gates: vec![
+                Gate::h(0),
+                Gate::t(0),
+                Gate::cnot {
+                    control: 0,
+                    target: 1,
+                },
+            ],
+        };
+        input.gates.extend(measurements);
+        assert_full_export(&input, &[true, false]);
     }
 }
 
@@ -190,7 +340,7 @@ fn angles_are_integer_multiples_modulo_global_phase() {
 }
 
 #[test]
-fn quantum_outputs_are_default_classical_projection_is_explicit() {
+fn full_readout_keeps_named_cliffords_and_quantum_outputs() {
     let c = Circuit {
         num_qubits: 1,
         num_cbits: 1,
@@ -199,15 +349,8 @@ fn quantum_outputs_are_default_classical_projection_is_explicit() {
     let p = to_pbc(&c).unwrap();
     assert_eq!(
         p.to_text().unwrap(),
-        "qubits 1\nregisters 1\nm 1 X0 -> c0\nr 2 1 Z0\nr 2 1 X0\nr 2 1 Z0\n"
+        "qubits 1\nregisters 1\nm 1 X0 -> c0\nh 0\n"
     );
-    let classical = p
-        .to_text_with(TextOptions {
-            output_semantics: OutputSemantics::Classical,
-            ..TextOptions::default()
-        })
-        .unwrap();
-    assert_eq!(classical, "qubits 1\nregisters 1\nm 1 X0 -> c0\n");
     assert_eq!(p.output_cliffords(), &[Gate::h(0)]);
 }
 
@@ -238,7 +381,7 @@ fn all_suffix_gates_and_empty_program() {
     };
     assert_eq!(
         to_pbc(&c).unwrap().to_text().unwrap(),
-        "qubits 2\nregisters 0\nr 2 1 Z0\nr 2 1 X0\nr 2 1 Z0\nr 4 1 X1\nr 4 1 Z0\nr 2 1 Z1\nr -2 1 Z0\nr 2 1 Z1\nr 2 1 X0\nr -2 1 X0 Z1\nr 2 1 Z0\nr 2 1 Z1\nr -2 1 Z0 Z1\n"
+        "qubits 2\nregisters 0\nh 0\nx 1\nz 0\ns 1\nsdg 0\ncx 1 0\ncz 0 1\n"
     );
 }
 
@@ -250,7 +393,6 @@ fn unsupported_operations_and_expansion_limit_fail_without_truncation() {
     assert_eq!(
         p.to_text_with(TextOptions {
             max_expansion_cells: 0,
-            ..TextOptions::default()
         }),
         Err(PbcError::ExpansionLimit)
     );

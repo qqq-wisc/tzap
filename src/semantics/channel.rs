@@ -50,6 +50,29 @@ pub(crate) enum Difference {
 }
 
 impl Channel {
+    /// Trace out quantum outputs from each Choi block, retaining the classical
+    /// channel for arbitrary input states (not just computational-basis inputs).
+    /// With our row-major vec(K), these matrices are transposed POVM effects.
+    pub fn classical_blocks(&self) -> BTreeMap<Vec<bool>, Matrix> {
+        self.blocks
+            .iter()
+            .map(|(store, block)| {
+                let dim = self.quantum_dim;
+                let mut effect = Matrix::zero(dim);
+                for row in 0..dim {
+                    for col in 0..dim {
+                        let mut value = Scalar::zero();
+                        for output in 0..dim {
+                            value = value.add(block.get(output * dim + row, output * dim + col));
+                        }
+                        effect.set(row, col, value);
+                    }
+                }
+                (store.clone(), effect)
+            })
+            .collect()
+    }
+
     /// Compare exact entries, treating a missing block as zero. Returns the
     /// first differing classical store and matrix position, not a huge dump.
     pub fn compare(&self, other: &Self) -> Result<(), Difference> {

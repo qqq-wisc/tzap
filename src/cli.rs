@@ -502,7 +502,7 @@ fn print_help(ui: &Ui) {
         "    {bold}--to-pbc{reset}         Convert final circuit to PBC (-o output.pbc)\n"
     ));
     out.push_str(
-        "                     Full readout keeps classical results only; otherwise preserves quantum outputs.\n",
+        "                     Preserves quantum and classical outputs; retains named Clifford suffix.\n",
     );
     out.push_str(&format!(
         "    {bold}--decompose-cz{reset}   Decompose CZ gates into H+CX+H\n"

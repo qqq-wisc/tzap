@@ -263,7 +263,7 @@ fn prepare_output(ui: &Ui, run: &Run, circuit: &Circuit) -> Option<String> {
     // Conversion is terminal: optimization and requested decompositions have
     // already finished. Validate even when no output destination was requested.
     if run.to_pbc {
-        use tzap::pbc::{OutputSemantics, TextOptions, to_pbc};
+        use tzap::pbc::to_pbc;
         let pbc = to_pbc(circuit).unwrap_or_else(|e| {
             let hint = if circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
                 " Rz gates require --decompose-rz (or DecomposeRz in --passes)."
@@ -272,28 +272,9 @@ fn prepare_output(ui: &Ui, run: &Run, circuit: &Circuit) -> Option<String> {
             };
             ui.abort(&format!("Error converting to PBC: {e}.{hint}"))
         });
-        let mut measured = vec![false; circuit.num_qubits];
-        for gate in &circuit.gates {
-            if let Gate::measure { qubit, .. } = gate {
-                measured[*qubit as usize] = true;
-            }
-        }
-        let classical_only = !measured.is_empty() && measured.iter().all(|&m| m);
-        let options = TextOptions {
-            output_semantics: if classical_only {
-                OutputSemantics::Classical
-            } else {
-                OutputSemantics::Quantum
-            },
-            ..TextOptions::default()
-        };
-        ui.info(if classical_only {
-            "  Converting to PBC (classical outputs only)"
-        } else {
-            "  Converting to PBC (retaining quantum outputs)"
-        });
+        ui.info("  Converting to PBC (retaining quantum and classical outputs)");
         Some(
-            pbc.to_text_with(options)
+            pbc.to_text()
                 .unwrap_or_else(|e| ui.abort(&format!("Error exporting PBC: {e}"))),
         )
     } else {

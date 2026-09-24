@@ -312,6 +312,24 @@ fn pure_clifford_suffix_is_preserved_in_order() {
 }
 
 #[test]
+fn h_then_t_keeps_h_as_a_named_output_clifford() {
+    let output = check(&input(1, vec![Gate::h(0), Gate::t(0)]));
+    assert_eq!(output.output_cliffords(), &[Gate::h(0)]);
+    assert_eq!(output.operations().len(), 1);
+    let PbcOp::Rotate { axis, angle } = output.operations()[0] else {
+        panic!("expected an X-axis T rotation");
+    };
+    assert_eq!(angle, super::PauliAngle::new(1));
+    assert_eq!(
+        output.expand(axis.as_ref(), 100).unwrap(),
+        ExpandedPauli {
+            phase: Phase::One,
+            factors: vec![Pauli::X],
+        }
+    );
+}
+
+#[test]
 fn four_qubit_nonadjacent_gates_and_idle_wire() {
     check(&input(
         4,
@@ -456,6 +474,19 @@ fn reject_resets_and_any_gate_after_measurement() {
         }
     );
     c.num_cbits = 1;
+    for gates in [
+        vec![Gate::reset(0)],
+        vec![Gate::measure { qubit: 0, cbit: 0 }, Gate::reset(0)],
+    ] {
+        c.gates = gates;
+        assert_eq!(
+            to_pbc(&c).unwrap_err(),
+            PbcError::InvalidInput {
+                index: c.gates.len() - 1,
+                cause: Box::new(PbcError::UnsupportedGate(GateKind::Reset)),
+            }
+        );
+    }
     for gate in [Gate::h(0), Gate::x(0), Gate::t(0), Gate::sdg(0)] {
         c.gates = vec![Gate::measure { qubit: 0, cbit: 0 }, gate];
         assert_eq!(
