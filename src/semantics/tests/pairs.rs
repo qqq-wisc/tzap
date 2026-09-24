@@ -7,16 +7,16 @@ fn cx(control: u32, target: u32) -> Gate {
 }
 
 // Arguments: test name, qubit count, normal gates, (Pauli word, pi/8 units),
-// and optionally the Clifford suffix. Both interpreters must agree up to phase.
+// and optionally the output Clifford frame. Both interpreters must agree up to phase.
 macro_rules! pair {
     ($name:ident, $n:expr, $gates:expr, $rotations:expr) => {
         pair!($name, $n, $gates, $rotations, std::iter::empty::<Gate>());
     };
-    ($name:ident, $n:expr, $gates:expr, $rotations:expr, $suffix:expr) => {
+    ($name:ident, $n:expr, $gates:expr, $rotations:expr, $frame_gates:expr) => {
         #[test]
         fn $name() {
             let mut pbc = rotations($n, $rotations);
-            for gate in $suffix {
+            for gate in $frame_gates {
                 pbc.push_output_clifford(gate).unwrap();
             }
             check(&pbc, $gates);
@@ -253,7 +253,7 @@ pair!(
     ]
 );
 
-// Nonempty output frames: moving gates to the suffix changes rotation axes.
+// Nonempty output frames: moving gates into the frame changes rotation axes.
 pair!(
     x_then_t_retains_x_frame,
     1,

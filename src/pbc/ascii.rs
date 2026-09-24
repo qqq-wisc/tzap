@@ -1,5 +1,4 @@
 use super::{PbcCircuit, PbcError, PbcOp};
-use crate::circuit::{Gate, GateKind, qubit_operands};
 
 /// Explicit limits for the diagnostic renderer, which expands shared axes.
 #[derive(Clone, Copy, Debug)]
@@ -25,36 +24,11 @@ struct Column {
     wires: Vec<String>,
 }
 
-fn suffix_column(gate: &Gate, num_qubits: usize) -> Column {
-    let mut wires = vec![String::new(); num_qubits];
-    let label = match *gate {
-        Gate::cnot { control, target } => {
-            wires[control as usize] = "@".into();
-            wires[target as usize] = "[X]".into();
-            "CX".into()
-        }
-        Gate::cz { control, target } => {
-            wires[control as usize] = "@".into();
-            wires[target as usize] = "@".into();
-            "CZ".into()
-        }
-        _ => {
-            let label = match gate.kind() {
-                GateKind::Sdg => "Sdg".into(),
-                kind => kind.name().to_uppercase(),
-            };
-            let (_, [q, ..]) = qubit_operands(gate);
-            wires[q as usize] = format!("[{label}]");
-            label
-        }
-    };
-    Column { label, wires }
-}
-
 impl PbcCircuit {
-    /// Render operations left to right. Each column is one joint operation,
-    /// not independent single-qubit gates. Signs in headings apply to the
-    /// entire Pauli product. Classical destinations appear beside outcome IDs.
+    /// Render operations left to right, then changed output-frame rows.
+    /// Operation columns are joint operations, not independent single-qubit
+    /// gates. Frame columns show generator images, not executable gates.
+    /// Signs in headings apply to the entire Pauli product.
     pub fn to_ascii(&self) -> Result<String, PbcError> {
         self.to_ascii_with(AsciiOptions::default())
     }
@@ -62,13 +36,7 @@ impl PbcCircuit {
     /// Drawing is bounded, explicit materialization, not part of conversion's
     /// linear-time contract. Oversized circuits return an error, never truncate.
     pub fn to_ascii_with(&self, options: AsciiOptions) -> Result<String, PbcError> {
-        if self.num_qubits > options.max_qubits
-            || self
-                .operations
-                .len()
-                .saturating_add(self.output_cliffords.len())
-                > options.max_operations
-        {
+        if self.num_qubits > options.max_qubits || self.operations.len() > options.max_operations {
             return Err(PbcError::DrawingLimit);
         }
         // One heading plus wires and intervening connector rows (2Q for Q>0).
@@ -78,7 +46,7 @@ impl PbcCircuit {
             .ok_or(PbcError::DrawingLimit)?
             .max(1);
         let mut columns = Vec::new();
-        self.visit_axes(options.max_expansion_cells, |op, phase, factors| {
+        let used = self.visit_axes(options.max_expansion_cells, |op, phase, factors| {
             let identity = if factors.is_empty() { "I" } else { "" };
             let axis = format!("{phase}{identity}");
             let label = match op {
@@ -100,17 +68,34 @@ impl PbcCircuit {
             columns.push(Column { label, wires });
             Ok(())
         })?;
-        if !self.output_cliffords.is_empty() {
-            columns.push(Column {
-                label: "suffix".into(),
-                wires: vec!["|".into(); self.num_qubits],
-            });
+        self.visit_output_frame(
+            options.max_expansion_cells - used,
+            |is_z, q, phase, factors| {
+                let expected = if is_z {
+                    super::Pauli::Z
+                } else {
+                    super::Pauli::X
+                };
+                if phase == super::Phase::One
+                    && factors.len() == 1
+                    && factors.get(&q) == Some(&expected)
+                {
+                    return Ok(());
+                }
+                let mut wires = vec![String::new(); self.num_qubits];
+                for (&qubit, pauli) in factors {
+                    wires[qubit as usize] = format!("[{pauli}]");
+                }
+                columns.push(Column {
+                    label: format!("{}{}->{phase}", if is_z { 'Z' } else { 'X' }, q),
+                    wires,
+                });
+                Ok(())
+            },
+        )?;
+        if columns.len() > options.max_operations {
+            return Err(PbcError::DrawingLimit);
         }
-        columns.extend(
-            self.output_cliffords
-                .iter()
-                .map(|gate| suffix_column(gate, self.num_qubits)),
-        );
         if columns.is_empty() && self.num_qubits == 0 {
             return Ok("(empty PBC circuit; 0 qubits)\n".into());
         }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::circuit::GateKind;
-use crate::pbc::{ExpandedPauli, Pauli};
+use crate::pbc::{ExpandedPauli, Pauli, Phase};
 use crate::semantics::test_support::assert_equivalent;
 
 mod fuzz;
@@ -87,9 +87,9 @@ fn litinski_four_wire_rotation_commutation_example() {
         .filter(|g| !matches!(g, Gate::t(_) | Gate::tdg(_)))
         .cloned()
         .collect();
-    assert_eq!(converted.output_cliffords(), skeleton);
-    for gate in skeleton {
-        pictured.push_output_clifford(gate).unwrap();
+    assert!(converted.frame_matches_gates(&skeleton));
+    for gate in &skeleton {
+        pictured.push_output_clifford(gate.clone()).unwrap();
     }
     // Exact operator equality (up to global phase) before the common final
     // measurements establishes equality after those measurements as well.
@@ -102,7 +102,7 @@ fn litinski_four_wire_rotation_commutation_example() {
     }
     let output = to_pbc(&measured).unwrap();
     assert_eq!(output.operations().len(), 8);
-    assert_eq!(output.output_cliffords(), converted.output_cliffords());
+    assert!(output.frame_matches_gates(&skeleton));
     // Check terminal measurement signs and retained quantum outputs via exact
     // channels, one readout at a time to bound dense Choi storage.
     use crate::semantics::channel::{ChannelLimits, circuit_channel, pbc_channel};
@@ -136,7 +136,7 @@ fn check(input: &Circuit) -> PbcCircuit {
 fn assert_linear_size(input: &Circuit, output: &PbcCircuit) {
     assert!(output.pauli_nodes().len() <= 1 + 2 * input.num_qubits + 4 * input.gates.len());
     assert!(output.operations().len() <= 7 * input.gates.len());
-    assert!(output.output_cliffords().len() <= input.gates.len());
+    assert_eq!(output.output_frame().len(), input.num_qubits);
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn empty_circuits_and_typed_pass() {
         let output = check(&c);
         assert_eq!(output.pauli_nodes().len(), 1 + 2 * n);
         assert!(output.operations().is_empty());
-        assert!(output.output_cliffords().is_empty());
+        assert!(output.frame_matches_gates(&[]));
         let pass: &dyn Pass<Result<PbcCircuit, PbcError>> = &ToPbc;
         assert_eq!(pass.name(), "ToPbc");
         assert_equivalent(&c, &pass.run(&c).unwrap());
@@ -288,7 +288,7 @@ fn native_lowering_agrees_with_existing_gate_decomposition() {
 }
 
 #[test]
-fn pure_clifford_suffix_is_preserved_in_order() {
+fn pure_clifford_sequence_is_preserved_by_frame() {
     let c = input(
         3,
         vec![
@@ -309,13 +309,13 @@ fn pure_clifford_suffix_is_preserved_in_order() {
     );
     let output = check(&c);
     assert!(output.operations().is_empty());
-    assert_eq!(output.output_cliffords(), c.gates);
+    assert!(output.frame_matches_gates(&c.gates));
 }
 
 #[test]
-fn h_then_t_keeps_h_as_a_named_output_clifford() {
+fn h_then_t_keeps_h_as_an_output_frame() {
     let output = check(&input(1, vec![Gate::h(0), Gate::t(0)]));
-    assert_eq!(output.output_cliffords(), &[Gate::h(0)]);
+    assert!(output.frame_matches_gates(&[Gate::h(0)]));
     assert_eq!(output.operations().len(), 1);
     let PbcOp::Rotate { axis, angle } = output.operations()[0] else {
         panic!("expected an X-axis T rotation");
@@ -425,7 +425,7 @@ fn emitted_axes_are_snapshots_not_mutable_frame_entries() {
 }
 
 #[test]
-fn terminal_measurements_preserve_suffix_and_immutable_outcomes() {
+fn terminal_measurements_preserve_frame_and_immutable_outcomes() {
     let c = Circuit {
         num_qubits: 2,
         num_cbits: 1,
@@ -442,7 +442,7 @@ fn terminal_measurements_preserve_suffix_and_immutable_outcomes() {
     let output = to_pbc(&c).unwrap();
     assert_eq!(output.measurement_count(), 2);
     assert_eq!(output.operations().len(), 2);
-    assert_eq!(output.output_cliffords(), &c.gates[..2]);
+    assert!(output.frame_matches_gates(&c.gates[..2]));
     for (index, op) in output.operations().iter().enumerate() {
         let PbcOp::Measure {
             outcome,
@@ -583,7 +583,7 @@ fn growing_parity_uses_linear_nodes_not_quadratic_strings() {
         let output = to_pbc(&c).unwrap();
         assert_eq!(output.pauli_nodes().len(), 1 + 2 * n + 2 * (n - 1));
         assert_eq!(output.operations().len(), n - 1);
-        assert_eq!(output.output_cliffords().len(), n - 1);
+        assert_eq!(output.output_frame().len(), n);
         assert_linear_size(&c, &output);
         // Only the tiny instance is expanded; its supports grow 2,3,...,n.
         if n == 8 {
@@ -614,7 +614,7 @@ fn long_native_stream_has_fixed_cost_per_gate() {
     let output = to_pbc(&c).unwrap();
     assert_eq!(output.pauli_nodes().len(), 7 + 4 * c.gates.len());
     assert_eq!(output.operations().len(), 7 * c.gates.len());
-    assert!(output.output_cliffords().is_empty());
+    assert!(output.frame_matches_gates(&[]));
     assert_linear_size(&c, &output);
 }
 

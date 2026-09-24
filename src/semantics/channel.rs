@@ -303,7 +303,7 @@ pub(crate) fn circuit_channel(
     Ok(finish(dim, circuit.num_cbits, branches))
 }
 
-/// PBC semantics for rotations and measurements, followed by any internal suffix.
+/// PBC semantics for rotations and measurements, followed by its output frame.
 /// Preserves all quantum outputs; only internal measurement histories are hidden.
 pub(crate) fn pbc_channel(
     circuit: &PbcCircuit,
@@ -313,7 +313,7 @@ pub(crate) fn pbc_channel(
     let operations = circuit
         .operations()
         .len()
-        .checked_add(circuit.output_cliffords().len())
+        .checked_add(circuit.num_qubits().saturating_mul(2))
         .ok_or(Error::LimitExceeded)?;
     if operations > limits.matrices.max_operations {
         return Err(Error::LimitExceeded);
@@ -363,12 +363,7 @@ pub(crate) fn pbc_channel(
             PbcOp::ConditionalRotate { .. } => unreachable!("validated above"),
         }
     }
-    for (i, gate) in circuit.output_cliffords().iter().enumerate() {
-        apply(
-            &mut branches,
-            &gate_matrix(circuit.num_qubits(), gate, circuit.operations().len() + i)?,
-        );
-    }
+    apply(&mut branches, &frame_unitary(circuit, &values, dim)?);
     Ok(finish(dim, circuit.num_cbits(), branches))
 }
 

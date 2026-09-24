@@ -121,7 +121,7 @@ tzap input.qasm --to-pbc -o output.pbc
 Conversion runs last, after optimization and requested decompositions. Inputs
 must have no resets and only terminal measurements; use `--decompose-rz` for Rz.
 Export preserves all quantum and classical outputs, including post-measurement
-states. The entire remaining Clifford suffix is retained as named gates,
+states. The entire remaining Clifford action is retained as a Pauli-generator frame,
 whether none, some, or all qubits are measured. For example,
 `h q[0]; cx q[0],q[1]; t q[1]; measure q[1] -> c[0];` exports as:
 
@@ -130,15 +130,17 @@ qubits 2
 registers 1
 r 1 1 X0 Z1
 m 1 X0 Z1 -> c0
-h 0
-cx 0 1
+frame X0 1 Z0 X1
+frame Z0 1 X0
+frame Z1 1 X0 Z1
 ```
 
 `r <k> <sign> <factors>` rotates by `k*pi/8` using `exp(-i*k*pi/8*P)`.
 `m <sign> <factors> -> cN` measures the signed Pauli product: +1 gives bit 0,
 -1 gives bit 1. Signs are `1` or `-1`; omitted factors are identity (an empty
-list is the identity). Register writes may overwrite earlier values. Named
-Clifford gates follow the `r` and `m` instructions to restore quantum outputs.
+list is the identity). Register writes may overwrite earlier values. Trailing
+`frame` records encode `C†XqC` and `C†ZqC` for the output Clifford C; omitted
+identity rows are implicit. This frame preserves quantum outputs.
 `-o -` writes PBC to stdout. JSON metrics describe the optimized gate circuit
 before conversion.
 Export materializes Pauli strings with a default budget of 16 million sparse-work units;

@@ -179,12 +179,12 @@ fn conditional_rotations_reject_invalid_handles_without_appending() {
 }
 
 #[test]
-fn suffix_and_operands_are_validated() {
+fn output_frame_gates_and_operands_are_validated() {
     let mut c = PbcCircuit::new(2, 0);
     assert_eq!(c.x(2), Err(PbcError::QubitOutOfRange(2)));
     assert_eq!(
         c.push_output_clifford(Gate::t(0)),
-        Err(PbcError::NonCliffordSuffix)
+        Err(PbcError::NonCliffordFrameGate)
     );
     assert_eq!(
         c.push_output_clifford(Gate::h(2)),
@@ -214,8 +214,8 @@ fn suffix_and_operands_are_validated() {
     ] {
         c.push_output_clifford(gate).unwrap();
     }
-    assert_eq!(c.output_cliffords().len(), 7);
-    assert!(c.to_ascii().unwrap().contains("suffix"));
+    assert_eq!(c.output_frame().len(), 2);
+    assert!(c.to_ascii().unwrap().contains("X0->"));
 }
 
 #[test]
@@ -226,14 +226,14 @@ fn shared_deep_dag_expands_and_drops_without_recursion() {
     for _ in 0..20_000 {
         p = c.product(p, p).unwrap();
     }
-    assert_eq!(c.pauli_nodes().len(), 20_002);
+    assert_eq!(c.pauli_nodes().len(), 20_004);
     assert_eq!(c.expand(p, 20_004), Err(PbcError::ExpansionLimit));
     assert_eq!(c.expand(p, 20_005).unwrap().factors, vec![Pauli::I]);
     assert_eq!(c.expand(x.as_ref(), 4).unwrap().factors, vec![Pauli::X]);
 }
 
 #[test]
-fn ascii_shows_joint_axes_outcomes_and_suffix() {
+fn ascii_shows_joint_axes_outcomes_and_frame() {
     let mut c = PbcCircuit::new(3, 1);
     let x = c.x(0).unwrap();
     let z = c.z(2).unwrap();
@@ -248,7 +248,7 @@ fn ascii_shows_joint_axes_outcomes_and_suffix() {
     assert!(drawing.contains("R(pi/8,+)"));
     assert!(drawing.contains("M(-)->m0/c0"));
     assert!(drawing.contains("R(pi/2,+) if m0=1"));
-    assert!(drawing.contains("suffix"));
+    assert!(drawing.contains("X1->"));
     let lines: Vec<_> = drawing.lines().collect();
     let x_column = lines[1].find('X').unwrap();
     assert_eq!(lines[2].as_bytes()[x_column], b'|');
@@ -280,13 +280,7 @@ fn ascii_limits_and_identity_are_explicit() {
         PbcCircuit::new(33, 0).to_ascii(),
         Err(PbcError::DrawingLimit)
     );
-    assert_eq!(
-        PbcCircuit::new(usize::MAX, 0).to_ascii_with(AsciiOptions {
-            max_qubits: usize::MAX,
-            ..AsciiOptions::default()
-        }),
-        Err(PbcError::DrawingLimit)
-    );
+    assert!(std::panic::catch_unwind(|| PbcCircuit::new(usize::MAX, 0)).is_err());
 }
 
 #[test]
@@ -306,22 +300,22 @@ fn ascii_cx_with_t_on_each_wire_aligns_all_connectors() {
     let drawing = to_pbc(&input).unwrap().to_ascii().unwrap();
     let rows: Vec<_> = drawing.lines().collect();
     let joint_axis = rows[1].rfind('Z').unwrap();
-    let suffix = rows[1].find('|').unwrap();
-    let cx = rows[1].find('@').unwrap();
-    for column in [joint_axis, suffix, cx] {
+    let frame_x = rows[1].find('X').unwrap();
+    let frame_z = rows[1].rfind('Z').unwrap();
+    for column in [joint_axis, frame_x, frame_z] {
         assert_eq!(rows[2].as_bytes()[column], b'|', "{drawing}");
     }
     assert_eq!(rows[3].as_bytes()[joint_axis], b'Z');
-    assert_eq!(rows[3].as_bytes()[suffix], b'|');
-    assert_eq!(rows[3].as_bytes()[cx], b'X');
+    assert_eq!(rows[3].as_bytes()[frame_x], b'X');
+    assert_eq!(rows[3].as_bytes()[frame_z], b'Z');
     assert_eq!(rows[1].len(), rows[3].len());
     assert_eq!(
         drawing,
         concat!(
-            "     R(pi/8,+)  R(pi/8,+)  suffix   CX\n",
-            "q0: ----[Z]--------[Z]-------|-------@---\n",
-            "                    |        |       |\n",
-            "q1: ---------------[Z]-------|------[X]--\n",
+            "     R(pi/8,+)  R(pi/8,+)  X0->+  Z1->+\n",
+            "q0: ----[Z]--------[Z]------[X]----[Z]--\n",
+            "                    |        |      |\n",
+            "q1: ---------------[Z]------[X]----[Z]--\n",
         )
     );
 }

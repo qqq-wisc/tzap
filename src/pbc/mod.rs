@@ -1,7 +1,7 @@
 //! Logical Pauli-based circuits with shared, exact Pauli expressions.
 //!
-//! Circuit construction does not simulate outcomes. The Clifford suffix is
-//! executed after the PBC operations and preserves the quantum output frame.
+//! Circuit construction does not simulate outcomes. A complete Clifford frame
+//! records the output action after the PBC operations.
 //! Rotation angles use `exp(-i * k*pi/8 * P)`, unlike QASM's half-angle convention.
 //!
 //! ```
@@ -20,11 +20,13 @@
 
 mod ascii;
 mod convert;
+mod frame;
 mod pauli;
 mod text;
 
 pub use ascii::AsciiOptions;
 pub use convert::{ToPbc, to_pbc};
+pub use frame::CliffordFrame;
 pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
 pub use text::TextOptions;
 
@@ -144,7 +146,7 @@ pub enum PbcError {
     ForeignPauli,
     UnknownMeasurement,
     NonHermitianAxis,
-    NonCliffordSuffix,
+    NonCliffordFrameGate,
     RepeatedOperand,
     ExpansionLimit,
     DrawingLimit,
@@ -169,7 +171,7 @@ impl fmt::Display for PbcError {
             Self::NonHermitianAxis => {
                 f.write_str("rotation and measurement axes must be Hermitian")
             }
-            Self::NonCliffordSuffix => f.write_str("output suffix only accepts Clifford gates"),
+            Self::NonCliffordFrameGate => f.write_str("output frame only accepts Clifford gates"),
             Self::RepeatedOperand => f.write_str("gate operands must be distinct"),
             Self::ExpansionLimit => f.write_str("Pauli expansion exceeds the cell budget"),
             Self::DrawingLimit => f.write_str("circuit exceeds the ASCII drawing limits"),
@@ -201,18 +203,26 @@ pub struct PbcCircuit {
     num_cbits: usize,
     arena: PauliArena,
     operations: Vec<PbcOp>,
-    output_cliffords: Vec<Gate>,
+    output_frame: CliffordFrame,
     measurements: usize,
 }
 
 impl PbcCircuit {
+    /// # Panics
+    /// Panics if `num_qubits` exceeds the supported `u32` qubit-ID range.
     pub fn new(num_qubits: usize, num_cbits: usize) -> Self {
+        assert!(
+            u32::try_from(num_qubits).is_ok(),
+            "PBC qubit count exceeds u32 range"
+        );
+        let mut arena = PauliArena::new();
+        let output_frame = CliffordFrame::identity(&mut arena, num_qubits);
         Self {
             num_qubits,
             num_cbits,
-            arena: PauliArena::new(),
+            arena,
             operations: Vec::new(),
-            output_cliffords: Vec::new(),
+            output_frame,
             measurements: 0,
         }
     }
@@ -228,8 +238,28 @@ impl PbcCircuit {
     pub fn pauli_nodes(&self) -> &[PauliNode] {
         &self.arena.nodes
     }
-    pub fn output_cliffords(&self) -> &[Gate] {
-        &self.output_cliffords
+    pub fn output_frame(&self) -> &CliffordFrame {
+        &self.output_frame
+    }
+    #[cfg(test)]
+    pub(crate) fn frame_matches_gates(&self, gates: &[Gate]) -> bool {
+        let mut expected = Self::new(self.num_qubits, self.num_cbits);
+        for gate in gates {
+            if expected.push_output_clifford(gate.clone()).is_err() {
+                return false;
+            }
+        }
+        (0..self.num_qubits as u32).all(|q| {
+            [self.output_frame.x(q), self.output_frame.z(q)]
+                .into_iter()
+                .zip([expected.output_frame.x(q), expected.output_frame.z(q)])
+                .all(
+                    |(a, b)| match (self.expand(a, 1_000_000), expected.expand(b, 1_000_000)) {
+                        (Ok(a), Ok(b)) => a == b,
+                        _ => false,
+                    },
+                )
+        })
     }
     pub fn measurement_count(&self) -> usize {
         self.measurements
@@ -358,14 +388,14 @@ impl PbcCircuit {
         self.conditional_rotate(axis, PauliAngle::new(4), if_one)
     }
 
-    /// Append a gate to the suffix executed after all PBC operations, regardless
-    /// of the order in which the builder's methods are called.
+    /// Compose a Clifford gate into the terminal output frame, regardless of
+    /// the order in which the builder's methods are called.
     pub fn push_output_clifford(&mut self, gate: Gate) -> Result<(), PbcError> {
-        if !is_suffix_gate(&gate) {
-            return Err(PbcError::NonCliffordSuffix);
+        if !is_output_clifford(&gate) {
+            return Err(PbcError::NonCliffordFrameGate);
         }
         check_operands(&gate, self.num_qubits)?;
-        self.output_cliffords.push(gate);
+        self.output_frame.append(&mut self.arena, &gate);
         Ok(())
     }
 
@@ -375,18 +405,40 @@ impl PbcCircuit {
         &self,
         max_work: usize,
         mut visit: impl FnMut(&PbcOp, Phase, &Factors) -> Result<(), PbcError>,
-    ) -> Result<(), PbcError> {
+    ) -> Result<usize, PbcError> {
         let roots: Vec<_> = self.operations.iter().map(|op| op.axis().0).collect();
-        self.arena
+        let stats = self
+            .arena
             .materialize(&roots, max_work, |index, phase, factors| {
                 visit(&self.operations[index], phase, factors)
             })?;
-        Ok(())
+        Ok(stats.work)
+    }
+
+    /// Visit the stored images C†XqC, then C†ZqC, in canonical order.
+    pub(crate) fn visit_output_frame(
+        &self,
+        max_work: usize,
+        mut visit: impl FnMut(bool, u32, Phase, &Factors) -> Result<(), PbcError>,
+    ) -> Result<usize, PbcError> {
+        let roots: Vec<_> = self.output_frame.roots().collect();
+        let stats = self
+            .arena
+            .materialize(&roots, max_work, |index, phase, factors| {
+                let n = self.num_qubits;
+                let (is_z, q) = if index < n {
+                    (false, index)
+                } else {
+                    (true, index - n)
+                };
+                visit(is_z, q as u32, phase, factors)
+            })?;
+        Ok(stats.work)
     }
 }
 
-/// The Clifford gates allowed in the output suffix.
-fn is_suffix_gate(gate: &Gate) -> bool {
+/// The Clifford gates allowed in the output frame.
+fn is_output_clifford(gate: &Gate) -> bool {
     use GateKind::*;
     matches!(gate.kind(), H | X | Z | S | Sdg | Cx | Cz)
 }

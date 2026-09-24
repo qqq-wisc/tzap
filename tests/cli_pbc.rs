@@ -36,22 +36,22 @@ fn documented_measurement_examples_match_cli_output() {
         (
             1,
             "h q[0];\nmeasure q[0] -> c[0];",
-            "qubits 1\nregisters 1\nm 1 X0 -> c0\nh 0\n",
+            "qubits 1\nregisters 1\nm 1 X0 -> c0\nframe X0 1 Z0\nframe Z0 1 X0\n",
         ),
         (
             1,
             "x q[0];\nmeasure q[0] -> c[0];",
-            "qubits 1\nregisters 1\nm -1 Z0 -> c0\nx 0\n",
+            "qubits 1\nregisters 1\nm -1 Z0 -> c0\nframe Z0 -1 Z0\n",
         ),
         (
             1,
             "h q[0];\nt q[0];\nh q[0];\nmeasure q[0] -> c[0];",
-            "qubits 1\nregisters 1\nr 1 1 X0\nm 1 Z0 -> c0\nh 0\nh 0\n",
+            "qubits 1\nregisters 1\nr 1 1 X0\nm 1 Z0 -> c0\n",
         ),
         (
             2,
             "h q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];",
-            "qubits 2\nregisters 2\nm 1 X0 -> c0\nm 1 X0 Z1 -> c1\nh 0\ncx 0 1\n",
+            "qubits 2\nregisters 2\nm 1 X0 -> c0\nm 1 X0 Z1 -> c1\nframe X0 1 Z0 X1\nframe Z0 1 X0\nframe Z1 1 X0 Z1\n",
         ),
     ] {
         assert!(doc.contains(&format!("```text\n{expected}```")));
@@ -60,12 +60,12 @@ fn documented_measurement_examples_match_cli_output() {
     for (body, expected, text) in [
         (
             "h q[0];\ncx q[0],q[1];\nmeasure q[1] -> c[0];",
-            "qubits 2\nregisters 1\nm 1 X0 Z1 -> c0\nh 0\ncx 0 1\n",
+            "qubits 2\nregisters 1\nm 1 X0 Z1 -> c0\nframe X0 1 Z0 X1\nframe Z0 1 X0\nframe Z1 1 X0 Z1\n",
             doc,
         ),
         (
             "h q[0];\ncx q[0],q[1];\nt q[1];\nmeasure q[1] -> c[0];",
-            "qubits 2\nregisters 1\nr 1 1 X0 Z1\nm 1 X0 Z1 -> c0\nh 0\ncx 0 1\n",
+            "qubits 2\nregisters 1\nr 1 1 X0 Z1\nm 1 X0 Z1 -> c0\nframe X0 1 Z0 X1\nframe Z0 1 X0\nframe Z1 1 X0 Z1\n",
             readme,
         ),
     ] {
@@ -82,17 +82,20 @@ fn multiple_registers_are_numbered_in_declaration_order() {
                   creg x[1];\ncreg y[2];\nh b[1];\nmeasure b[1] -> y[1];\nmeasure a[0] -> x[0];\n";
     assert_eq!(
         convert(source),
-        "qubits 3\nregisters 3\nm 1 X2 -> c2\nm 1 Z0 -> c0\nh 2\n"
+        "qubits 3\nregisters 3\nm 1 X2 -> c2\nm 1 Z0 -> c0\nframe X2 1 Z2\nframe Z2 1 X2\n"
     );
 }
 
 #[test]
-fn stdout_has_only_pbc_and_full_readout_retains_suffix() {
+fn stdout_has_only_pbc_and_full_readout_retains_frame() {
     let run = Tzap::new(&["-", "-o", "-", "--to-pbc", "--passes", "CancelGates"])
         .stdin(&qasm(1, "h q[0];\nmeasure q[0] -> c[0];"))
         .run()
         .ok("full readout");
-    assert_eq!(run.stdout, "qubits 1\nregisters 1\nm 1 X0 -> c0\nh 0\n");
+    assert_eq!(
+        run.stdout,
+        "qubits 1\nregisters 1\nm 1 X0 -> c0\nframe X0 1 Z0\nframe Z0 1 X0\n"
+    );
     assert!(
         run.stderr
             .contains("retaining quantum and classical outputs")
@@ -100,7 +103,7 @@ fn stdout_has_only_pbc_and_full_readout_retains_suffix() {
 }
 
 #[test]
-fn partial_repeated_and_absent_readout_keep_named_cliffords() {
+fn partial_repeated_and_absent_readout_keep_frames() {
     for body in [
         "h q[0];",
         "h q[0];\nmeasure q[0] -> c[0];",
@@ -118,7 +121,7 @@ fn partial_repeated_and_absent_readout_keep_named_cliffords() {
         .stdin(&qasm(2, body))
         .run()
         .ok("partial readout");
-        assert!(run.stdout.ends_with("h 0\n"));
+        assert!(run.stdout.ends_with("frame X0 1 Z0\nframe Z0 1 X0\n"));
         assert!(!run.stdout.contains("suffix"));
         assert!(run.stderr.is_empty());
     }
@@ -137,7 +140,10 @@ fn conversion_runs_after_optimization_and_custom_decomposition() {
     .stdin(&qasm(2, "h q[0];\nh q[0];\ncz q[0],q[1];"))
     .run()
     .ok("final transformation");
-    assert_eq!(run.stdout, "qubits 2\nregisters 2\nh 1\ncx 0 1\nh 1\n");
+    assert_eq!(
+        run.stdout,
+        "qubits 2\nregisters 2\nframe X0 1 X0 Z1\nframe X1 1 Z0 X1\n"
+    );
 }
 
 #[test]
@@ -167,7 +173,7 @@ fn native_ccx_ccz_and_cz_export_without_decomposition_flags() {
             .count(),
         14
     );
-    assert!(run.stdout.ends_with("cz 0 1\n"));
+    assert!(run.stdout.ends_with("frame X0 1 X0 Z1\nframe X1 1 Z0 X1\n"));
     assert!(run.stdout.contains("r 1 1 Z0 Z1 X2\n"));
     assert!(run.stdout.contains("r 1 1 Z0 Z1 Z2\n"));
 }
@@ -208,7 +214,7 @@ fn file_output_json_and_errors_preserve_stream_contract() {
     assert!(run.stdout.trim_start().starts_with('{'));
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "qubits 1\nregisters 1\nm -1 Z0 -> c0\nx 0\n"
+        "qubits 1\nregisters 1\nm -1 Z0 -> c0\nframe Z0 -1 Z0\n"
     );
     Tzap::new(&[
         "-",
@@ -223,7 +229,7 @@ fn file_output_json_and_errors_preserve_stream_contract() {
     .failed("no overwrite on conversion failure");
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "qubits 1\nregisters 1\nm -1 Z0 -> c0\nx 0\n"
+        "qubits 1\nregisters 1\nm -1 Z0 -> c0\nframe Z0 -1 Z0\n"
     );
     Tzap::new(&["-", "-o", "-", "--to-pbc", "--json"])
         .run()

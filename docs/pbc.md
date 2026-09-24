@@ -24,19 +24,13 @@ registers 2
 
 Qubit IDs and register IDs start at zero. Multiple QASM `qreg`s or `creg`s are
 numbered consecutively in declaration order, so with `creg a[1]; creg b[2];`,
-`b[1]` becomes `c2`. The remaining lines are instructions, executed from top to
-bottom:
+`b[1]` becomes `c2`. The remaining lines contain operations in execution
+order, followed by frame records:
 
 ```text
 r <k> <sign> <Pauli factors>
 m <sign> <Pauli factors> -> c<register ID>
-h <qubit ID>
-x <qubit ID>
-z <qubit ID>
-s <qubit ID>
-sdg <qubit ID>
-cx <control ID> <target ID>
-cz <qubit ID> <qubit ID>
+frame <Xq or Zq> <sign> <Pauli factors>
 ```
 
 - `r` applies `exp(-i * k*pi/8 * P)`, where `k` is an integer and `P` is the
@@ -51,9 +45,13 @@ cz <qubit ID> <qubit ID>
 - All factors on a line form **one joint operation**, not separate operations.
 - Measurements write directly to registers such as `c0`. A later write to the
   same register overwrites its value. There are no separate measurement IDs.
-- Named Clifford gates form a trailing block after all `r` and `m` instructions.
-  Their operands are bare zero-based qubit IDs. They are executed in order, not
-  annotations; `cx` lists its control first. The block needs no section marker.
+- `frame` records specify the complete output Clifford C by giving its images
+  `C† Xq C` and `C† Zq C`. They are not individual gates. The Clifford C acts
+  after all `r` and `m` operations and is unique up to global phase.
+  An omitted row means the identity image (`Xq` or `Zq` with sign `1`).
+  Export writes changed X rows in increasing q order, then changed Z rows in
+  increasing q order. The rows must collectively describe a valid Clifford
+  action; their signs are `1` or `-1`.
 
 For example, `r 1 -1 X0 Z2` rotates by pi/8 about `-X0 Z2` (equivalently, by
 -pi/8 about `X0 Z2`), and
@@ -70,21 +68,21 @@ Rz decomposition is separate from this exact conversion.
 
 Measurements are nondestructive projective measurements. Conversion conjugates
 their axes by the accumulated Clifford frame, then retains the **entire** frame
-as named Clifford gates after the measurements. These gates restore the quantum
-output states; deleting them generally preserves only classical probabilities,
-not the full channel. No qubits or Clifford suffixes are automatically discarded,
-even when every input qubit is measured. Circuits without measurements retain
-their suffix too.
+as terminal `frame` records. Applying the represented Clifford restores the
+quantum output states; discarding it generally preserves only classical
+probabilities, not the full channel. No qubits or frame information are
+automatically discarded, even when every input qubit is measured. Circuits
+without measurements retain their frame too.
 
-The terminal-measurement restriction applies to the gate-circuit input. Exported
-Clifford gates may follow measurements to preserve the output states. Resets,
+The terminal-measurement restriction applies to the gate-circuit input. The
+output Clifford represented by the frame acts after measurements. Resets,
 hidden measurement outcomes, and conditional operations are not supported by
 this exchange format.
 
 ## Examples with terminal input measurements
 
 These examples give the direct transformation; optimization may simplify a
-circuit further. The exported suffix preserves quantum outputs as well as the
+circuit further. The exported frame preserves quantum outputs as well as the
 classical results.
 
 ### H followed by measurement
@@ -95,10 +93,11 @@ Input: `H q0; measure q0 -> c0`.
 qubits 1
 registers 1
 m 1 X0 -> c0
-h 0
+frame X0 1 Z0
+frame Z0 1 X0
 ```
 
-H changes the measurement axis from Z to X; the final H restores the output state.
+H changes the measurement axis from Z to X; the frame represents that final H.
 
 ### X followed by measurement
 
@@ -108,10 +107,10 @@ Input: `X q0; measure q0 -> c0`.
 qubits 1
 registers 1
 m -1 Z0 -> c0
-x 0
+frame Z0 -1 Z0
 ```
 
-X reverses the Z-measurement result; the final X restores the output state.
+X reverses the Z-measurement result; the frame represents that final X.
 
 ### A T rotation between two H gates
 
@@ -122,12 +121,10 @@ qubits 1
 registers 1
 r 1 1 X0
 m 1 Z0 -> c0
-h 0
-h 0
 ```
 
 The T gate becomes an X-axis rotation, followed by Z measurement. The two
-retained H gates cancel; the converter does not simplify the suffix.
+H gates cancel in the frame, so no `frame` records are needed.
 
 ### Bell preparation and readout
 
@@ -138,13 +135,14 @@ qubits 2
 registers 2
 m 1 X0 -> c0
 m 1 X0 Z1 -> c1
-h 0
-cx 0 1
+frame X0 1 Z0 X1
+frame Z0 1 X0
+frame Z1 1 X0 Z1
 ```
 
 For input `|00>`, the classical outputs are `00` and `11`, each with probability
 one half. The second instruction measures the joint product `X0 Z1`.
-The suffix restores the corresponding quantum outputs `|00>` and `|11>`.
+The frame restores the corresponding quantum outputs `|00>` and `|11>`.
 
 ### Partial readout
 
@@ -154,9 +152,10 @@ Input: `H q0; CX q0 -> q1; measure q1 -> c0` (one classical register).
 qubits 2
 registers 1
 m 1 X0 Z1 -> c0
-h 0
-cx 0 1
+frame X0 1 Z0 X1
+frame Z0 1 X0
+frame Z1 1 X0 Z1
 ```
 
-Both Cliffords remain, including the entangling CX. The state on unmeasured q0,
+The frame represents both Cliffords, including the entangling CX. The state on unmeasured q0,
 the state on measured q1, and their correlations with c0 are preserved.

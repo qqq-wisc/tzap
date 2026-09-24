@@ -260,7 +260,7 @@ fn cx_then_target_t_keeps_cx_in_the_output_frame() {
 }
 
 #[test]
-fn commuting_layers_remain_equivalent_with_a_common_suffix() {
+fn commuting_layers_remain_equivalent_with_a_common_frame() {
     let mut a = rotations(2, &[("XX", 1), ("ZZ", -1)]);
     let mut b = rotations(2, &[("ZZ", -1), ("XX", 1)]);
     for gate in [
@@ -437,13 +437,13 @@ fn all_two_qubit_strings_angles_and_signs_match_parity_circuits() {
 }
 
 #[test]
-fn joint_axes_and_suffix_order() {
+fn joint_axes_and_frame_order() {
     let mut c = PbcCircuit::new(3, 0);
     let z0 = c.z(0).unwrap();
     let z2 = c.z(2).unwrap();
     let product = c.product(z0.as_ref(), z2.as_ref()).unwrap();
     let axis = c.hermitian_axis(product, 100).unwrap();
-    // Builder call order does not move the suffix before rotations.
+    // Builder call order does not move the output frame before rotations.
     c.push_output_clifford(Gate::h(0)).unwrap();
     c.rotate(axis, PauliAngle::new(1)).unwrap();
     let cx = Gate::cnot {
@@ -554,8 +554,8 @@ fn gate_oracle_matches_existing_independent_numeric_interpreter() {
 }
 
 #[test]
-fn all_suffix_gates_have_unitary_semantics() {
-    let suffix = vec![
+fn all_output_frame_gates_have_unitary_semantics() {
+    let frame_gates = vec![
         Gate::h(0),
         Gate::x(1),
         Gate::z(0),
@@ -571,10 +571,10 @@ fn all_suffix_gates_have_unitary_semantics() {
         },
     ];
     let mut c = PbcCircuit::new(2, 0);
-    for g in &suffix {
+    for g in &frame_gates {
         c.push_output_clifford(g.clone()).unwrap();
     }
-    check(&c, suffix);
+    check(&c, frame_gates);
 }
 
 #[test]
@@ -624,7 +624,7 @@ fn nonunitary_and_unsupported_input_is_rejected() {
 #[test]
 fn limits_fail_before_dense_allocation() {
     assert_eq!(
-        pbc_unitary(&PbcCircuit::new(usize::MAX, 0), Limits::default()),
+        pbc_unitary(&PbcCircuit::new(6, 0), Limits::default()),
         Err(Error::LimitExceeded)
     );
     let mut c = PbcCircuit::new(1, 0);

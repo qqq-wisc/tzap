@@ -8,7 +8,7 @@
 //! [`channel`] extends this to exact quantum-classical maps with terminal
 //! measurements, for an explicit initial classical store and arbitrary quantum
 //! input. Gate inputs reject resets and mid-circuit measurements; PBC outputs
-//! may have rotations after measurement to restore their quantum output frame.
+//! retain a terminal Clifford frame to restore their quantum output state.
 
 pub(crate) mod channel;
 mod matrix;
@@ -217,8 +217,87 @@ fn referenced_nodes(circuit: &PbcCircuit) -> usize {
         .operations()
         .iter()
         .map(|op| op.axis().as_ref().node_index() + 1)
+        .chain((0..circuit.output_frame().len()).flat_map(|q| {
+            let q = q as u32;
+            [
+                circuit.output_frame().x(q).node_index() + 1,
+                circuit.output_frame().z(q).node_index() + 1,
+            ]
+        }))
         .max()
         .unwrap_or(0)
+}
+
+/// Apply a Pauli matrix to a state vector. Each column has one nonzero entry.
+fn pauli_on_state(matrix: &Matrix, state: &[Scalar]) -> Vec<Scalar> {
+    let mut result = vec![Scalar::zero(); matrix.dim];
+    for (col, amplitude) in state.iter().enumerate() {
+        if amplitude == &Scalar::zero() {
+            continue;
+        }
+        for (row, output) in result.iter_mut().enumerate() {
+            let entry = matrix.get(row, col);
+            if entry != &Scalar::zero() {
+                *output = output.add(&entry.mul(amplitude));
+            }
+        }
+    }
+    result
+}
+
+/// Reconstruct C up to global phase from F(P)=C†PC. Project a computational
+/// seed onto the common +1 eigenspace of F(Zq) to obtain C†|0...0>, then
+/// apply products of F(Xq) to obtain the other columns of C†.
+fn frame_unitary(circuit: &PbcCircuit, values: &[Matrix], dim: usize) -> Result<Matrix, Error> {
+    let n = circuit.num_qubits();
+    let xs: Vec<_> = (0..n)
+        .map(|q| reference(values, circuit.output_frame().x(q as u32)))
+        .collect();
+    let zs: Vec<_> = (0..n)
+        .map(|q| reference(values, circuit.output_frame().z(q as u32)))
+        .collect();
+    let zero = Scalar::zero();
+    let one = Scalar::integer(1);
+    let sqrt_two = Scalar::integer(2).mul(&Scalar::inv_sqrt_two());
+    for seed in 0..dim {
+        let mut vacuum = vec![zero.clone(); dim];
+        vacuum[seed] = one.clone();
+        for image in &zs {
+            let transformed = pauli_on_state(image, &vacuum);
+            vacuum = vacuum
+                .iter()
+                .zip(&transformed)
+                .map(|(a, b)| a.add(b).half())
+                .collect();
+        }
+        let norm = vacuum.iter().fold(zero.clone(), |sum, amplitude| {
+            sum.add(&amplitude.mul(&amplitude.conj()))
+        });
+        if norm == zero {
+            continue;
+        }
+        let mut scale = one.clone();
+        for _ in 0..=n {
+            if norm.mul(&scale).mul(&scale) == one {
+                let vacuum: Vec<_> = vacuum.iter().map(|a| a.mul(&scale)).collect();
+                let mut dagger = Matrix::zero(dim);
+                for basis in 0..dim {
+                    let mut column = vacuum.clone();
+                    for (q, image) in xs.iter().enumerate() {
+                        if basis & (1 << (n - q - 1)) != 0 {
+                            column = pauli_on_state(image, &column);
+                        }
+                    }
+                    for (row, value) in column.into_iter().enumerate() {
+                        dagger.set(row, basis, value);
+                    }
+                }
+                return Ok(dagger.adjoint());
+            }
+            scale = scale.mul(&sqrt_two);
+        }
+    }
+    Err(Error::LimitExceeded)
 }
 
 /// Independent dense interpretation, not the production Pauli materializer.
@@ -253,7 +332,7 @@ pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix
     let operations = circuit
         .operations()
         .len()
-        .checked_add(circuit.output_cliffords().len())
+        .checked_add(circuit.num_qubits().saturating_mul(2))
         .ok_or(Error::LimitExceeded)?;
     let dim = dimensions(
         circuit.num_qubits(),
@@ -273,9 +352,6 @@ pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix
         let rotation = rotation(&reference(&values, axis.as_ref()), angle.eighths());
         result = rotation.mul(&result);
     }
-    for (i, gate) in circuit.output_cliffords().iter().enumerate() {
-        result =
-            gate_matrix(circuit.num_qubits(), gate, circuit.operations().len() + i)?.mul(&result);
-    }
+    result = frame_unitary(circuit, &values, dim)?.mul(&result);
     Ok(result)
 }

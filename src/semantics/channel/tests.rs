@@ -328,7 +328,7 @@ fn identity_measurements_and_global_phases_are_invisible() {
 }
 
 #[test]
-fn detect_wrong_measurement_sign_destination_and_missing_suffix() {
+fn detect_wrong_measurement_sign_destination_and_missing_frame() {
     let input = circuit(1, 1, vec![Gate::x(0), measure(0, 0)]);
     let expected = check(&input, &[false]);
     let mut wrong = PbcCircuit::new(1, 1);
@@ -485,10 +485,10 @@ fn resets_and_post_measurement_gates_are_rejected() {
 }
 
 #[test]
-fn partial_measurement_suffix_preserves_unmeasured_qubits() {
+fn partial_measurement_frame_preserves_unmeasured_qubits() {
     let input = circuit(2, 1, vec![Gate::h(1), measure(0, 0)]);
     let converted = to_pbc(&input).unwrap();
-    assert_eq!(converted.output_cliffords(), &[Gate::h(1)]);
+    assert!(converted.frame_matches_gates(&[Gate::h(1)]));
     let expected = check(&input, &[false]);
     let mut wrong = PbcCircuit::new(2, 1);
     let z = wrong.z(0).unwrap();
@@ -511,7 +511,7 @@ fn full_bell_readout_absorbs_cliffords_into_joint_measurement_axes() {
     let xz = absorbed.hermitian_axis(product, 100).unwrap();
     absorbed.measure(x, Some(0)).unwrap();
     absorbed.measure(xz, Some(1)).unwrap();
-    assert!(absorbed.output_cliffords().is_empty());
+    assert!(absorbed.frame_matches_gates(&[]));
     let actual = pbc(&absorbed, &[false, false]);
     assert_eq!(expected.classical_blocks(), actual.classical_blocks());
     // This is classical-output equivalence, not equality of post-measurement states.
@@ -519,10 +519,10 @@ fn full_bell_readout_absorbs_cliffords_into_joint_measurement_axes() {
 }
 
 #[test]
-fn partial_bell_readout_needs_entangling_suffix_even_if_measured_wire_is_discarded() {
+fn partial_bell_readout_needs_entangling_frame_even_if_measured_wire_is_discarded() {
     let input = circuit(2, 1, vec![Gate::h(0), cx(0, 1), measure(1, 0)]);
     let converted = to_pbc(&input).unwrap();
-    assert_eq!(converted.output_cliffords(), &[Gate::h(0), cx(0, 1)]);
+    assert!(converted.frame_matches_gates(&[Gate::h(0), cx(0, 1)]));
     let expected = check(&input, &[false]);
     let mut wrong = PbcCircuit::new(2, 1);
     let x = wrong.x(0).unwrap();

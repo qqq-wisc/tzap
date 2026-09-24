@@ -20,35 +20,50 @@ fn read_text(text: &str) -> PbcCircuit {
         .parse()
         .unwrap();
     let mut p = PbcCircuit::new(n, c);
+    let mut in_frame = false;
+    let mut seen_rows = std::collections::HashSet::new();
     for line in lines {
         let mut words = line.split_whitespace();
         let op = words.next().unwrap();
-        if !matches!(op, "r" | "m") {
-            let q = words.next().unwrap().parse().unwrap();
-            let gate = match op {
-                "h" => Gate::h(q),
-                "x" => Gate::x(q),
-                "z" => Gate::z(q),
-                "s" => Gate::s(q),
-                "sdg" => Gate::sdg(q),
-                "cx" => Gate::cnot {
-                    control: q,
-                    target: words.next().unwrap().parse().unwrap(),
-                },
-                "cz" => Gate::cz {
-                    control: q,
-                    target: words.next().unwrap().parse().unwrap(),
-                },
-                _ => panic!("bad Clifford"),
+        if op == "frame" {
+            in_frame = true;
+            let row = words.next().unwrap();
+            let is_z = match &row[..1] {
+                "X" => false,
+                "Z" => true,
+                _ => panic!("bad frame generator"),
             };
-            assert!(words.next().is_none());
-            p.push_output_clifford(gate).unwrap();
+            let q: u32 = row[1..].parse().unwrap();
+            assert!((q as usize) < n && seen_rows.insert((is_z, q)));
+            let sign = match words.next().unwrap() {
+                "1" => Phase::One,
+                "-1" => Phase::MinusOne,
+                _ => panic!("bad frame sign"),
+            };
+            let mut value = p.identity().as_ref().scaled(sign);
+            let mut previous = None;
+            for word in words {
+                let factor_q = word[1..].parse::<u32>().unwrap();
+                assert!(previous.is_none_or(|previous| previous < factor_q));
+                previous = Some(factor_q);
+                let factor = match &word[..1] {
+                    "X" => Pauli::X,
+                    "Y" => Pauli::Y,
+                    "Z" => Pauli::Z,
+                    _ => panic!("bad Pauli"),
+                };
+                let single = p.single(factor_q, factor).unwrap();
+                value = p.product(value, single.as_ref()).unwrap();
+            }
+            let value = p.hermitian_axis(value, 100_000).unwrap().as_ref();
+            if is_z {
+                p.output_frame.z[q as usize] = value;
+            } else {
+                p.output_frame.x[q as usize] = value;
+            }
             continue;
         }
-        assert!(
-            p.output_cliffords().is_empty(),
-            "Cliffords must be trailing"
-        );
+        assert!(!in_frame, "frame rows must be trailing");
         assert!(matches!(op, "r" | "m"));
         let k = if op == "r" {
             words.next().unwrap().parse().unwrap()
@@ -156,7 +171,7 @@ fn exported_programs_preserve_exact_partial_readout_channels() {
             };
             let text = to_pbc(&input).unwrap().to_text().unwrap();
             let actual = read_text(&text);
-            assert!(!actual.output_cliffords().is_empty());
+            assert_eq!(actual.output_frame().len(), 2);
             let initial = [true, false];
             let limits = ChannelLimits::default();
             let expected = circuit_channel(&input, &initial, limits).unwrap();
@@ -340,7 +355,7 @@ fn angles_are_integer_multiples_modulo_global_phase() {
 }
 
 #[test]
-fn full_readout_keeps_named_cliffords_and_quantum_outputs() {
+fn full_readout_keeps_output_frame_and_quantum_outputs() {
     let c = Circuit {
         num_qubits: 1,
         num_cbits: 1,
@@ -349,13 +364,13 @@ fn full_readout_keeps_named_cliffords_and_quantum_outputs() {
     let p = to_pbc(&c).unwrap();
     assert_eq!(
         p.to_text().unwrap(),
-        "qubits 1\nregisters 1\nm 1 X0 -> c0\nh 0\n"
+        "qubits 1\nregisters 1\nm 1 X0 -> c0\nframe X0 1 Z0\nframe Z0 1 X0\n"
     );
-    assert_eq!(p.output_cliffords(), &[Gate::h(0)]);
+    assert!(p.frame_matches_gates(&[Gate::h(0)]));
 }
 
 #[test]
-fn all_suffix_gates_and_empty_program() {
+fn all_clifford_gates_export_as_frame_and_empty_program() {
     assert_eq!(
         PbcCircuit::new(0, 2).to_text().unwrap(),
         "qubits 0\nregisters 2\n"
@@ -381,7 +396,7 @@ fn all_suffix_gates_and_empty_program() {
     };
     assert_eq!(
         to_pbc(&c).unwrap().to_text().unwrap(),
-        "qubits 2\nregisters 0\nh 0\nx 1\nz 0\ns 1\nsdg 0\ncx 1 0\ncz 0 1\n"
+        "qubits 2\nregisters 0\nframe X0 -1 Y0 Z1\nframe X1 -1 Z0 X1\nframe Z0 -1 X0 Z1\nframe Z1 -1 Z1\n"
     );
 }
 
@@ -415,6 +430,25 @@ fn unsupported_operations_and_expansion_limit_fail_without_truncation() {
     assert_eq!(
         late_rotation.to_text().unwrap(),
         "qubits 1\nregisters 1\nm 1 Z0 -> c0\nr 1 1 Z0\n"
+    );
+}
+
+#[test]
+fn text_budget_covers_operations_and_output_frame_together() {
+    let mut p = PbcCircuit::new(1, 0);
+    let z = p.z(0).unwrap();
+    p.rotate(z, PauliAngle::new(1)).unwrap();
+    assert_eq!(
+        p.to_text_with(TextOptions {
+            max_expansion_cells: 8,
+        }),
+        Err(PbcError::ExpansionLimit)
+    );
+    assert_eq!(
+        p.to_text_with(TextOptions {
+            max_expansion_cells: 9,
+        }),
+        Ok("qubits 1\nregisters 0\nr 1 1 Z0\n".into())
     );
 }
 

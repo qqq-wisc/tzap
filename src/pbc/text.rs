@@ -1,6 +1,5 @@
 //! Sparse, line-based PBC export. Materialization is not a linear-time operation.
 use super::{PbcCircuit, PbcError, PbcOp, Phase};
-use crate::circuit::qubit_operands;
 use std::fmt::Write;
 
 #[cfg(test)]
@@ -23,7 +22,7 @@ impl Default for TextOptions {
 
 impl PbcCircuit {
     /// Export with all quantum and classical outputs preserved, including the
-    /// named Clifford suffix. See `docs/pbc.md` for the format.
+    /// output Clifford frame. See `docs/pbc.md` for the format.
     pub fn to_text(&self) -> Result<String, PbcError> {
         self.to_text_with(TextOptions::default())
     }
@@ -46,7 +45,7 @@ impl PbcCircuit {
             return Err(PbcError::UnsupportedTextOperation { index });
         }
         let mut text = format!("qubits {}\nregisters {}\n", self.num_qubits, self.num_cbits);
-        self.visit_axes(options.max_expansion_cells, |op, phase, factors| {
+        let used = self.visit_axes(options.max_expansion_cells, |op, phase, factors| {
             let sign = match phase {
                 Phase::One => "1",
                 Phase::MinusOne => "-1",
@@ -69,15 +68,32 @@ impl PbcCircuit {
             text.push('\n');
             Ok(())
         })?;
-        // Named gates form a trailing block, executed after all r/m records.
-        for gate in &self.output_cliffords {
-            let (n, qs) = qubit_operands(gate);
-            text.push_str(gate.kind().name());
-            for q in &qs[..n] {
-                write!(text, " {q}").unwrap();
-            }
-            text.push('\n');
-        }
+        self.visit_output_frame(
+            options.max_expansion_cells - used,
+            |is_z, q, phase, factors| {
+                let expected = if is_z {
+                    super::Pauli::Z
+                } else {
+                    super::Pauli::X
+                };
+                if phase == Phase::One && factors.len() == 1 && factors.get(&q) == Some(&expected) {
+                    return Ok(());
+                }
+                let sign = match phase {
+                    Phase::One => "1",
+                    Phase::MinusOne => "-1",
+                    _ => return Err(PbcError::NonHermitianAxis),
+                };
+                write!(text, "frame {}{q} {sign}", if is_z { 'Z' } else { 'X' }).unwrap();
+                let mut sorted: Vec<_> = factors.iter().collect();
+                sorted.sort_unstable_by_key(|&(q, _)| q);
+                for (qubit, pauli) in sorted {
+                    write!(text, " {pauli}{qubit}").unwrap();
+                }
+                text.push('\n');
+                Ok(())
+            },
+        )?;
         Ok(text)
     }
 }

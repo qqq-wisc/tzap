@@ -2,8 +2,7 @@ use crate::circuit::{Circuit, Gate};
 use crate::pass::Pass;
 
 use super::{
-    Pauli, PauliAngle, PauliAxis, PauliNode, PauliRef, PbcCircuit, PbcError, PbcOp, Phase,
-    check_operands,
+    PauliAngle, PauliAxis, PauliNode, PauliRef, PbcCircuit, PbcError, PbcOp, check_operands,
 };
 
 /// Terminal gate-circuit to logical-PBC conversion. Ordinary gate optimization
@@ -23,13 +22,14 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
 
 /// Convert Clifford+T, CZ, CCX, CCZ, and terminal measurements to logical PBC.
 /// Resets and gates after measurements are rejected. Arbitrary Rz must be
-/// decomposed by the caller first. The suffix is always retained to preserve
+/// decomposed by the caller first. The output frame is retained to preserve
 /// quantum outputs, including circuits with no or partial measurements.
 ///
 /// Time and space are O(G + Q): each gate creates at most four shared Pauli
-/// nodes, seven PBC operations, and one suffix gate. No axis is expanded, no
-/// algebraic equality is checked, and the suffix is never rescanned. The initial
-/// arena contains one identity and two leaves per qubit. Classical-bit counts
+/// nodes and seven PBC operations, while updating only O(1) frame references.
+/// No axis is expanded, no algebraic equality is checked, and the frame is
+/// never rescanned. The initial arena contains one identity and two leaves per
+/// qubit. Classical-bit counts
 /// are metadata, not a bit-count-sized allocation.
 ///
 /// ```
@@ -38,13 +38,13 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
 /// let mut input = Circuit::new(1);
 /// input.apply(Gate::h(0));
 /// input.apply(Gate::t(0));
-/// let pbc = to_pbc(&input)?; // X rotation, followed by H
+/// let pbc = to_pbc(&input)?; // X rotation, followed by an H frame
 /// assert_eq!(pbc.operations().len(), 1);
-/// assert_eq!(pbc.output_cliffords(), &[Gate::h(0)]);
+/// assert_eq!(pbc.expand(pbc.output_frame().x(0), 100)?.factors, vec![tzap::pbc::Pauli::Z]);
 /// # Ok::<(), tzap::pbc::PbcError>(())
 /// ```
 pub fn to_pbc(circuit: &Circuit) -> Result<PbcCircuit, PbcError> {
-    let qubits = u32::try_from(circuit.num_qubits).map_err(|_| PbcError::TooManyQubits)?;
+    u32::try_from(circuit.num_qubits).map_err(|_| PbcError::TooManyQubits)?;
     // Validate everything up front, so conversion itself cannot fail or panic.
     let mut measuring = false;
     for (index, gate) in circuit.gates.iter().enumerate() {
@@ -59,20 +59,8 @@ pub fn to_pbc(circuit: &Circuit) -> Result<PbcCircuit, PbcError> {
         }
         measuring |= is_measure;
     }
-    let mut output = PbcCircuit::new(circuit.num_qubits, circuit.num_cbits);
-    let frame = (0..qubits)
-        .map(|q| Frame {
-            x: output.arena.push(PauliNode::Single {
-                qubit: q,
-                pauli: Pauli::X,
-            }),
-            z: output.arena.push(PauliNode::Single {
-                qubit: q,
-                pauli: Pauli::Z,
-            }),
-        })
-        .collect();
-    let mut converter = Converter { output, frame };
+    let output = PbcCircuit::new(circuit.num_qubits, circuit.num_cbits);
+    let mut converter = Converter { output };
     for gate in &circuit.gates {
         converter.gate(gate);
     }
@@ -92,17 +80,8 @@ fn validate(circuit: &Circuit, gate: &Gate) -> Result<(), PbcError> {
     }
 }
 
-/// Images C† Xq C and C† Zq C for the postponed Clifford suffix C.
-/// At every prefix, input = C * emitted-PBC, up to branch-global phase.
-#[derive(Clone, Copy)]
-struct Frame {
-    x: PauliRef,
-    z: PauliRef,
-}
-
 struct Converter {
     output: PbcCircuit,
-    frame: Vec<Frame>,
 }
 
 impl Converter {
@@ -140,74 +119,32 @@ impl Converter {
     }
 
     fn gate(&mut self, gate: &Gate) {
-        let frame = |q: u32| self.frame[q as usize];
+        let x = |q: u32| self.output.output_frame.x(q);
+        let z = |q: u32| self.output.output_frame.z(q);
         match *gate {
-            Gate::t(q) => self.rotate(frame(q).z, 1),
-            Gate::tdg(q) => self.rotate(frame(q).z, -1),
+            Gate::t(q) => self.rotate(z(q), 1),
+            Gate::tdg(q) => self.rotate(z(q), -1),
             Gate::ccx {
                 control1,
                 control2,
                 target,
-            } => self.controlled_controlled(frame(control1).z, frame(control2).z, frame(target).x),
+            } => self.controlled_controlled(z(control1), z(control2), x(target)),
             Gate::ccz {
                 control1,
                 control2,
                 target,
-            } => self.controlled_controlled(frame(control1).z, frame(control2).z, frame(target).z),
+            } => self.controlled_controlled(z(control1), z(control2), z(target)),
             Gate::measure { qubit, cbit } => {
                 self.output
-                    .measure(PauliAxis(frame(qubit).z), Some(cbit))
+                    .measure(PauliAxis(z(qubit)), Some(cbit))
                     .expect("measurement operands are validated");
             }
             Gate::rz(..) | Gate::reset(_) => unreachable!("input validated before conversion"),
             _ => {
-                self.push_clifford(gate);
-                // Append once; the suffix is never simplified or rescanned.
-                self.output.output_cliffords.push(gate.clone());
+                self.output
+                    .output_frame
+                    .append(&mut self.output.arena, gate);
             }
-        }
-    }
-
-    /// Append a Clifford gate G to the suffix. The suffix operator becomes
-    /// G·C (G runs after C), so the image of each Pauli P becomes the image of
-    /// G† P G, a product of existing images.
-    fn push_clifford(&mut self, gate: &Gate) {
-        match *gate {
-            Gate::h(q) => {
-                let f = &mut self.frame[q as usize];
-                std::mem::swap(&mut f.x, &mut f.z);
-            }
-            Gate::x(q) => {
-                let f = &mut self.frame[q as usize];
-                f.z = f.z.scaled(Phase::MinusOne);
-            }
-            Gate::z(q) => {
-                let f = &mut self.frame[q as usize];
-                f.x = f.x.scaled(Phase::MinusOne);
-            }
-            Gate::s(q) | Gate::sdg(q) => {
-                // G† X G is -Y for S and +Y for Sdg; Y = iXZ.
-                let phase = if matches!(gate, Gate::s(_)) {
-                    Phase::MinusI
-                } else {
-                    Phase::I
-                };
-                let f = self.frame[q as usize];
-                self.frame[q as usize].x = self.product(f.x, f.z).scaled(phase);
-            }
-            Gate::cnot { control, target } => {
-                let c = self.frame[control as usize];
-                let t = self.frame[target as usize];
-                self.frame[control as usize].x = self.product(c.x, t.x);
-                self.frame[target as usize].z = self.product(c.z, t.z);
-            }
-            Gate::cz { control, target } => {
-                let c = self.frame[control as usize];
-                let t = self.frame[target as usize];
-                self.frame[control as usize].x = self.product(c.x, t.z);
-                self.frame[target as usize].x = self.product(c.z, t.x);
-            }
-            _ => unreachable!("not a suffix Clifford: {gate:?}"),
         }
     }
 }
