@@ -29,8 +29,9 @@ pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
 pub use text::TextOptions;
 
 use crate::circuit::{CBit, Gate, GateKind, Qubit, qubit_operands};
-use pauli::PauliArena;
+use pauli::{Factors, PauliArena};
 use std::fmt;
+use std::ops::{Add, Neg};
 
 /// Exact multiples of pi/8 modulo pi, ignoring global phase.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,14 +41,30 @@ impl PauliAngle {
     pub fn new(eighths: i64) -> Self {
         Self(eighths.rem_euclid(8) as u8)
     }
+    /// The angle as `k*pi/8` with `0 <= k < 8`.
     pub fn eighths(self) -> u8 {
         self.0
     }
-    pub fn inverse(self) -> Self {
-        Self::new(-i64::from(self.0))
+    /// The angle as `k*pi/8` with `-3 <= k <= 4`.
+    pub fn signed_eighths(self) -> i8 {
+        let k = self.0 as i8;
+        if k > 4 { k - 8 } else { k }
     }
-    pub fn plus(self, other: Self) -> Self {
-        Self((self.0 + other.0) % 8)
+}
+
+impl Add for PauliAngle {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self((self.0 + rhs.0) % 8)
+    }
+}
+
+impl Neg for PauliAngle {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        Self::new(-i64::from(self.0))
     }
 }
 
@@ -73,6 +90,7 @@ impl MeasId {
         self.index
     }
 }
+
 impl fmt::Display for MeasId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "m{}", self.index)
@@ -162,6 +180,7 @@ impl fmt::Display for PbcError {
         }
     }
 }
+
 impl std::error::Error for PbcError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -219,15 +238,10 @@ impl PbcCircuit {
         PauliAxis(self.arena.reference(0))
     }
 
-    fn check_qubit(&self, q: Qubit) -> Result<(), PbcError> {
-        if q as usize >= self.num_qubits {
-            return Err(PbcError::QubitOutOfRange(q));
-        }
-        Ok(())
-    }
-
     pub fn single(&mut self, qubit: Qubit, pauli: Pauli) -> Result<PauliAxis, PbcError> {
-        self.check_qubit(qubit)?;
+        if qubit as usize >= self.num_qubits {
+            return Err(PbcError::QubitOutOfRange(qubit));
+        }
         if pauli == Pauli::I {
             return Ok(self.identity());
         }
@@ -265,10 +279,10 @@ impl PbcCircuit {
             factors: Vec::new(),
         };
         self.arena
-            .materialize(&[reference], budget, |reference, value| {
-                result.phase = value.phase.times(reference.phase);
+            .materialize(&[reference], budget, |_, phase, factors| {
+                result.phase = phase;
                 result.factors = vec![Pauli::I; self.num_qubits];
-                for (&q, &p) in &value.factors {
+                for (&q, &p) in factors {
                     result.factors[q as usize] = p;
                 }
                 Ok(())
@@ -277,23 +291,18 @@ impl PbcCircuit {
     }
 
     /// Check an arbitrary expression before using it as a physical axis.
-    /// This explicit materialization is intended for manual construction. A
-    /// converter constructs axes from its Clifford-frame invariants without
-    /// expanding them.
+    /// This explicit materialization is intended for manual construction;
+    /// `to_pbc` constructs axes that are Hermitian by construction.
     pub fn hermitian_axis(
         &self,
         reference: PauliRef,
         max_cells: usize,
     ) -> Result<PauliAxis, PbcError> {
-        let mut phase = Phase::One;
         self.arena
-            .materialize(&[reference], max_cells, |reference, value| {
-                phase = value.phase.times(reference.phase);
-                Ok(())
+            .materialize(&[reference], max_cells, |_, phase, _| match phase {
+                Phase::One | Phase::MinusOne => Ok(()),
+                Phase::I | Phase::MinusI => Err(PbcError::NonHermitianAxis),
             })?;
-        if !matches!(phase, Phase::One | Phase::MinusOne) {
-            return Err(PbcError::NonHermitianAxis);
-        }
         Ok(PauliAxis(reference))
     }
 
@@ -352,28 +361,48 @@ impl PbcCircuit {
     /// Append a gate to the suffix executed after all PBC operations, regardless
     /// of the order in which the builder's methods are called.
     pub fn push_output_clifford(&mut self, gate: Gate) -> Result<(), PbcError> {
-        if !matches!(
-            gate,
-            Gate::h(_)
-                | Gate::x(_)
-                | Gate::z(_)
-                | Gate::s(_)
-                | Gate::sdg(_)
-                | Gate::cnot { .. }
-                | Gate::cz { .. }
-        ) {
+        if !is_suffix_gate(&gate) {
             return Err(PbcError::NonCliffordSuffix);
         }
-        let (n, qs) = qubit_operands(&gate);
-        for (i, &q) in qs[..n].iter().enumerate() {
-            self.check_qubit(q)?;
-            if qs[..i].contains(&q) {
-                return Err(PbcError::RepeatedOperand);
-            }
-        }
+        check_operands(&gate, self.num_qubits)?;
         self.output_cliffords.push(gate);
         Ok(())
     }
+
+    /// Materialize every operation's axis within `max_work`, visiting the
+    /// operations in order with the axis's overall phase and sparse factors.
+    fn visit_axes(
+        &self,
+        max_work: usize,
+        mut visit: impl FnMut(&PbcOp, Phase, &Factors) -> Result<(), PbcError>,
+    ) -> Result<(), PbcError> {
+        let roots: Vec<_> = self.operations.iter().map(|op| op.axis().0).collect();
+        self.arena
+            .materialize(&roots, max_work, |index, phase, factors| {
+                visit(&self.operations[index], phase, factors)
+            })?;
+        Ok(())
+    }
+}
+
+/// The Clifford gates allowed in the output suffix.
+fn is_suffix_gate(gate: &Gate) -> bool {
+    use GateKind::*;
+    matches!(gate.kind(), H | X | Z | S | Sdg | Cx | Cz)
+}
+
+/// Check that a gate's qubit operands are in range and distinct.
+fn check_operands(gate: &Gate, num_qubits: usize) -> Result<(), PbcError> {
+    let (n, qs) = qubit_operands(gate);
+    for (i, &q) in qs[..n].iter().enumerate() {
+        if q as usize >= num_qubits {
+            return Err(PbcError::QubitOutOfRange(q));
+        }
+        if qs[..i].contains(&q) {
+            return Err(PbcError::RepeatedOperand);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

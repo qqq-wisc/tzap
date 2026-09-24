@@ -7,20 +7,25 @@ tzap input.qasm --to-pbc -o output.pbc
 ```
 
 Conversion runs after optimization and requested decompositions. Gate-circuit
-inputs must have no resets and measurements only at the end. For Rz gates, also
-use `--decompose-rz`.
+inputs must have no resets, and measurements must form a final block: once any
+qubit is measured, only measurements may follow, on any qubit. For Rz gates,
+also use `--decompose-rz`. CCX and CCZ convert natively, into seven rotations
+each, and need no decomposition flag.
 
 ## Syntax
 
-The first two lines declare the number of qubits and classical registers:
+The first two lines declare the number of qubits and of classical registers,
+each of which holds one bit:
 
 ```text
 qubits 3
 registers 2
 ```
 
-Qubit IDs and register IDs start at zero. The remaining lines are instructions,
-executed from top to bottom:
+Qubit IDs and register IDs start at zero. Multiple QASM `qreg`s or `creg`s are
+numbered consecutively in declaration order, so with `creg a[1]; creg b[2];`,
+`b[1]` becomes `c2`. The remaining lines are instructions, executed from top to
+bottom:
 
 ```text
 r <k> <sign> <Pauli factors>
@@ -50,7 +55,8 @@ cz <qubit ID> <qubit ID>
   Their operands are bare zero-based qubit IDs. They are executed in order, not
   annotations; `cx` lists its control first. The block needs no section marker.
 
-For example, `r 1 -1 X0 Z2` rotates by pi/8 about `-X0 Z2`, and
+For example, `r 1 -1 X0 Z2` rotates by pi/8 about `-X0 Z2` (equivalently, by
+-pi/8 about `X0 Z2`), and
 `m -1 Z1 -> c0` measures `-Z1`, reversing the outcome labels of a Z measurement.
 
 ## Output semantics

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::Mul;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::circuit::Qubit;
@@ -6,26 +7,25 @@ use crate::circuit::Qubit;
 use super::PbcError;
 
 mod materialize;
+pub(crate) use materialize::Factors;
 
 /// Exact phase multiplying a Pauli expression, distinct from a rotation angle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Variants are ordered by their power of i.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
+    #[default]
     One,
     I,
     MinusOne,
     MinusI,
 }
 
-impl Phase {
-    pub fn times(self, other: Self) -> Self {
+impl Mul for Phase {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
         use Phase::*;
-        let exponent = |p| match p {
-            One => 0,
-            I => 1,
-            MinusOne => 2,
-            MinusI => 3,
-        };
-        [One, I, MinusOne, MinusI][(exponent(self) + exponent(other)) % 4]
+        [One, I, MinusOne, MinusI][(self as usize + rhs as usize) % 4]
     }
 }
 
@@ -49,6 +49,7 @@ pub enum Pauli {
 }
 
 impl Pauli {
+    /// Single-qubit product `self * other` as a phase and a Pauli.
     pub(crate) fn times(self, other: Self) -> (Phase, Self) {
         use Pauli::*;
         match (self, other) {
@@ -93,7 +94,7 @@ impl PauliRef {
     }
     pub fn scaled(self, phase: Phase) -> Self {
         Self {
-            phase: self.phase.times(phase),
+            phase: self.phase * phase,
             ..self
         }
     }
@@ -161,8 +162,8 @@ impl PauliArena {
     }
 }
 
-/// Explicit dense Pauli factors in increasing qubit order. Materialization is
-/// intended for inspection of small circuits, not part of linear-time conversion.
+/// Explicit dense Pauli factors, indexed by qubit. Materialization is intended
+/// for inspection of small circuits, not part of linear-time conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpandedPauli {
     pub phase: Phase,

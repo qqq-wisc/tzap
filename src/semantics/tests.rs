@@ -647,3 +647,44 @@ fn limits_fail_before_dense_allocation() {
         assert_eq!(pbc_unitary(&c, limits), Err(Error::LimitExceeded));
     }
 }
+
+/// The oracle's rotation representative agrees, up to one global phase per
+/// rotation, with the documented literal `exp(-i*k*pi/8*P) = cos(t) I - i sin(t) P`.
+#[test]
+fn rotation_representative_matches_documented_exponential() {
+    for p in [Pauli::X, Pauli::Y, Pauli::Z] {
+        let axis = pauli(1, 0, p);
+        for k in 0..8u8 {
+            let actual = rotation(&axis, k);
+            let t = f64::from(k) * std::f64::consts::PI / 8.0;
+            let literal = |r: usize, c: usize| {
+                let (re, im) = approximate(axis.get(r, c));
+                let identity = if r == c { t.cos() } else { 0.0 };
+                // cos(t) I - i sin(t) P, with P entry (re, im).
+                (identity + t.sin() * im, -t.sin() * re)
+            };
+            // Align phases on the largest literal entry, then compare all entries.
+            let (r0, c0) = [(0, 0), (0, 1), (1, 0), (1, 1)]
+                .into_iter()
+                .max_by(|&(a, b), &(c, d)| {
+                    let (x, y) = literal(a, b);
+                    let (u, v) = literal(c, d);
+                    (x * x + y * y).total_cmp(&(u * u + v * v))
+                })
+                .unwrap();
+            let a = approximate(actual.get(r0, c0));
+            let b = literal(r0, c0);
+            let mul = |x: (f64, f64), y: (f64, f64)| (x.0 * y.0 - x.1 * y.1, x.0 * y.1 + x.1 * y.0);
+            for r in 0..2 {
+                for c in 0..2 {
+                    let left = mul(approximate(actual.get(r, c)), b);
+                    let right = mul(literal(r, c), a);
+                    assert!(
+                        (left.0 - right.0).abs() < 1e-12 && (left.1 - right.1).abs() < 1e-12,
+                        "{p} k={k} ({r},{c}): {left:?} != {right:?}"
+                    );
+                }
+            }
+        }
+    }
+}

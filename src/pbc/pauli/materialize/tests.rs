@@ -17,14 +17,10 @@ fn dense(arena: &PauliArena, qubits: usize, last: usize) -> Vec<ExpandedPauli> {
             PauliNode::Identity => (),
             PauliNode::Single { qubit, pauli } => value.factors[qubit as usize] = pauli,
             PauliNode::Product(a, b) => {
-                value.phase = values[a.node]
-                    .phase
-                    .times(a.phase)
-                    .times(values[b.node].phase)
-                    .times(b.phase);
+                value.phase = values[a.node].phase * a.phase * values[b.node].phase * b.phase;
                 for (q, factor) in value.factors.iter_mut().enumerate() {
                     let (phase, p) = values[a.node].factors[q].times(values[b.node].factors[q]);
-                    value.phase = value.phase.times(phase);
+                    value.phase = value.phase * phase;
                     *factor = p;
                 }
             }
@@ -83,21 +79,18 @@ fn sparse_materialization_matches_dense_random_shared_dags() {
             })
             .collect();
         arena
-            .materialize(&roots, 100_000, |reference, value| {
+            .materialize(&roots, 100_000, |index, phase, factors| {
+                let reference = roots[index];
                 let target = &expected[reference.node];
-                assert_eq!(
-                    value.phase.times(reference.phase),
-                    target.phase.times(reference.phase),
-                    "seed {seed}"
-                );
-                let factors: Vec<_> = target
+                assert_eq!(phase, target.phase * reference.phase, "seed {seed}");
+                let expected: Factors = target
                     .factors
                     .iter()
                     .enumerate()
                     .filter(|(_, p)| **p != Pauli::I)
                     .map(|(q, &p)| (q as u32, p))
                     .collect();
-                assert_eq!(value.sorted_factors(), factors, "seed {seed}");
+                assert_eq!(*factors, expected, "seed {seed}");
                 Ok(())
             })
             .unwrap();
@@ -116,8 +109,8 @@ fn late_sparse_leaf_export_is_independent_of_arena_prefix_and_width() {
         let root = pbc.operations()[0].axis().as_ref();
         let stats = pbc
             .arena
-            .materialize(&[root], 3, |_, value| {
-                assert_eq!(value.factors.len(), 1);
+            .materialize(&[root], 3, |_, _, factors| {
+                assert_eq!(factors.len(), 1);
                 Ok(())
             })
             .unwrap();
@@ -134,10 +127,12 @@ fn growing_chain_moves_storage_with_exact_linear_work() {
     for n in [1, 32, 1_000, 10_000] {
         let (arena, root) = chain(n);
         let stats = arena
-            .materialize(&[root], 4 * n, |_, value| {
-                assert_eq!(
-                    value.sorted_factors(),
-                    (0..n as u32).map(|q| (q, Pauli::X)).collect::<Vec<_>>()
+            .materialize(&[root], 4 * n, |_, _, factors| {
+                assert!(
+                    factors
+                        .iter()
+                        .map(|(&q, &p)| (q, p))
+                        .eq((0..n as u32).map(|q| (q, Pauli::X)))
                 );
                 Ok(())
             })
@@ -153,15 +148,19 @@ fn growing_chain_moves_storage_with_exact_linear_work() {
 fn repeated_roots_are_evaluated_once_and_budgeted_per_output() {
     let (arena, root) = chain(100);
     let roots = vec![root; 100];
-    let stats = arena.materialize(&roots, 20_000, |_, _| Ok(())).unwrap();
+    let stats = arena.materialize(&roots, 20_000, |_, _, _| Ok(())).unwrap();
     assert_eq!(stats.nodes, 199);
     assert_eq!(stats.copied_factors, 0);
     assert_eq!(stats.output_factors, 10_000);
     assert!(matches!(
-        arena.materialize(&roots, stats.work - 1, |_, _| Ok(())),
+        arena.materialize(&roots, stats.work - 1, |_, _, _| Ok(())),
         Err(PbcError::ExpansionLimit)
     ));
-    assert!(arena.materialize(&roots, stats.work, |_, _| Ok(())).is_ok());
+    assert!(
+        arena
+            .materialize(&roots, stats.work, |_, _, _| Ok(()))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -171,38 +170,23 @@ fn growing_prefix_outputs_are_budgeted_for_their_genuinely_quadratic_size() {
         .filter(|&node| node == 1 || node % 2 == 1)
         .map(|node| arena.reference(node))
         .collect();
-    let stats = arena.materialize(&roots, 30_000, |_, _| Ok(())).unwrap();
+    let stats = arena.materialize(&roots, 30_000, |_, _, _| Ok(())).unwrap();
     assert_eq!(stats.nodes, 199);
     assert_eq!(stats.output_factors, 100 * 101 / 2);
     assert!(matches!(
-        arena.materialize(&roots, 400, |_, _| Ok(())),
+        arena.materialize(&roots, 400, |_, _, _| Ok(())),
         Err(PbcError::ExpansionLimit)
     ));
 }
 
 #[test]
-fn radix_order_handles_all_qubit_bytes() {
-    let factors = (0..100u32)
-        .map(|i| (i.wrapping_mul(0x8123_4567), Pauli::Z))
-        .collect();
-    let value = SparsePauli {
-        phase: Phase::One,
-        factors,
-    };
-    let mut expected: Vec<_> = value.factors.iter().map(|(&q, &p)| (q, p)).collect();
-    expected.sort_unstable_by_key(|&(q, _)| q);
-    assert_eq!(value.sorted_factors(), expected);
-}
-
-#[test]
-fn large_support_cancellation_keeps_phase_and_releases_capacity() {
+fn large_support_cancellation_keeps_phase() {
     let (mut arena, root) = chain(1_000);
     let squared = arena.push(PauliNode::Product(root.scaled(Phase::I), root));
     arena
-        .materialize(&vec![squared; 100], 20_000, |_, value| {
-            assert_eq!(value.phase, Phase::I);
-            assert!(value.factors.is_empty());
-            assert_eq!(value.factors.capacity(), 0);
+        .materialize(&vec![squared; 100], 20_000, |_, phase, factors| {
+            assert_eq!(phase, Phase::I);
+            assert!(factors.is_empty());
             Ok(())
         })
         .unwrap();
@@ -232,8 +216,8 @@ fn benchmark_sparse_materialization() {
             || {
                 std::hint::black_box(
                     arena
-                        .materialize(&[root], usize::MAX, |_, value| {
-                            std::hint::black_box(value.sorted_factors());
+                        .materialize(&[root], usize::MAX, |_, _, factors| {
+                            std::hint::black_box(factors);
                             Ok(())
                         })
                         .unwrap(),
@@ -260,8 +244,8 @@ fn benchmark_sparse_materialization() {
             || {
                 std::hint::black_box(
                     arena
-                        .materialize(&[root], usize::MAX, |_, value| {
-                            std::hint::black_box(value.sorted_factors());
+                        .materialize(&[root], usize::MAX, |_, _, factors| {
+                            std::hint::black_box(factors);
                             Ok(())
                         })
                         .unwrap(),
@@ -314,7 +298,7 @@ fn benchmark_sparse_materialization() {
             .collect();
         let stats = converted
             .arena
-            .materialize(&roots, 16_000_000, |_, _| Ok(()))
+            .materialize(&roots, 16_000_000, |_, _, _| Ok(()))
             .unwrap();
         let export = median(
             || {

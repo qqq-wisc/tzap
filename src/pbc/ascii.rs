@@ -1,5 +1,5 @@
 use super::{PbcCircuit, PbcError, PbcOp};
-use crate::circuit::Gate;
+use crate::circuit::{Gate, GateKind, qubit_operands};
 
 /// Explicit limits for the diagnostic renderer, which expands shared axes.
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +23,32 @@ impl Default for AsciiOptions {
 struct Column {
     label: String,
     wires: Vec<String>,
+}
+
+fn suffix_column(gate: &Gate, num_qubits: usize) -> Column {
+    let mut wires = vec![String::new(); num_qubits];
+    let label = match *gate {
+        Gate::cnot { control, target } => {
+            wires[control as usize] = "@".into();
+            wires[target as usize] = "[X]".into();
+            "CX".into()
+        }
+        Gate::cz { control, target } => {
+            wires[control as usize] = "@".into();
+            wires[target as usize] = "@".into();
+            "CZ".into()
+        }
+        _ => {
+            let label = match gate.kind() {
+                GateKind::Sdg => "Sdg".into(),
+                kind => kind.name().to_uppercase(),
+            };
+            let (_, [q, ..]) = qubit_operands(gate);
+            wires[q as usize] = format!("[{label}]");
+            label
+        }
+    };
+    Column { label, wires }
 }
 
 impl PbcCircuit {
@@ -52,83 +78,39 @@ impl PbcCircuit {
             .ok_or(PbcError::DrawingLimit)?
             .max(1);
         let mut columns = Vec::new();
-        let roots: Vec<_> = self
-            .operations
-            .iter()
-            .map(|op| op.axis().as_ref())
-            .collect();
-        let mut operations = self.operations.iter();
-        self.arena
-            .materialize(&roots, options.max_expansion_cells, |reference, value| {
-                let op = operations.next().unwrap();
-                let sign = value.phase.times(reference.phase);
-                let identity = if value.factors.is_empty() { "I" } else { "" };
-                let axis = format!("{sign}{identity}");
-                let label = match op {
-                    PbcOp::Rotate { angle, .. } => format!("R({angle},{axis})"),
-                    PbcOp::Measure {
-                        outcome, target, ..
-                    } => match target {
-                        Some(c) => format!("M({axis})->{outcome}/c{c}"),
-                        None => format!("M({axis})->{outcome}"),
-                    },
-                    PbcOp::ConditionalRotate { angle, if_one, .. } => {
-                        format!("R({angle},{axis}) if {if_one}=1")
-                    }
-                };
-                let mut wires = vec![String::new(); self.num_qubits];
-                for (&q, p) in &value.factors {
-                    wires[q as usize] = format!("[{p}]");
+        self.visit_axes(options.max_expansion_cells, |op, phase, factors| {
+            let identity = if factors.is_empty() { "I" } else { "" };
+            let axis = format!("{phase}{identity}");
+            let label = match op {
+                PbcOp::Rotate { angle, .. } => format!("R({angle},{axis})"),
+                PbcOp::Measure {
+                    outcome,
+                    target: Some(c),
+                    ..
+                } => format!("M({axis})->{outcome}/c{c}"),
+                PbcOp::Measure { outcome, .. } => format!("M({axis})->{outcome}"),
+                PbcOp::ConditionalRotate { angle, if_one, .. } => {
+                    format!("R({angle},{axis}) if {if_one}=1")
                 }
-                columns.push(Column { label, wires });
-                Ok(())
-            })?;
+            };
+            let mut wires = vec![String::new(); self.num_qubits];
+            for (&q, p) in factors {
+                wires[q as usize] = format!("[{p}]");
+            }
+            columns.push(Column { label, wires });
+            Ok(())
+        })?;
         if !self.output_cliffords.is_empty() {
             columns.push(Column {
                 label: "suffix".into(),
                 wires: vec!["|".into(); self.num_qubits],
             });
         }
-        for gate in &self.output_cliffords {
-            let mut wires = vec![String::new(); self.num_qubits];
-            let label = match *gate {
-                Gate::h(q) => {
-                    wires[q as usize] = "[H]".into();
-                    "H"
-                }
-                Gate::x(q) => {
-                    wires[q as usize] = "[X]".into();
-                    "X"
-                }
-                Gate::z(q) => {
-                    wires[q as usize] = "[Z]".into();
-                    "Z"
-                }
-                Gate::s(q) => {
-                    wires[q as usize] = "[S]".into();
-                    "S"
-                }
-                Gate::sdg(q) => {
-                    wires[q as usize] = "[Sdg]".into();
-                    "Sdg"
-                }
-                Gate::cnot { control, target } => {
-                    wires[control as usize] = "@".into();
-                    wires[target as usize] = "[X]".into();
-                    "CX"
-                }
-                Gate::cz { control, target } => {
-                    wires[control as usize] = "@".into();
-                    wires[target as usize] = "@".into();
-                    "CZ"
-                }
-                _ => unreachable!("suffix checked on insertion"),
-            };
-            columns.push(Column {
-                label: label.into(),
-                wires,
-            });
-        }
+        columns.extend(
+            self.output_cliffords
+                .iter()
+                .map(|gate| suffix_column(gate, self.num_qubits)),
+        );
         if columns.is_empty() && self.num_qubits == 0 {
             return Ok("(empty PBC circuit; 0 qubits)\n".into());
         }

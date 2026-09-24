@@ -1,5 +1,5 @@
 use super::*;
-use crate::circuit::Circuit;
+use crate::circuit::{Circuit, Gate};
 use crate::pbc::{Pauli, PauliAngle, to_pbc};
 
 /// Test-only reader, independent of the original circuit and converter.
@@ -416,4 +416,63 @@ fn unsupported_operations_and_expansion_limit_fail_without_truncation() {
         late_rotation.to_text().unwrap(),
         "qubits 1\nregisters 1\nm 1 Z0 -> c0\nr 1 1 Z0\n"
     );
+}
+
+/// Seeded differential fuzzing of the exporter itself: random gate prefixes
+/// with random terminal readouts (subsets, orders, overwritten registers),
+/// exported to text, re-read independently, and compared as exact channels.
+#[test]
+fn seeded_export_fuzz_preserves_exact_channels() {
+    use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+    for case in 0..48u64 {
+        let mut rng = StdRng::seed_from_u64(0x5042_4354_0000 + case);
+        let n = 1 + (case % 3) as usize;
+        let cbits = 1 + (case / 3 % 3) as usize;
+        let mut input = Circuit {
+            num_qubits: n,
+            num_cbits: cbits,
+            gates: vec![],
+        };
+        for _ in 0..rng.gen_range(3..=12) {
+            let mut q: Vec<u32> = (0..n as u32).collect();
+            q.shuffle(&mut rng);
+            input.gates.push(match rng.gen_range(0..11) {
+                0 => Gate::h(q[0]),
+                1 => Gate::x(q[0]),
+                2 => Gate::z(q[0]),
+                3 => Gate::s(q[0]),
+                4 => Gate::sdg(q[0]),
+                5 => Gate::t(q[0]),
+                6 => Gate::tdg(q[0]),
+                7 if n >= 2 => Gate::cnot {
+                    control: q[0],
+                    target: q[1],
+                },
+                8 if n >= 2 => Gate::cz {
+                    control: q[0],
+                    target: q[1],
+                },
+                9 if n >= 3 => Gate::ccx {
+                    control1: q[0],
+                    control2: q[1],
+                    target: q[2],
+                },
+                10 if n >= 3 => Gate::ccz {
+                    control1: q[0],
+                    control2: q[1],
+                    target: q[2],
+                },
+                _ => Gate::h(q[0]),
+            });
+        }
+        // At most three readouts keeps the exact channel within test limits.
+        for _ in 0..rng.gen_range(0..=3) {
+            input.gates.push(Gate::measure {
+                qubit: rng.gen_range(0..n as u32),
+                cbit: rng.gen_range(0..cbits as u32),
+            });
+        }
+        let initial: Vec<bool> = (0..cbits).map(|_| rng.gen_bool(0.5)).collect();
+        assert_full_export(&input, &initial);
+    }
 }

@@ -13,6 +13,10 @@
 pub(crate) mod channel;
 mod matrix;
 mod scalar;
+pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
+
 use crate::circuit::{Circuit, Gate, qubit_operands};
 use crate::pbc::{Pauli, PauliNode, PauliRef, PbcCircuit, PbcOp, Phase};
 pub(crate) use matrix::Matrix;
@@ -134,13 +138,19 @@ fn controlled(n: usize, controls: &[u32], target: u32, flip: bool) -> Matrix {
     matrix
 }
 
-fn gate_matrix(n: usize, gate: &Gate, index: usize) -> Result<Matrix, Error> {
+/// Reject out-of-range or repeated qubit operands of instruction `index`.
+fn check_operands(n: usize, gate: &Gate, index: usize) -> Result<(), Error> {
     let (count, qs) = qubit_operands(gate);
     for (i, q) in qs[..count].iter().enumerate() {
         if *q as usize >= n || qs[..i].contains(q) {
             return Err(Error::InvalidOperand { index });
         }
     }
+    Ok(())
+}
+
+fn gate_matrix(n: usize, gate: &Gate, index: usize) -> Result<Matrix, Error> {
+    check_operands(n, gate, index)?;
     let zero = Scalar::zero();
     let one = Scalar::integer(1);
     Ok(match *gate {
@@ -269,7 +279,3 @@ pub(crate) fn pbc_unitary(circuit: &PbcCircuit, limits: Limits) -> Result<Matrix
     }
     Ok(result)
 }
-
-pub(crate) mod test_support;
-#[cfg(test)]
-mod tests;

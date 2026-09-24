@@ -3,12 +3,35 @@ mod support;
 use support::Tzap;
 
 fn qasm(n: usize, body: &str) -> String {
-    format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[{n}];\ncreg c[{n}];\n{body}\n")
+    qasm_with_cbits(n, n, body)
+}
+
+fn qasm_with_cbits(n: usize, cbits: usize, body: &str) -> String {
+    format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[{n}];\ncreg c[{cbits}];\n{body}\n")
+}
+
+/// Convert without optimization beyond gate cancellation, so outputs are the
+/// direct transformation the docs describe.
+fn convert(source: &str) -> String {
+    Tzap::new(&[
+        "-",
+        "-o",
+        "-",
+        "--to-pbc",
+        "--passes",
+        "CancelGates",
+        "--quiet",
+    ])
+    .stdin(source)
+    .run()
+    .ok("PBC conversion")
+    .stdout
 }
 
 #[test]
 fn documented_measurement_examples_match_cli_output() {
     let doc = include_str!("../docs/pbc.md");
+    let readme = include_str!("../README.md");
     for (n, body, expected) in [
         (
             1,
@@ -32,20 +55,35 @@ fn documented_measurement_examples_match_cli_output() {
         ),
     ] {
         assert!(doc.contains(&format!("```text\n{expected}```")));
-        let run = Tzap::new(&[
-            "-",
-            "-o",
-            "-",
-            "--to-pbc",
-            "--passes",
-            "CancelGates",
-            "--quiet",
-        ])
-        .stdin(&qasm(n, body))
-        .run()
-        .ok("documented example");
-        assert_eq!(run.stdout, expected);
+        assert_eq!(convert(&qasm(n, body)), expected);
     }
+    for (body, expected, text) in [
+        (
+            "h q[0];\ncx q[0],q[1];\nmeasure q[1] -> c[0];",
+            "qubits 2\nregisters 1\nm 1 X0 Z1 -> c0\nh 0\ncx 0 1\n",
+            doc,
+        ),
+        (
+            "h q[0];\ncx q[0],q[1];\nt q[1];\nmeasure q[1] -> c[0];",
+            "qubits 2\nregisters 1\nr 1 1 X0 Z1\nm 1 X0 Z1 -> c0\nh 0\ncx 0 1\n",
+            readme,
+        ),
+    ] {
+        assert!(text.contains(&format!("```text\n{expected}```")));
+        assert_eq!(convert(&qasm_with_cbits(2, 1, body)), expected);
+    }
+}
+
+/// Documented: registers from several QASM declarations are numbered
+/// consecutively, in declaration order.
+#[test]
+fn multiple_registers_are_numbered_in_declaration_order() {
+    let source = "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg a[1];\nqreg b[2];\n\
+                  creg x[1];\ncreg y[2];\nh b[1];\nmeasure b[1] -> y[1];\nmeasure a[0] -> x[0];\n";
+    assert_eq!(
+        convert(source),
+        "qubits 3\nregisters 3\nm 1 X2 -> c2\nm 1 Z0 -> c0\nh 2\n"
+    );
 }
 
 #[test]
@@ -140,9 +178,11 @@ fn unsupported_inputs_fail_even_without_output_destination() {
         ("reset q[0];", "Reset"),
         ("rz(pi/5) q[0];", "--decompose-rz"),
         ("measure q[0] -> c[0];\nh q[0];", "final input block"),
+        // The measurement block is global, not per qubit.
+        ("measure q[0] -> c[0];\nh q[1];", "final input block"),
     ] {
         let run = Tzap::new(&["-", "--to-pbc", "--passes", "CancelGates"])
-            .stdin(&qasm(1, body))
+            .stdin(&qasm(2, body))
             .run()
             .failed("invalid PBC input");
         assert!(run.stderr.contains(error), "{}", run.stderr);

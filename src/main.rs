@@ -263,8 +263,7 @@ fn prepare_output(ui: &Ui, run: &Run, circuit: &Circuit) -> Option<String> {
     // Conversion is terminal: optimization and requested decompositions have
     // already finished. Validate even when no output destination was requested.
     if run.to_pbc {
-        use tzap::pbc::to_pbc;
-        let pbc = to_pbc(circuit).unwrap_or_else(|e| {
+        let pbc = tzap::pbc::to_pbc(circuit).unwrap_or_else(|e| {
             let hint = if circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
                 " Rz gates require --decompose-rz (or DecomposeRz in --passes)."
             } else {

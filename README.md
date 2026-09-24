@@ -122,14 +122,16 @@ Conversion runs last, after optimization and requested decompositions. Inputs
 must have no resets and only terminal measurements; use `--decompose-rz` for Rz.
 Export preserves all quantum and classical outputs, including post-measurement
 states. The entire remaining Clifford suffix is retained as named gates,
-whether none, some, or all qubits are measured.
+whether none, some, or all qubits are measured. For example,
+`h q[0]; cx q[0],q[1]; t q[1]; measure q[1] -> c[0];` exports as:
 
 ```text
 qubits 2
 registers 1
 r 1 1 X0 Z1
-m -1 Z1 -> c0
+m 1 X0 Z1 -> c0
 h 0
+cx 0 1
 ```
 
 `r <k> <sign> <factors>` rotates by `k*pi/8` using `exp(-i*k*pi/8*P)`.

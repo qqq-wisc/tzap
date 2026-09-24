@@ -1,6 +1,6 @@
 //! Sparse, line-based PBC export. Materialization is not a linear-time operation.
 use super::{PbcCircuit, PbcError, PbcOp, Phase};
-use crate::circuit::Gate;
+use crate::circuit::qubit_operands;
 use std::fmt::Write;
 
 #[cfg(test)]
@@ -23,9 +23,7 @@ impl Default for TextOptions {
 
 impl PbcCircuit {
     /// Export with all quantum and classical outputs preserved, including the
-    /// named Clifford suffix. Registers are c0..c(N-1); omitted factors are identity.
-    /// Angles are signed integer multiples of pi/8, with exp(-i angle P).
-    /// Empty factor lists represent identity. No measurement outcomes are sampled.
+    /// named Clifford suffix. See `docs/pbc.md` for the format.
     pub fn to_text(&self) -> Result<String, PbcError> {
         self.to_text_with(TextOptions::default())
     }
@@ -34,68 +32,52 @@ impl PbcCircuit {
     /// format supports measurements into classical registers, not hidden
     /// outcomes or feed-forward. Reject unsupported operations instead of losing them.
     pub fn to_text_with(&self, options: TextOptions) -> Result<String, PbcError> {
-        for (index, op) in self.operations.iter().enumerate() {
-            match op {
-                PbcOp::Rotate { .. } => (),
-                PbcOp::Measure {
-                    target: Some(_), ..
-                } => (),
-                _ => return Err(PbcError::UnsupportedTextOperation { index }),
-            }
+        let exportable = |op: &PbcOp| {
+            matches!(
+                op,
+                PbcOp::Rotate { .. }
+                    | PbcOp::Measure {
+                        target: Some(_),
+                        ..
+                    }
+            )
+        };
+        if let Some(index) = self.operations.iter().position(|op| !exportable(op)) {
+            return Err(PbcError::UnsupportedTextOperation { index });
         }
         let mut text = format!("qubits {}\nregisters {}\n", self.num_qubits, self.num_cbits);
-        let roots: Vec<_> = self
-            .operations
-            .iter()
-            .map(|op| op.axis().as_ref())
-            .collect();
-        let mut operations = self.operations.iter();
-        self.arena
-            .materialize(&roots, options.max_expansion_cells, |reference, value| {
-                let op = operations.next().unwrap();
-                let sign = match value.phase.times(reference.phase) {
-                    Phase::One => "1",
-                    Phase::MinusOne => "-1",
-                    _ => return Err(PbcError::NonHermitianAxis),
-                };
-                match op {
-                    PbcOp::Rotate { angle, .. } => {
-                        let k = i16::from(angle.eighths());
-                        let k = if k > 4 { k - 8 } else { k };
-                        write!(text, "r {k} {sign}").unwrap();
-                    }
-                    PbcOp::Measure { .. } => write!(text, "m {sign}").unwrap(),
-                    _ => unreachable!("validated above"),
-                }
-                for (q, p) in value.sorted_factors() {
-                    write!(text, " {p}{q}").unwrap();
-                }
-                if let PbcOp::Measure {
-                    target: Some(c), ..
-                } = op
-                {
-                    write!(text, " -> c{c}").unwrap();
-                }
-                text.push('\n');
-                Ok(())
-            })?;
+        self.visit_axes(options.max_expansion_cells, |op, phase, factors| {
+            let sign = match phase {
+                Phase::One => "1",
+                Phase::MinusOne => "-1",
+                Phase::I | Phase::MinusI => return Err(PbcError::NonHermitianAxis),
+            };
+            match op {
+                PbcOp::Rotate { angle, .. } => write!(text, "r {} {sign}", angle.signed_eighths()),
+                _ => write!(text, "m {sign}"),
+            }
+            .unwrap();
+            for (q, p) in factors {
+                write!(text, " {p}{q}").unwrap();
+            }
+            if let PbcOp::Measure {
+                target: Some(c), ..
+            } = op
+            {
+                write!(text, " -> c{c}").unwrap();
+            }
+            text.push('\n');
+            Ok(())
+        })?;
+        // Named gates form a trailing block, executed after all r/m records.
         for gate in &self.output_cliffords {
-            write_clifford(&mut text, gate);
+            let (n, qs) = qubit_operands(gate);
+            text.push_str(gate.kind().name());
+            for q in &qs[..n] {
+                write!(text, " {q}").unwrap();
+            }
+            text.push('\n');
         }
         Ok(text)
-    }
-}
-
-/// Named gates form a trailing block, executed after all rotation/measurement records.
-fn write_clifford(text: &mut String, gate: &Gate) {
-    match *gate {
-        Gate::h(q) => writeln!(text, "h {q}").unwrap(),
-        Gate::x(q) => writeln!(text, "x {q}").unwrap(),
-        Gate::z(q) => writeln!(text, "z {q}").unwrap(),
-        Gate::s(q) => writeln!(text, "s {q}").unwrap(),
-        Gate::sdg(q) => writeln!(text, "sdg {q}").unwrap(),
-        Gate::cnot { control, target } => writeln!(text, "cx {control} {target}").unwrap(),
-        Gate::cz { control, target } => writeln!(text, "cz {control} {target}").unwrap(),
-        _ => unreachable!("suffix construction validates Cliffords"),
     }
 }

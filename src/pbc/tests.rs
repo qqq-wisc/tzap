@@ -1,11 +1,16 @@
 use super::*;
+use crate::circuit::Gate;
 
 #[test]
 fn angles_are_exact_modulo_global_phase() {
     for k in -64..64 {
         let angle = PauliAngle::new(k);
         assert_eq!(angle.eighths(), k.rem_euclid(8) as u8);
-        assert_eq!(angle.plus(angle.inverse()), PauliAngle::default());
+        assert_eq!(angle + -angle, PauliAngle::default());
+        assert_eq!(
+            i64::from(angle.signed_eighths()).rem_euclid(8),
+            k.rem_euclid(8)
+        );
     }
     assert_eq!(PauliAngle::new(i64::MIN).eighths(), 0);
     assert_eq!(PauliAngle::new(-1).to_string(), "-pi/8");
@@ -44,7 +49,7 @@ fn pauli_multiplication_is_associative() {
                 let (q, abc) = ab.times(c);
                 let (r, bc) = b.times(c);
                 let (s, abc2) = a.times(bc);
-                assert_eq!((p.times(q), abc), (r.times(s), abc2));
+                assert_eq!((p * q, abc), (r * s, abc2));
             }
         }
     }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::circuit::GateKind;
 use crate::pbc::{ExpandedPauli, Pauli};
 use crate::semantics::test_support::assert_equivalent;
 
@@ -60,7 +61,7 @@ fn litinski_four_wire_rotation_commutation_example() {
         assert_eq!(expanded.factors, factors);
         let normalized = match expanded.phase {
             Phase::One => *angle,
-            Phase::MinusOne => angle.inverse(),
+            Phase::MinusOne => -*angle,
             _ => panic!("non-Hermitian axis"),
         };
         assert_eq!(normalized, PauliAngle::new(eighths));
@@ -487,6 +488,17 @@ fn reject_resets_and_any_gate_after_measurement() {
             }
         );
     }
+    // The measurement block is global: a gate on an unmeasured wire after a
+    // measurement is rejected too.
+    let mut two = input(2, vec![Gate::measure { qubit: 0, cbit: 0 }, Gate::t(1)]);
+    two.num_cbits = 1;
+    assert_eq!(
+        to_pbc(&two).unwrap_err(),
+        PbcError::InvalidInput {
+            index: 1,
+            cause: Box::new(PbcError::GateAfterMeasurement)
+        }
+    );
     for gate in [Gate::h(0), Gate::x(0), Gate::t(0), Gate::sdg(0)] {
         c.gates = vec![Gate::measure { qubit: 0, cbit: 0 }, gate];
         assert_eq!(
@@ -604,4 +616,19 @@ fn long_native_stream_has_fixed_cost_per_gate() {
     assert_eq!(output.operations().len(), 7 * c.gates.len());
     assert!(output.output_cliffords().is_empty());
     assert_linear_size(&c, &output);
+}
+
+#[test]
+fn errors_display_their_instruction_and_expose_their_cause() {
+    use std::error::Error;
+    let err = to_pbc(&input(1, vec![Gate::h(0), Gate::rz(0.5, 0)])).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "input gate 1: unsupported PBC input gate: Rz"
+    );
+    assert_eq!(
+        err.source().unwrap().to_string(),
+        PbcError::UnsupportedGate(GateKind::Rz).to_string()
+    );
+    assert!(PbcError::ExpansionLimit.source().is_none());
 }

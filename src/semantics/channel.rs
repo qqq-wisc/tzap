@@ -254,12 +254,7 @@ pub(crate) fn circuit_channel(
     let mut splits = 0;
     let mut destinations = BTreeSet::new();
     for (index, gate) in circuit.gates.iter().enumerate() {
-        let (n, qs) = qubit_operands(gate);
-        for (i, &q) in qs[..n].iter().enumerate() {
-            if q as usize >= circuit.num_qubits || qs[..i].contains(&q) {
-                return Err(Error::InvalidOperand { index });
-            }
-        }
+        check_operands(circuit.num_qubits, gate, index)?;
         match gate {
             Gate::measure { cbit, .. } => {
                 if *cbit as usize >= circuit.num_cbits {
