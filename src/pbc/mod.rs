@@ -139,7 +139,6 @@ pub enum PbcError {
         cause: Box<PbcError>,
     },
     UnsupportedGate(GateKind),
-    GateAfterMeasurement,
     TooManyQubits,
     QubitOutOfRange(Qubit),
     ClassicalBitOutOfRange(CBit),
@@ -160,9 +159,6 @@ impl fmt::Display for PbcError {
         match self {
             Self::InvalidInput { index, cause } => write!(f, "input gate {index}: {cause}"),
             Self::UnsupportedGate(gate) => write!(f, "unsupported PBC input gate: {gate:?}"),
-            Self::GateAfterMeasurement => {
-                f.write_str("measurements must form the final input block")
-            }
             Self::TooManyQubits => f.write_str("PBC qubit count exceeds the supported u32 range"),
             Self::QubitOutOfRange(q) => write!(f, "PBC qubit {q} is out of range"),
             Self::ClassicalBitOutOfRange(c) => write!(f, "PBC classical bit {c} is out of range"),

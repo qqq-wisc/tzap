@@ -5,10 +5,10 @@
 //! Thus the returned matrix is a unitary representative up to global phase,
 //! not necessarily the literal exp(-i*k*pi*P/8). All arithmetic is exact in
 //! Q(sqrt(2), i). Qubit 0 is the most significant basis bit.
-//! [`channel`] extends this to exact quantum-classical maps with terminal
-//! measurements, for an explicit initial classical store and arbitrary quantum
-//! input. Gate inputs reject resets and mid-circuit measurements; PBC outputs
-//! retain a terminal Clifford frame to restore their quantum output state.
+//! [`channel`] extends this to exact quantum-classical maps with measurements
+//! anywhere, for an explicit initial classical store and arbitrary quantum
+//! input. Gate inputs reject resets; PBC outputs retain a terminal Clifford
+//! frame to restore their quantum output state.
 
 pub(crate) mod channel;
 mod matrix;
@@ -48,7 +48,6 @@ pub(crate) enum Error {
     UnsupportedOperation { index: usize },
     InvalidOperand { index: usize },
     InvalidInitialStore,
-    GateAfterMeasurement { index: usize },
 }
 
 // Conservatively covers the accumulator, identity, gate, and intermediate

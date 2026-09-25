@@ -5,8 +5,8 @@
 //! eigenvalue. All output qubits and final user classical bits are observable;
 //! internal outcome IDs are not. Hidden histories are summed incoherently into
 //! Choi blocks, never compared as individual Kraus operators or sampled.
-//! Gate inputs require terminal measurements. PBC may include rotations after
-//! measurements to restore quantum outputs. Resets and feed-forward are rejected.
+//! Measurements may appear anywhere in gate and PBC inputs. Resets and
+//! feed-forward are rejected.
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -241,7 +241,7 @@ fn finish(dim: usize, cbits: usize, branches: Vec<Branch>) -> Channel {
     }
 }
 
-/// Gate semantics from native matrices and direct terminal-measurement Kraus
+/// Gate semantics from native matrices and direct measurement Kraus
 /// operators. `initial` contains c0,c1,...; arbitrary Rz remains unsupported.
 pub(crate) fn circuit_channel(
     circuit: &Circuit,
@@ -264,7 +264,6 @@ pub(crate) fn circuit_channel(
                 destinations.insert(*cbit);
             }
             Gate::reset(_) | Gate::rz(..) => return Err(Error::UnsupportedOperation { index }),
-            _ if splits > 0 => return Err(Error::GateAfterMeasurement { index }),
             _ => (),
         }
     }

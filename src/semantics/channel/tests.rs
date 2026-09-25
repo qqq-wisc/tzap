@@ -462,10 +462,12 @@ fn resets_and_post_measurement_gates_are_rejected() {
             Err(Error::UnsupportedOperation { index })
         );
     }
+    // Gates after a measurement act on each post-measurement branch.
     for gate in [Gate::h(0), Gate::x(0), Gate::t(0), Gate::sdg(0)] {
+        let c = circuit(1, 1, vec![measure(0, 0), gate]);
         assert_eq!(
-            circuit_channel(&circuit(1, 1, vec![measure(0, 0), gate]), &[false], limits),
-            Err(Error::GateAfterMeasurement { index: 1 })
+            circuit_channel(&c, &[false], limits).unwrap(),
+            pbc(&to_pbc(&c).unwrap(), &[false])
         );
     }
     let mut c = PbcCircuit::new(1, 0);

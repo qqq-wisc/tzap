@@ -84,7 +84,7 @@ impl PbcCircuit {
                     Phase::MinusOne => "-1",
                     _ => return Err(PbcError::NonHermitianAxis),
                 };
-                write!(text, "frame {}{q} {sign}", if is_z { 'Z' } else { 'X' }).unwrap();
+                write!(text, "f {}{q} {sign}", if is_z { 'Z' } else { 'X' }).unwrap();
                 let mut sorted: Vec<_> = factors.iter().collect();
                 sorted.sort_unstable_by_key(|&(q, _)| q);
                 for (qubit, pauli) in sorted {

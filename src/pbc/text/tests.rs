@@ -25,7 +25,7 @@ fn read_text(text: &str) -> PbcCircuit {
     for line in lines {
         let mut words = line.split_whitespace();
         let op = words.next().unwrap();
-        if op == "frame" {
+        if op == "f" {
             in_frame = true;
             let row = words.next().unwrap();
             let is_z = match &row[..1] {
@@ -364,7 +364,7 @@ fn full_readout_keeps_output_frame_and_quantum_outputs() {
     let p = to_pbc(&c).unwrap();
     assert_eq!(
         p.to_text().unwrap(),
-        "qubits 1\nregisters 1\nm 1 X0 -> c0\nframe X0 1 Z0\nframe Z0 1 X0\n"
+        "qubits 1\nregisters 1\nm 1 X0 -> c0\nf X0 1 Z0\nf Z0 1 X0\n"
     );
     assert!(p.frame_matches_gates(&[Gate::h(0)]));
 }
@@ -396,7 +396,7 @@ fn all_clifford_gates_export_as_frame_and_empty_program() {
     };
     assert_eq!(
         to_pbc(&c).unwrap().to_text().unwrap(),
-        "qubits 2\nregisters 0\nframe X0 -1 Y0 Z1\nframe X1 -1 Z0 X1\nframe Z0 -1 X0 Z1\nframe Z1 -1 Z1\n"
+        "qubits 2\nregisters 0\nf X0 -1 Y0 Z1\nf X1 -1 Z0 X1\nf Z0 -1 X0 Z1\nf Z1 -1 Z1\n"
     );
 }
 
@@ -452,9 +452,10 @@ fn text_budget_covers_operations_and_output_frame_together() {
     );
 }
 
-/// Seeded differential fuzzing of the exporter itself: random gate prefixes
-/// with random terminal readouts (subsets, orders, overwritten registers),
-/// exported to text, re-read independently, and compared as exact channels.
+/// Seeded differential fuzzing of the exporter itself: random gate sequences
+/// with readouts at random positions, including mid-circuit (subsets, orders,
+/// overwritten registers), exported to text, re-read independently, and
+/// compared as exact channels.
 #[test]
 fn seeded_export_fuzz_preserves_exact_channels() {
     use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -501,12 +502,97 @@ fn seeded_export_fuzz_preserves_exact_channels() {
         }
         // At most three readouts keeps the exact channel within test limits.
         for _ in 0..rng.gen_range(0..=3) {
-            input.gates.push(Gate::measure {
-                qubit: rng.gen_range(0..n as u32),
-                cbit: rng.gen_range(0..cbits as u32),
-            });
+            let position = rng.gen_range(0..=input.gates.len());
+            input.gates.insert(
+                position,
+                Gate::measure {
+                    qubit: rng.gen_range(0..n as u32),
+                    cbit: rng.gen_range(0..cbits as u32),
+                },
+            );
         }
         let initial: Vec<bool> = (0..cbits).map(|_| rng.gen_bool(0.5)).collect();
         assert_full_export(&input, &initial);
+    }
+}
+
+/// The mid-circuit examples in docs/pbc.md: exact text, and exact channels for
+/// every initial classical store.
+#[test]
+fn mid_circuit_examples_export_exactly() {
+    let m = |qubit, cbit| Gate::measure { qubit, cbit };
+    let cx = |control, target| Gate::cnot { control, target };
+    let cases = [
+        (
+            1,
+            vec![
+                Gate::h(0),
+                Gate::t(0),
+                m(0, 0),
+                Gate::h(0),
+                Gate::t(0),
+                m(0, 1),
+            ],
+            "qubits 1\nregisters 2\nr 1 1 X0\nm 1 X0 -> c0\nr 1 1 Z0\nm 1 Z0 -> c1\n",
+        ),
+        (
+            2,
+            vec![
+                Gate::h(0),
+                cx(0, 1),
+                m(0, 0),
+                Gate::t(1),
+                Gate::h(1),
+                m(1, 1),
+            ],
+            "qubits 2\nregisters 2\nm 1 X0 -> c0\nr 1 1 X0 Z1\nm 1 X1 -> c1\n\
+             f X0 1 Z0 X1\nf X1 1 X0 Z1\nf Z0 1 X0\nf Z1 1 X1\n",
+        ),
+        (
+            3,
+            vec![
+                Gate::h(0),
+                Gate::t(0),
+                cx(0, 2),
+                cx(1, 2),
+                m(2, 0),
+                Gate::h(0),
+                Gate::t(0),
+                Gate::t(1),
+                m(0, 1),
+            ],
+            "qubits 3\nregisters 2\nr 1 1 X0\nm 1 X0 Z1 Z2 -> c0\nr 1 1 Z0 X2\nr 1 1 Z1\n\
+             m 1 Z0 X2 -> c1\nf X1 1 X1 X2\nf Z0 1 Z0 X2\nf Z2 1 X0 Z1 Z2\n",
+        ),
+        (
+            3,
+            vec![
+                Gate::h(0),
+                Gate::h(1),
+                Gate::ccx {
+                    control1: 0,
+                    control2: 1,
+                    target: 2,
+                },
+                m(2, 0),
+                Gate::tdg(0),
+                cx(0, 1),
+                m(1, 1),
+            ],
+            "qubits 3\nregisters 2\nr 1 1 X0\nr 1 1 X1\nr 1 1 X2\nr -1 1 X0 X1\n\
+             r -1 1 X0 X2\nr -1 1 X1 X2\nr 1 1 X0 X1 X2\nm 1 Z2 -> c0\nr -1 1 X0\n\
+             m 1 X0 X1 -> c1\nf X0 1 Z0 Z1\nf X1 1 Z1\nf Z0 1 X0\nf Z1 1 X0 X1\n",
+        ),
+    ];
+    for (n, gates, expected) in cases {
+        let input = Circuit {
+            num_qubits: n,
+            num_cbits: 2,
+            gates,
+        };
+        assert_eq!(to_pbc(&input).unwrap().to_text().unwrap(), expected);
+        for initial in [[false, false], [true, false], [false, true], [true, true]] {
+            assert_full_export(&input, &initial);
+        }
     }
 }

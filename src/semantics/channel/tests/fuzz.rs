@@ -32,15 +32,15 @@ fn random_unitary(n: usize, rng: &mut StdRng) -> Gate {
 }
 
 #[test]
-fn seeded_terminal_partial_and_unitary_channel_fuzz_96_cases() {
+fn seeded_measurement_channel_fuzz_96_cases() {
     for case in 0..96 {
         let seed = 0x4348_414e_0000 + case;
         let mut rng = StdRng::seed_from_u64(seed);
         let n = 1 + (case % 3) as usize;
         let initial: Vec<bool> = (0..n + 1).map(|_| rng.gen_bool(0.5)).collect();
         let mut gates: Vec<_> = (0..8).map(|_| random_unitary(n, &mut rng)).collect();
-        // Full, partial, repeated/overwritten, or no measurements. The extra
-        // classical bit is untouched. No resets or post-measurement gates.
+        // Full, partial, repeated/overwritten, mid-circuit, or no terminal
+        // measurements. The extra classical bit is untouched. No resets.
         let q = rng.gen_range(0..n) as u32;
         gates.extend((0..3).map(|_| random_unitary(n, &mut rng)));
         match case % 4 {
@@ -53,7 +53,12 @@ fn seeded_terminal_partial_and_unitary_channel_fuzz_96_cases() {
                 }
             }
             1 => gates.push(measure(q, 0)),
-            _ => (),
+            _ => {
+                // Mid-circuit readouts, followed by more gates.
+                gates.insert(rng.gen_range(0..gates.len()), measure(q, 0));
+                let p = rng.gen_range(0..n) as u32;
+                gates.insert(rng.gen_range(0..gates.len()), measure(p, n as u32 - 1));
+            }
         }
         let input = circuit(n, n + 1, gates);
         let result = std::panic::catch_unwind(|| check(&input, &initial));

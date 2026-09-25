@@ -488,26 +488,69 @@ fn reject_resets_and_any_gate_after_measurement() {
             }
         );
     }
-    // The measurement block is global: a gate on an unmeasured wire after a
-    // measurement is rejected too.
-    let mut two = input(2, vec![Gate::measure { qubit: 0, cbit: 0 }, Gate::t(1)]);
-    two.num_cbits = 1;
-    assert_eq!(
-        to_pbc(&two).unwrap_err(),
-        PbcError::InvalidInput {
-            index: 1,
-            cause: Box::new(PbcError::GateAfterMeasurement)
-        }
-    );
-    for gate in [Gate::h(0), Gate::x(0), Gate::t(0), Gate::sdg(0)] {
-        c.gates = vec![Gate::measure { qubit: 0, cbit: 0 }, gate];
-        assert_eq!(
-            to_pbc(&c).unwrap_err(),
-            PbcError::InvalidInput {
-                index: 1,
-                cause: Box::new(PbcError::GateAfterMeasurement)
+}
+
+/// Gates after a measurement, on the measured or any other wire, convert with
+/// exactly the channel of the gate circuit. The measurement itself leaves the
+/// frame unchanged, so later rotations use the same images as without it.
+#[test]
+fn mid_circuit_measurements_match_exact_channels() {
+    use crate::semantics::channel::{ChannelLimits, circuit_channel, pbc_channel};
+    let limits = ChannelLimits::default();
+    let prefixes = [
+        vec![],
+        vec![Gate::h(0)],
+        vec![
+            Gate::h(0),
+            Gate::cnot {
+                control: 0,
+                target: 1,
+            },
+        ],
+        vec![
+            Gate::s(1),
+            Gate::h(1),
+            Gate::cz {
+                control: 1,
+                target: 0,
+            },
+        ],
+    ];
+    let suffixes = [
+        Gate::t(0),
+        Gate::tdg(1),
+        Gate::h(0),
+        Gate::cnot {
+            control: 1,
+            target: 0,
+        },
+    ];
+    for prefix in &prefixes {
+        for q in 0..2 {
+            for suffix in &suffixes {
+                let mut c = input(2, prefix.clone());
+                c.num_cbits = 2;
+                c.gates.push(Gate::measure { qubit: q, cbit: 0 });
+                // H then T on the measured wire gives a rotation that does not
+                // commute with the measurement, so its position matters.
+                c.gates.extend([
+                    suffix.clone(),
+                    Gate::h(q),
+                    Gate::t(q),
+                    Gate::t(1),
+                    Gate::h(1),
+                ]);
+                c.gates.push(Gate::measure { qubit: 1, cbit: 1 });
+                let output = to_pbc(&c).unwrap();
+                assert_eq!(output.measurement_count(), 2);
+                assert_linear_size(&c, &output);
+                for initial in [[false, true], [true, false]] {
+                    let expected = circuit_channel(&c, &initial, limits).unwrap();
+                    let actual = pbc_channel(&output, &initial, limits).unwrap();
+                    assert_eq!(expected.compare(&actual), Ok(()), "{c}");
+                }
             }
-        );
+        }
     }
 }
 

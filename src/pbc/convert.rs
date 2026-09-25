@@ -20,8 +20,9 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
     }
 }
 
-/// Convert Clifford+T, CZ, CCX, CCZ, and terminal measurements to logical PBC.
-/// Resets and gates after measurements are rejected. Arbitrary Rz must be
+/// Convert Clifford+T, CZ, CCX, CCZ, and measurements to logical PBC.
+/// Measurements may appear anywhere: each measures the current image of Z
+/// and leaves the frame unchanged. Resets are rejected. Arbitrary Rz must be
 /// decomposed by the caller first. The output frame is retained to preserve
 /// quantum outputs, including circuits with no or partial measurements.
 ///
@@ -46,18 +47,11 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
 pub fn to_pbc(circuit: &Circuit) -> Result<PbcCircuit, PbcError> {
     u32::try_from(circuit.num_qubits).map_err(|_| PbcError::TooManyQubits)?;
     // Validate everything up front, so conversion itself cannot fail or panic.
-    let mut measuring = false;
     for (index, gate) in circuit.gates.iter().enumerate() {
-        let invalid = |cause| PbcError::InvalidInput {
+        validate(circuit, gate).map_err(|cause| PbcError::InvalidInput {
             index,
             cause: Box::new(cause),
-        };
-        validate(circuit, gate).map_err(invalid)?;
-        let is_measure = matches!(gate, Gate::measure { .. });
-        if measuring && !is_measure {
-            return Err(invalid(PbcError::GateAfterMeasurement));
-        }
-        measuring |= is_measure;
+        })?;
     }
     let output = PbcCircuit::new(circuit.num_qubits, circuit.num_cbits);
     let mut converter = Converter { output };
