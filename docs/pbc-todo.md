@@ -23,7 +23,8 @@ Branch: `codex/clifford-to-pbc`
 
 ## 3. Optimization opportunities
 
-- Merge rotations about equal Pauli axes and cancel inverse rotations.
+- ~~Merge rotations about equal Pauli axes and cancel inverse rotations.~~
+  Done: `--pbc-opt` (see `docs/pbc-optimize.md`).
 - Explore commuting rotations to expose merges and reduce non-Clifford depth.
 - Remove rotations that cannot affect the requested measurement results.
 - For partial readout, explore discarding measured quantum outputs while

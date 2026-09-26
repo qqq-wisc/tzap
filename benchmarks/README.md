@@ -8,6 +8,18 @@ Circuits used to measure tzap. All are OpenQASM 2.0.
 | `cobble-t`  | 6     | 11–22  | 34k–588k (1.35M)   | Clifford+T      |
 | `cobble-rz` | 6     | 11–22  | 1.9k–353k (793k)   | Clifford+T+Rz   |
 | `qft`       | 4     | 20–50  | 310k–1.03M (2.68M) | Clifford+T      |
+| `ftcircuitbench` | 63 | 4–200 | 23–2.1M (27.2M) | Clifford+T |
+| `ftcircuitbench-large` | 32 | 9–128 | 478k–24.6M (210M) | Clifford+T |
+
+## `ftcircuitbench`
+
+Clifford+T circuits synthesized (Gridsynth, precision 5) from the inputs of
+[FTCircuitBench](https://github.com/pnnl/FTCircuitBench): adders, Hamiltonian
+simulation, HHL, QFT, QPE and QSVT. See
+[`ftcircuitbench/README.md`](ftcircuitbench/README.md) for how it was built.
+`ftcircuitbench-large` holds the other 32 inputs, the ones over 60,000
+rotations, generated the same way (1.7 GB; regenerate rather than commit; see
+[`ftcircuitbench-large/README.md`](ftcircuitbench-large/README.md)).
 
 ## `feynman`
 

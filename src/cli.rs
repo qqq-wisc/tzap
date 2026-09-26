@@ -79,6 +79,10 @@ pub(crate) struct Run {
     /// stdout, or `None` to discard it.
     pub(crate) output_path: Option<String>,
     pub(crate) to_pbc: bool,
+    /// Run the PBC rotation optimizer after conversion (`--pbc-opt`).
+    pub(crate) pbc_opt: bool,
+    /// Write an SVG drawing of the PBC circuit here (`--visualize-pbc`).
+    pub(crate) visualize_pbc: Option<String>,
     /// `--parallel`/`--no-parallel` as asked for, or `None` to decide from
     /// the circuit's size (see [`Run::resolve_parallel`]). Distinct from
     /// `options.parallel`, which is the answer rather than the request.
@@ -194,6 +198,8 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     let mut input_path: Option<String> = None;
     let mut output_path: Option<String> = None;
     let mut to_pbc = false;
+    let mut pbc_opt = false;
+    let mut visualize_pbc: Option<String> = None;
     let mut decompose_rz = false;
     let mut decompose_cz = false;
     let mut decompose_ccx = false;
@@ -223,6 +229,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
             "--version" | "-v" | "-V" => version = true,
             "--decompose-rz" => decompose_rz = true,
             "--to-pbc" => to_pbc = true,
+            "--pbc-opt" => pbc_opt = true,
             "--decompose-cz" => decompose_cz = true,
             "--decompose-ccx" => decompose_ccx = true,
             "--superopt-gates" => {
@@ -294,6 +301,12 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
                     "-Osuper" => Level::Osuper,
                     _ => unreachable!(),
                 });
+            }
+            "--visualize-pbc" => {
+                i += 1;
+                visualize_pbc = Some(args.get(i).cloned().unwrap_or_else(|| {
+                    arg_error("--visualize-pbc requires an output SVG file path")
+                }));
             }
             "-o" => {
                 i += 1;
@@ -417,6 +430,9 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
              — list the corresponding decomposition passes instead",
         );
     }
+    if pbc_opt && !to_pbc && visualize_pbc.is_none() {
+        arg_error("--pbc-opt optimizes PBC output — combine it with --to-pbc or --visualize-pbc");
+    }
     // Two writers, one stream: whichever won, the other's output would be
     // interleaved into it and neither would parse. Better to say so than to
     // emit a QASM file with a JSON object spliced through it.
@@ -432,6 +448,8 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
             input_path,
             output_path,
             to_pbc,
+            pbc_opt,
+            visualize_pbc,
             parallel,
             // An absent `-O` flag means O3 too; the distinction only ever
             // mattered for the validation above, which has already run.
@@ -502,8 +520,14 @@ fn print_help(ui: &Ui) {
         "    {bold}--to-pbc{reset}         Convert final circuit to PBC (-o output.pbc)\n"
     ));
     out.push_str(
-        "                     Preserves quantum and classical outputs; retains named Clifford suffix.\n",
+        "                     Preserves quantum and classical outputs; retains the output Clifford frame.\n",
     );
+    out.push_str(&format!(
+        "    {bold}--pbc-opt{reset}        With --to-pbc: merge and MCR-swap PBC rotations to lower T count\n"
+    ));
+    out.push_str(&format!(
+        "    {bold}--visualize-pbc{reset} <file.svg>  Draw the PBC circuit as SVG (Litinski-style)\n"
+    ));
     out.push_str(&format!(
         "    {bold}--decompose-cz{reset}   Decompose CZ gates into H+CX+H\n"
     ));

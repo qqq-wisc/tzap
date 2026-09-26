@@ -12,6 +12,38 @@ mid-circuit, with more gates after them. For Rz gates, also use
 `--decompose-rz`. CCX and CCZ convert natively, into seven rotations
 each, and need no decomposition flag.
 
+Add `--pbc-opt` to optimize the PBC rotations after conversion (see
+[PBC rotation optimization](pbc-optimize.md)).
+
+## Drawing a PBC circuit
+
+```bash
+tzap input.qasm --visualize-pbc circuit.svg [--pbc-opt] [--to-pbc -o output.pbc]
+```
+
+writes an SVG drawing in the style of Litinski's "A Game of Surface Codes"
+(Figs. 4 and 6). Each operation is one box spanning its qubits, with a
+Pauli letter on every wire it covers (𝟙 inside the span where it acts
+trivially). A tab on the right shows the angle (π/8, π/4, 3π/8 or π/2), with
+a white "−" strip when the axis is negative. π/8-type rotations are green,
+π/4 orange, π/2 grey and measurements blue. As in the paper, the output
+Clifford (the `f` records) is not drawn.
+
+For example, the circuit of the paper's Fig. 4
+([`pbc-litinski-fig4.qasm`](pbc-litinski-fig4.qasm)) draws as
+
+![PBC drawing of Litinski's Fig. 4 circuit](pbc-litinski-fig4.svg)
+
+which matches the paper's bottom-right panel.
+
+As in the paper, operations are drawn as early as their commutation allows:
+each goes one column past the latest earlier operation it anticommutes with,
+so only commuting operations change position. Circuits longer than 400
+operations are drawn up to that point, with dotted wire ends. The library
+call `PbcCircuit::to_svg_with(SvgOptions { .. })` also offers program-order
+layout, full-height boxes (the paper's Fig. 6), register labels, the output
+Clifford as a final box, and a different operation limit.
+
 ## Syntax
 
 The first two lines declare the number of qubits and of classical registers,

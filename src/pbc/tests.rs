@@ -358,3 +358,18 @@ fn ascii_alignment_survives_heading_widths_and_two_digit_qubits() {
         );
     }
 }
+
+#[test]
+fn rotation_weights_count_factors_and_skip_measurements() {
+    let mut c = PbcCircuit::new(3, 1);
+    let x = c.x(0).unwrap();
+    let z = c.z(2).unwrap();
+    let product = c.product(x.as_ref(), z.as_ref()).unwrap();
+    let axis = c.hermitian_axis(product, 100).unwrap();
+    c.rotate(axis, PauliAngle::new(1)).unwrap();
+    c.measure(z, Some(0)).unwrap();
+    c.rotate(c.identity(), PauliAngle::new(1)).unwrap();
+    let m = c.measure(x, None).unwrap();
+    c.conditional_pauli(z, m).unwrap();
+    assert_eq!(c.rotation_weights(1000).unwrap(), vec![2, 0, 1]);
+}

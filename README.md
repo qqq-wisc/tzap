@@ -145,6 +145,11 @@ list is the identity). Register writes may overwrite earlier values. Trailing
 identity rows are implicit. This frame preserves quantum outputs.
 `-o -` writes PBC to stdout. JSON metrics describe the optimized gate circuit
 before conversion.
+Add `--pbc-opt` to merge commuting same-axis rotations and apply MCR group
+swaps after conversion, lowering the PBC T count; see
+[PBC rotation optimization](docs/pbc-optimize.md) for results.
+`--visualize-pbc circuit.svg` draws the PBC circuit as an SVG in the style of
+Litinski's "A Game of Surface Codes" (see [docs/pbc.md](docs/pbc.md#drawing-a-pbc-circuit)).
 Export materializes Pauli strings with a default budget of 16 million sparse-work units;
 unlike compressed conversion, expanded output is not guaranteed linear in size.
 

@@ -175,6 +175,19 @@ fn mid_circuit_case(seed: u64, levels: &[crate::optimize::Level]) {
         Ok(()),
         "mid-circuit mismatch: {replay}"
     );
+    // The rotation optimizer must preserve the channel too, treating
+    // measurements as barriers.
+    let mut optimized = to_pbc(&c).unwrap();
+    let stats = optimized
+        .optimize_rotations(crate::pbc::OptimizeOptions::default())
+        .unwrap();
+    assert!(stats.t_after <= stats.t_before);
+    let actual = pbc_channel(&optimized, &initial, limits).unwrap();
+    assert_eq!(
+        expected.compare(&actual),
+        Ok(()),
+        "rotation optimizer mismatch: {replay}"
+    );
     for &level in levels {
         for parallel in [false, true] {
             let options = Options {
@@ -216,4 +229,121 @@ fn fuzz_mid_circuit_measurements() {
         mid_circuit_case(seed.wrapping_add(case), &levels);
     }
     eprintln!("PBC mid-circuit fuzz: {count} cases passed, starting seed {seed:#x}");
+}
+
+/// O3 is sound as seen through PBC: `to_pbc(C)` (no optimization) and
+/// `to_pbc(O3(C))` are the same operation. Unitary circuits are compared as
+/// exact unitaries up to global phase; circuits with measurements (half the
+/// cases, including mid-circuit ones) as exact quantum-classical channels for
+/// every initial classical store. O3 runs sequentially and in parallel.
+/// Returns whether the case had measurements, and whether O3 changed the
+/// gate list (so the comparison was not trivial).
+fn o3_case(seed: u64) -> (bool, bool) {
+    use crate::optimize::{Level, Options, optimize};
+    use crate::semantics::channel::{ChannelLimits, pbc_channel};
+    use crate::semantics::{Limits, pbc_unitary};
+    let measured = seed % 2 == 1;
+    let (circuit, random_store) = if measured {
+        random_measured_circuit(seed)
+    } else {
+        (random_circuit(seed).0, vec![])
+    };
+    let replay = format!(
+        "seed={seed:#x}\n\
+         Replay: PBC_FUZZ_SEED={seed} PBC_FUZZ_CASES=1 cargo test --release \
+         fuzz_o3_matches_unoptimized_pbc -- --ignored --nocapture\n{circuit}"
+    );
+    let plain = to_pbc(&circuit).unwrap();
+    // The initial store only affects bits the circuit never writes: check
+    // all zeros and one random store. The reference is computed once.
+    let stores = [vec![false; circuit.num_cbits], random_store];
+    let limits = ChannelLimits::default();
+    let reference_channels: Vec<_> = if measured {
+        stores
+            .iter()
+            .map(|s| pbc_channel(&plain, s, limits).unwrap())
+            .collect()
+    } else {
+        vec![]
+    };
+    let reference_unitary = (!measured).then(|| pbc_unitary(&plain, Limits::default()).unwrap());
+    let mut checked: Vec<Vec<crate::circuit::Gate>> = Vec::new();
+    for parallel in [false, true] {
+        let options = Options {
+            level: Level::O3,
+            parallel,
+            ..Options::default()
+        };
+        let (optimized, _) = optimize(&circuit, &options).unwrap();
+        // Parallel O3 usually matches sequential O3 on circuits this small.
+        if checked.contains(&optimized.gates) {
+            continue;
+        }
+        let converted = to_pbc(&optimized).unwrap();
+        if let Some(reference) = &reference_unitary {
+            let actual = pbc_unitary(&converted, Limits::default()).unwrap();
+            assert!(
+                reference.equivalent_up_to_global_phase(&actual),
+                "O3 (parallel={parallel}) changed the unitary: {replay}\n--> {optimized}"
+            );
+        }
+        for (store, reference) in stores.iter().zip(&reference_channels) {
+            let actual = pbc_channel(&converted, store, limits).unwrap();
+            assert_eq!(
+                reference.compare(&actual),
+                Ok(()),
+                "O3 (parallel={parallel}) changed the channel, store {store:?}: {replay}\n--> {optimized}"
+            );
+        }
+        checked.push(optimized.gates);
+    }
+    let changed = checked.iter().any(|gates| *gates != circuit.gates);
+    (measured, changed)
+}
+
+#[test]
+fn bounded_fuzz_o3_matches_unoptimized_pbc() {
+    // Widths 1-3, as for the other bounded fuzzers (exact 4-qubit channels
+    // are slow in debug builds).
+    let seeds = (0x4f33_0000..).filter(|seed| seed % 4 != 3);
+    for seed in seeds.take(24) {
+        o3_case(seed);
+    }
+}
+
+/// PBC_FUZZ_CASES=1000 cargo test --release fuzz_o3_matches_unoptimized_pbc -- --ignored --nocapture
+#[test]
+#[ignore = "extended O3-vs-unoptimized PBC fuzzing; set PBC_FUZZ_CASES and PBC_FUZZ_SEED"]
+fn fuzz_o3_matches_unoptimized_pbc() {
+    let (count, seed) = fuzz_range(1000, 0x4f33_1000);
+    let (mut measured, mut changed) = (0, 0);
+    for case in 0..count {
+        let (m, c) = o3_case(seed.wrapping_add(case));
+        measured += usize::from(m);
+        changed += usize::from(c);
+    }
+    eprintln!(
+        "O3 fuzz: {count} cases passed ({measured} with measurements, {changed} changed by O3), \
+         starting seed {seed:#x}"
+    );
+}
+
+/// The comparison in `o3_case` can fail: deleting one T gate, a wrong
+/// "optimization", is detected on every one of these circuits.
+#[test]
+fn o3_comparison_detects_a_wrong_rewrite() {
+    use crate::semantics::{Limits, pbc_unitary};
+    for seed in (0x4f33_2000..).filter(|s| s % 2 == 0 && s % 4 != 3).take(8) {
+        let circuit = random_circuit(seed).0;
+        let mut wrong = circuit.clone();
+        let t = wrong
+            .gates
+            .iter()
+            .rposition(|g| matches!(g, Gate::t(_)))
+            .expect("every palette includes T");
+        wrong.gates.remove(t);
+        let a = pbc_unitary(&to_pbc(&circuit).unwrap(), Limits::default()).unwrap();
+        let b = pbc_unitary(&to_pbc(&wrong).unwrap(), Limits::default()).unwrap();
+        assert!(!a.equivalent_up_to_global_phase(&b), "seed {seed:#x}");
+    }
 }

@@ -21,13 +21,17 @@
 mod ascii;
 mod convert;
 mod frame;
+mod optimize;
 mod pauli;
+mod svg;
 mod text;
 
 pub use ascii::AsciiOptions;
 pub use convert::{ToPbc, to_pbc};
 pub use frame::CliffordFrame;
+pub use optimize::{OptimizeOptions, OptimizeStats, Strategy};
 pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
+pub use svg::SvgOptions;
 pub use text::TextOptions;
 
 use crate::circuit::{CBit, Gate, GateKind, Qubit, qubit_operands};
@@ -409,6 +413,20 @@ impl PbcCircuit {
                 visit(&self.operations[index], phase, factors)
             })?;
         Ok(stats.work)
+    }
+
+    /// The Pauli weight (number of non-identity factors) of every rotation's
+    /// axis, conditional or not, in operation order. Materializes the axes
+    /// within `max_work` (sparse evaluation work, as for export).
+    pub fn rotation_weights(&self, max_work: usize) -> Result<Vec<usize>, PbcError> {
+        let mut weights = Vec::new();
+        self.visit_axes(max_work, |op, _, factors| {
+            if !matches!(op, PbcOp::Measure { .. }) {
+                weights.push(factors.len());
+            }
+            Ok(())
+        })?;
+        Ok(weights)
     }
 
     /// Visit the stored images C†XqC, then C†ZqC, in canonical order.

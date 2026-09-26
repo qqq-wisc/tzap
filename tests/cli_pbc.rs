@@ -292,3 +292,69 @@ fn default_pipeline_converts_mid_circuit_measurements() {
         run.stdout
     );
 }
+
+/// --pbc-opt merges rotations after conversion and reports the T counts;
+/// it requires --to-pbc.
+#[test]
+fn pbc_opt_merges_rotations_and_reports_t_counts() {
+    // T on q0, then CX (its Z image is unchanged), then T on q0 again: the two
+    // Z0 rotations merge into one S rotation, which moves into the frame.
+    let source = qasm(2, "t q[0];\ncx q[0],q[1];\nt q[0];");
+    let run = Tzap::new(&[
+        "-",
+        "-o",
+        "-",
+        "--to-pbc",
+        "--pbc-opt",
+        "--passes",
+        "CancelGates",
+    ])
+    .stdin(&source)
+    .run()
+    .ok("PBC optimization");
+    assert!(!run.stdout.contains("\nr "), "{}", run.stdout);
+    assert!(run.stdout.contains("f X0 -1 Y0 X1\n"), "{}", run.stdout);
+    assert!(run.stderr.contains("T 2 → 0"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("1 Cliffords to frame"),
+        "{}",
+        run.stderr
+    );
+    let plain = Tzap::new(&["-", "-o", "-", "--to-pbc", "--passes", "CancelGates"])
+        .stdin(&source)
+        .run()
+        .ok("plain conversion");
+    assert!(plain.stderr.contains("PBC T count: 2"), "{}", plain.stderr);
+    Tzap::new(&["-", "--pbc-opt"])
+        .stdin(&source)
+        .run()
+        .failed("--pbc-opt without --to-pbc");
+}
+
+/// --visualize-pbc writes an SVG drawing, alone or together with --to-pbc.
+#[test]
+fn visualize_pbc_writes_an_svg() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("circuit.svg");
+    let run = Tzap::new(&[
+        "-",
+        "--visualize-pbc",
+        path.to_str().unwrap(),
+        "--passes",
+        "CancelGates",
+    ])
+    .stdin(&qasm(
+        2,
+        "h q[0];\ncx q[0],q[1];\nt q[1];\nmeasure q[1] -> c[0];",
+    ))
+    .run()
+    .ok("drawing");
+    assert!(run.stderr.contains("Wrote PBC drawing"), "{}", run.stderr);
+    let svg = std::fs::read_to_string(&path).unwrap();
+    assert!(svg.starts_with("<svg") && svg.contains("</svg>"));
+    // One green T rotation box and one blue measurement box.
+    assert!(svg.contains("#E3FFA1") && svg.contains("#70B3F5"));
+    Tzap::new(&["-", "--visualize-pbc"])
+        .run()
+        .failed("missing path");
+}

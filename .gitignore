@@ -23,3 +23,8 @@ __pycache__/
 # already existing elements were commented out
 
 #/target
+
+# Generated FTCircuitBench circuits (hundreds of MB to GB): regenerate with
+# benchmarks/ftcircuitbench/generate.py; the manifests and READMEs are tracked.
+/benchmarks/ftcircuitbench/*/
+/benchmarks/ftcircuitbench-large/*/

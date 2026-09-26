@@ -262,8 +262,8 @@ impl Observer for Terminal {
 fn prepare_output(ui: &Ui, run: &Run, circuit: &Circuit) -> Option<String> {
     // Conversion is terminal: optimization and requested decompositions have
     // already finished. Validate even when no output destination was requested.
-    if run.to_pbc {
-        let pbc = tzap::pbc::to_pbc(circuit).unwrap_or_else(|e| {
+    if run.to_pbc || run.visualize_pbc.is_some() {
+        let mut pbc = tzap::pbc::to_pbc(circuit).unwrap_or_else(|e| {
             let hint = if circuit.gates.iter().any(|g| matches!(g, Gate::rz(..))) {
                 " Rz gates require --decompose-rz (or DecomposeRz in --passes)."
             } else {
@@ -272,10 +272,48 @@ fn prepare_output(ui: &Ui, run: &Run, circuit: &Circuit) -> Option<String> {
             ui.abort(&format!("Error converting to PBC: {e}.{hint}"))
         });
         ui.info("  Converting to PBC (retaining quantum and classical outputs)");
-        Some(
-            pbc.to_text()
-                .unwrap_or_else(|e| ui.abort(&format!("Error exporting PBC: {e}"))),
-        )
+        if run.pbc_opt {
+            let start = Instant::now();
+            match pbc.optimize_rotations(tzap::pbc::OptimizeOptions::default()) {
+                Ok(stats) => ui.info(&format!(
+                    "  PBC rotation optimization: T {} → {} ({} merges, {} MCR swaps, \
+                     {} Cliffords to frame, {:.3}s)",
+                    stats.t_before,
+                    stats.t_after,
+                    stats.merges,
+                    stats.swaps,
+                    stats.cliffords_to_frame,
+                    start.elapsed().as_secs_f64()
+                )),
+                // The pass leaves the circuit unchanged on failure.
+                Err(e) => ui.info(&format!("  PBC rotation optimization skipped: {e}")),
+            }
+        } else {
+            ui.info(&format!("  PBC T count: {}", pbc.t_count()));
+        }
+        if let Some(path) = &run.visualize_pbc {
+            let options = tzap::pbc::SvgOptions::default();
+            let svg = pbc
+                .to_svg_with(options)
+                .unwrap_or_else(|e| ui.abort(&format!("Error drawing PBC: {e}")));
+            std::fs::write(path, svg)
+                .unwrap_or_else(|e| ui.abort(&format!("Error writing {path}: {e}")));
+            let shown = pbc.operations().len().min(options.max_operations);
+            let note = if shown < pbc.operations().len() {
+                format!(" (first {shown} of {} operations)", pbc.operations().len())
+            } else {
+                String::new()
+            };
+            ui.info(&format!("  Wrote PBC drawing to {path}{note}"));
+        }
+        if run.to_pbc {
+            Some(
+                pbc.to_text()
+                    .unwrap_or_else(|e| ui.abort(&format!("Error exporting PBC: {e}"))),
+            )
+        } else {
+            run.output_path.as_ref().map(|_| circuit.to_qasm())
+        }
     } else {
         run.output_path.as_ref().map(|_| circuit.to_qasm())
     }
