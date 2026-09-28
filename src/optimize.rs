@@ -18,6 +18,7 @@ use crate::circuit::{Circuit, Gate, GateKind, GateSet, qubit_operands};
 use crate::cnot_min::CnotMin;
 use crate::decompose::{DecomposeCz, DecomposeRz, DecomposeToffoli};
 use crate::pass::Pass;
+use crate::pauli_fold_rand::PauliFoldRand;
 use crate::phase_fold_rand::PhaseFoldRand;
 #[cfg(test)]
 use crate::super_opt::OPTIONAL_GATE_KINDS;
@@ -103,6 +104,7 @@ pub enum PassName {
     CancelGates,
     SuperOpt,
     PhaseFoldRand,
+    PauliFoldRand,
     CnotMin,
 }
 
@@ -133,7 +135,7 @@ impl StageKind {
 impl PassName {
     /// All passes — `(name, variant, description)` — in a stable order
     /// suitable for listing to a user.
-    pub const ALL: [(&'static str, PassName, &'static str); 7] = [
+    pub const ALL: [(&'static str, PassName, &'static str); 8] = [
         (
             "DecomposeToffoli",
             PassName::DecomposeToffoli,
@@ -163,6 +165,11 @@ impl PassName {
             "PhaseFoldRand",
             PassName::PhaseFoldRand,
             "Merge T/Rz rotations via randomized parity tracking",
+        ),
+        (
+            "PauliFoldRand",
+            PassName::PauliFoldRand,
+            "Fold T/Rz rotations across Cliffords with exact commutation checks",
         ),
         (
             "CnotMin",
@@ -909,6 +916,7 @@ fn run_explicit_pass(
         }),
         PassName::CancelGates => map_pass!(CancelGates),
         PassName::PhaseFoldRand => map_pass!(PhaseFoldRand),
+        PassName::PauliFoldRand => map_pass!(PauliFoldRand),
         PassName::CnotMin => map_pass!(CnotMin::default()),
         PassName::SuperOpt => {
             let basis = options.superopt_gates.effective(circuit.gate_set());

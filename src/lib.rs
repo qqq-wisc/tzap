@@ -6,6 +6,7 @@ pub mod cnot_min;
 pub mod decompose;
 pub mod optimize;
 pub mod pass;
+pub mod pauli_fold_rand;
 pub mod pbc;
 pub mod phase_fold_rand;
 pub mod qasm;
