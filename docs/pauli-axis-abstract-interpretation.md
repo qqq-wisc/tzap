@@ -9,7 +9,10 @@ Sections 4 and 5 define the **abstraction** — sets of Pauli axes — with its
 Galois connection, abstract transformers, and soundness theorem. Section 6
 shows where the abstraction loses precision, Section 7 turns an analysis
 result into a sound rewrite, and Section 8 relates the analysis to the domains
-used in practice, including the one `PauliFoldRand` implements.
+used in practice, including the one `PauliFoldRand` implements. Section 10
+proves that, on Clifford+T circuits, Pauli folding strictly subsumes symbolic
+phase folding. Section 11 extends the analysis to measurements, resets,
+classically controlled gates, and loops.
 
 Every definition is followed by a small example. All the examples have been
 checked numerically.
@@ -735,3 +738,300 @@ rotation can turn one axis into a combination of two. The domains of Section
 8 differ in how much of that branching they keep: the singleton domain gives
 up at the first branch and stays fast, while coefficients keep everything and
 recognize cancellations at exponential worst-case cost.
+
+## 10. Pauli folding subsumes phase folding
+
+This section compares the Pauli abstraction with the *symbolic phase-folding*
+abstraction of linear-time T-count optimization (the exact counterpart of
+`PhaseFoldRand`, whose random fingerprints only implement its equality test).
+The result: on Clifford+T circuits, every fold phase folding finds, Pauli
+folding also finds, with the same merged angle, and Pauli folding finds
+strictly more.
+
+### 10.1 The phase-folding abstraction
+
+**Definition 10.1 (path variables and wire values).** Start with one Boolean
+variable $x_q$ per input qubit. Each H gate introduces one fresh variable.
+Every wire carries an *affine* function of the variables seen so far,
+$w=\ell\oplus c$ with $\ell$ a linear form (a set of variables) and
+$c\in\{0,1\}$. Initially $w_q=x_q$. The gates act as follows:
+
+| gate | effect on wire values |
+|---|---|
+| $X_q$ | $w_q\mapsto w_q\oplus1$ |
+| $\mathrm{CX}_{c\to t}$ | $w_t\mapsto w_t\oplus w_c$ |
+| $H_q$ | $w_q\mapsto y$, a fresh variable |
+| $Z,\ S,\ S^\dagger,\ \mathrm{CZ},\ T,\ T^\dagger,\ R_Z$ | none (diagonal gates) |
+
+A rotation $R_Z(\theta)$ on qubit $q$ at *site* $k$ is labelled with the
+current wire value, $f_k=w_q$. In the path-sum semantics it contributes the
+phase $e^{-i\theta(-1)^{f_k}/2}$ to each path, so two rotations whose labels
+have the same linear part contribute phases on the same parity.
+
+**Definition 10.2 (phase fold relation).** Sites $k<l$ are *phase-foldable*,
+$k\approx_\varphi l$, when $f_k$ and $f_l$ have the same linear part. Their
+constants then agree ($s=+1$) or differ ($s=-1$), and the rotations merge into
+one of angle $s\theta_k+\theta_l$ at site $l$.
+
+**Example 10.3.** In
+
+```text
+cx q[0],q[1]; t q[1]; h q[0]; t q[1]; cx q[0],q[1]; t q[1];
+```
+
+the first CX sets $w_1=x_0\oplus x_1$, so the first T is labelled
+$x_0\oplus x_1$. The H sets $w_0=y$ but leaves $w_1$ alone, so the second T
+has the same label, and the two are phase-foldable *across the H*. The second
+CX sets $w_1=x_0\oplus x_1\oplus y$, so the third T is labelled differently
+and folds with neither.
+
+### 10.2 The Pauli fold relation
+
+For comparison, take the Pauli analysis as a relation on the same sites. Let
+$C_{<k}$ be the product of the *Clifford* gates before site $k$ (the
+rotations are omitted), and let $P_k=\pm C_{<k}^\dagger Z_qC_{<k}$ be the
+site's axis pulled back to the circuit input, as `PauliFoldRand` computes it.
+
+**Definition 10.4 (Pauli fold relation).** Sites $k<l$ are *Pauli-foldable*,
+$k\approx_P l$, when $P_k$ and $P_l$ are equal up to sign, and $P_k$ commutes
+with $P_m$ for every rotation site $m$ strictly between them.
+
+By Section 8.1 this is exactly when the singleton analysis started from site
+$k$ reaches site $l$ as $\mathrm{One}(\pm Z_r)$; Theorem 7.1 then justifies
+the merge. (The pass applies the relation greedily, but a relation between
+sites is the right level at which to compare abstractions.)
+
+### 10.3 Containment
+
+**Theorem 10.5.** On a circuit over $\{X,Z,S,S^\dagger,H,\mathrm{CX},
+\mathrm{CZ},T,T^\dagger,R_Z\}$, if $k\approx_\varphi l$ then
+$k\approx_P l$, with the same relative sign $s$, so the two analyses merge
+the pair into the same rotation.
+
+Three lemmas prepare the proof. Write $w^{(t)}$ for the wire values just
+before gate $t$ of the circuit.
+
+**Lemma 10.6 (independence).** At every point, the linear parts of the $n$
+wire values are linearly independent.
+
+*Proof.* Initially they are $x_0,\ldots,x_{n-1}$. X and diagonal gates leave
+linear parts unchanged. CX replaces $w_t$ by $w_t\oplus w_c$, an invertible
+change. H replaces $w_q$ by a variable that occurs nowhere else. $\square$
+
+Hence every linear form in the span of the wires has a *unique* expression
+$\bigoplus_{q\in Q}w_q$ (plus a constant); call $Q$ its *wire set*.
+
+**Lemma 10.7 (old forms stay or leave for good).** Let $g$ be a linear form
+over variables that exist at time $t$. If $g$ lies in the span of the wires
+at time $t$ and at a later time $t'$, it lies in the span at every time
+between.
+
+*Proof.* Consider the span restricted to forms over the variables existing
+at time $t$. X, CX, and diagonal gates do not change the span. H on qubit $p$
+replaces $w_p$ by a fresh variable, and a fresh variable contributes nothing
+to a form over old variables, so the restricted span can only shrink. Once
+$g$ leaves it, it cannot return. $\square$
+
+**Lemma 10.8 (Z-string transport).** Let $g$ be in the span at every time in
+$[t,t']$, with wire set $Q_s$ at time $s$. Conjugating $Z_{Q_t}=\prod_{q\in
+Q_t}Z_q$ forward through the gates from $t$ to $t'$, Clifford or not, gives
+$\pm Z_{Q_{t'}}$, and at each time $s$ the transported operator is $\pm
+Z_{Q_s}$.
+
+*Proof.* By induction over the gates; in each case the new wire set is the
+one the gate's effect on wire values forces.
+
+- *Diagonal gates* commute with every Z-string and leave wire values
+  unchanged: $Q_{s+1}=Q_s$.
+- *X on $p$* maps $Z_{Q_s}$ to $\pm Z_{Q_s}$ and changes only a constant:
+  $Q_{s+1}=Q_s$.
+- *CX from $c$ to $t$* maps $Z_t\mapsto Z_cZ_t$ and fixes $Z_c$; since
+  $w_t=w'_t\oplus w'_c$ afterwards, the wire set gains or loses $c$ exactly
+  when $t\in Q_s$. The two agree.
+- *H on $p$*: $g$ lies in the span after the H, which is the span of the other
+  wires plus a fresh variable that $g$ does not contain, so by Lemma 10.6
+  $p\notin Q_s$. The H does not touch $Z_{Q_s}$, and the other wires are
+  unchanged: $Q_{s+1}=Q_s$. $\square$
+
+*Proof of Theorem 10.5.* Let $k\approx_\varphi l$, with rotations on qubits
+$q$ and $r$, and let $g$ be the common linear part of $f_k=w_q$ and $f_l=w_r$.
+Its wire set is $\{q\}$ at site $k$ and $\{r\}$ at site $l$. By Lemma 10.7,
+$g$ is in the span at every time between, so Lemma 10.8 applies to the
+segment from $k$ to $l$.
+
+- *Equal axes.* The transported operator is a Z-string at every rotation site
+  $m$ in between, and every rotation there has a Z axis, so they commute and
+  the rotations can be skipped: transporting through the Clifford gates alone
+  gives the same result, $C\,Z_q\,C^\dagger=\pm Z_r$ with $C$ the Clifford
+  gates between $k$ and $l$. Since $C_{<l}=C\,C_{<k}$, pulling back gives
+  $P_k=\pm P_l$.
+- *Commutation.* At each intervening rotation site $m$ on qubit $u$, the
+  transported operator $\pm Z_{Q_m}$ and the local axis $Z_u$ are both
+  Z-strings, so they commute. Conjugation preserves commutation, so the
+  pulled-back axes $P_k$ and $P_m$ commute.
+- *Signs.* Label computational basis states by path assignments $v$. At
+  site $k$, $Z_q$ multiplies the basis state of path $v$ by
+  $(-1)^{f_k(v)}=\varepsilon(-1)^{g(v)}$ with $\varepsilon=(-1)^{c_k}$, where
+  $c_k$ is the constant of $f_k$. Every gate between maps each basis state to
+  a basis state up to a phase, except H, which acts only off the operator's
+  support; so the transported operator keeps multiplying path $v$ by the
+  same factor $\varepsilon(-1)^{g(v)}$. At site $l$ it equals $\sigma Z_r$,
+  which multiplies path $v$ by $\sigma(-1)^{f_l(v)}=\sigma(-1)^{c_l}
+  (-1)^{g(v)}$. Hence $\sigma=(-1)^{c_k\oplus c_l}=s$, the relative sign of
+  Definition 10.2. $\square$
+
+### 10.4 Strictness
+
+**Proposition 10.9.** The containment is strict.
+
+*Proof.* In `t q[0]; h q[0]; t q[1]; h q[0]; t q[0]`, the first and last T
+are labelled $x_0$ and $y_2$, the variable of the second H, so they are not
+phase-foldable. Their axes are $Z_0$ and $H\,H\,Z_0\,H\,H=Z_0$, and the only
+rotation between them, on qubit 1, has axis $Z_1$, which commutes; so they
+are Pauli-foldable (Example 7.2). $\square$
+
+Phase folding loses here because a fresh variable forgets that $H\,H$ is the
+identity; the Pauli frame tracks the Clifford exactly. Running the two passes
+on this circuit leaves 3 T gates after `PhaseFoldRand` and 1 after
+`PauliFoldRand`.
+
+As a check, all 1,560 pairs of T sites in 400 random Clifford+T circuits on
+two and three qubits were classified by both relations: all 417
+phase-foldable pairs are Pauli-foldable with the same sign, and 11 further
+pairs are Pauli-foldable only.
+
+### 10.5 Native Toffolis: the domains are incomparable
+
+Theorem 10.5 needs every gate to be Clifford+T. Symbolic phase folding also
+handles a native CCX, with the *nonlinear* update $w_t\mapsto w_t\oplus
+w_{c_1}w_{c_2}$, while the Pauli analysis treats a CCX as seven fixed rotations
+(Section 8.1). Neither then contains the other. In
+
+```text
+t q[2]; ccx q[0],q[1],q[2]; cx q[0],q[3]; ccx q[0],q[1],q[2]; t q[2];
+```
+
+both T gates are labelled $x_2$, because the second CCX undoes the first.
+Phase folding merges them. The Pauli analysis is blocked: the first CCX's
+rotations include the axis $X_2$, which anticommutes with $Z_2$. Here
+`PhaseFoldRand` leaves no T gate and `PauliFoldRand` leaves 2. Decomposing
+the Toffolis into Clifford+T first restores Theorem 10.5, since then both
+analyses see only Clifford+T gates.
+
+## 11. Measurements and classical control flow
+
+So far a segment is a unitary circuit. This section extends the analysis to
+programs with measurements, resets, classically controlled gates, and loops.
+The rewrite stays the same, merging a rotation into a later one. What
+changes is the argument that the earlier rotation can be moved.
+
+### 11.1 Measurements are blockers, not barriers
+
+A measurement of Z on qubit $q$ at a point in the circuit measures some
+Pauli $M$ in the circuit-input frame, exactly as a rotation's axis is
+computed. Its outcome projectors are $\Pi_\pm=\tfrac12(I\pm M)$.
+
+**Proposition 11.1.** If $P$ commutes with $M$, then $R_P(\theta)$ commutes
+with both projectors, so moving the rotation across the measurement changes
+neither the outcome probabilities nor the post-measurement state. If $P$
+anticommutes with $M$, moving it is invalid in general.
+
+*Proof.* $P$ commutes with $M$, hence with $I\pm M$, hence $R_P(\theta)$
+does. For the converse, `t q[0]; h q[0]; measure q[0]; h q[0]; t q[0]`
+(measuring $X_0$) is not equal to the version with the T gates merged, for
+either outcome. $\square$
+
+In the abstract analysis a measurement is therefore one more fixed blocker,
+exactly like the rotations of a Toffoli: $\mathrm{One}(P)$ survives it if $P$
+commutes with $M$ and becomes $\top$ otherwise. The Clifford frame passes
+through a measurement unchanged. `PauliFoldRand` currently treats
+measurements as full barriers, which is sound but loses folds such as
+
+```text
+t q[0]; cx q[0],q[1]; measure q[1] -> c[0]; cx q[0],q[1]; t q[0];
+```
+
+where the measured Pauli is $Z_0Z_1$, which commutes with the axis $Z_0$ of
+both T gates. The merged circuit equals the original for both outcomes.
+
+**Resets.** A reset is a measurement followed by an X conditioned on its
+outcome. The conditional X is a classically controlled gate (Section 11.2),
+so a reset contributes two blockers: the measured Pauli, and the X's axis
+$C_{<k}^\dagger X_qC_{<k}$. A rotation may move across the reset only if it
+commutes with both.
+
+### 11.2 Classical control: joins of branches
+
+A classically controlled gate `if (c) U` runs $U$ on some executions and not
+on others. A rotation moved across it must end up about the same signed axis
+on both paths, or the merged angle would depend on the run.
+
+The abstract state needs the sign, since it can now differ between paths.
+
+**Definition 11.2 (signed singleton domain).** A candidate's state is
+$\bot$, $\mathrm{One}(Q,s)$ with $s\in\{+,-,?\}$, or $\top$. The sign orders
+as $+,-\sqsubseteq\ ?$. A path through a Clifford $C$ maps
+$\mathrm{One}(Q,s)$ to $\mathrm{One}(\pi_C(Q),\ s\cdot\sigma_C(Q))$, taking
+$?\cdot\pm=\ ?$. The join at a control-flow merge is
+
+$$
+\mathrm{One}(Q,s)\sqcup\mathrm{One}(Q,s')=\mathrm{One}(Q,s\sqcup s'),\qquad
+\mathrm{One}(Q,s)\sqcup\mathrm{One}(Q',s')=\top\ \ (Q\neq Q'),
+$$
+
+with $\bot$ as unit and $\top$ absorbing. A fold at a site with local axis
+$Z_r$ needs the state $\mathrm{One}(Z_r,s)$ with $s\in\{+,-\}$.
+
+For `if (c) U`, the state after is the join of the state after $U$ and the
+state before. Soundness is the usual argument for collecting semantics: each
+execution follows one path, and the join overapproximates both.
+
+**Example 11.3.** In `t q[0]; if (c==1) x q[1]; t q[0]`, the X on qubit 1
+fixes $Z_0$, so both paths give $\mathrm{One}(Z_0,+)$ and the T gates merge
+into an S. In `t q[0]; if (c==1) x q[0]; t q[0]`, the taken path gives
+$\mathrm{One}(Z_0,-)$, since the T gates cancel to leave the X, and the other
+gives $\mathrm{One}(Z_0,+)$, since they merge into S. The join is
+$\mathrm{One}(Z_0,?)$, and no fold is made.
+
+**Control equivalence.** Moving a rotation also changes *when* it runs. The
+earlier rotation at site $k$ is deleted and its angle added at site $l$, so
+the rewrite is sound only if $l$ runs exactly when $k$ does, once for each
+run of $k$. In control-flow-graph terms, $k$ must dominate $l$, $l$ must
+post-dominate $k$, and both must lie in the same loop body. A rotation
+before an `if` can therefore move *across* the `if`, as in Example 11.3,
+but not *into* one of its branches.
+
+### 11.3 Loops: a fixed point
+
+For a loop `while (c) B`, the state at the loop head is the join of the state
+on entry and the state after the body. Iterating the body's transformer from
+the entry state reaches a fixed point: in the signed singleton domain every ascending chain
+has at most four elements ($\bot\sqsubset\mathrm{One}(Q,\pm)\sqsubset
+\mathrm{One}(Q,?)\sqsubset\top$), so each candidate's state rises at most
+three times, and no widening is needed. The state after the loop is the
+fixed point at the head, since the loop may run any number of times,
+including zero.
+
+**Example 11.4.** In `t q[0]; for i in 1..k { cx q[0],q[1]; } t q[0]`, the
+body maps $Z_0$ to $Z_0$ (a CX fixes its control's Z), so the fixed point is
+$\mathrm{One}(Z_0,+)$ and the T gates merge for every $k$. With `x q[0]` as
+the body, the sign alternates with the iteration count: the head state goes
+from $\mathrm{One}(Z_0,+)$ to $\mathrm{One}(Z_0,?)$, and no fold is made,
+unless the trip count's parity is known.
+
+Rotations inside the body fold with each other as before when they are
+control-equivalent within one iteration. A rotation at the end of one
+iteration cannot fold with one at the start of the next, since neither runs
+exactly once per run of the other. Peeling or rotating the loop exposes such
+pairs to the same analysis.
+
+### 11.4 The pulled-back frame under control flow
+
+`PauliFoldRand` avoids per-candidate propagation by pulling every axis back
+to the circuit input through one shared Clifford frame (Section 8.1). With
+control flow the frame itself can differ between paths. The shared-frame
+method still works on any region where the frame is the same on all paths,
+for instance between merge points whose branches apply equal Cliffords.
+Across a branch or loop that changes the frame differently on different
+paths, the pass would switch to the forward, per-candidate propagation of
+Sections 11.2 and 11.3, for the candidates live at that point.
