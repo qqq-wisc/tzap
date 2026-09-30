@@ -1,6 +1,7 @@
 # Benchmarks
 
-Circuits used to measure tzap. All are OpenQASM 2.0.
+Circuits used to measure tzap. All are OpenQASM 2.0, except `amy-lunderville`
+(OpenQASM 3 programs with control flow).
 
 | corpus      | files | qubits | gates (total)      | gate set        |
 | ----------- | ----- | ------ | ------------------ | --------------- |
@@ -8,6 +9,14 @@ Circuits used to measure tzap. All are OpenQASM 2.0.
 | `cobble-t`  | 6     | 11–22  | 34k–588k (1.35M)   | Clifford+T      |
 | `cobble-rz` | 6     | 11–22  | 1.9k–353k (793k)   | Clifford+T+Rz   |
 | `qft`       | 4     | 20–50  | 310k–1.03M (2.68M) | Clifford+T      |
+| `amy-lunderville` | 14 | 1–129 | small; loops | Clifford+T, reset, measure (OpenQASM 3) |
+
+## `amy-lunderville`
+
+The looping and branching programs of Amy and Lunderville (POPL 2025), from the
+Feynman artifact, plus a reconstruction of the paper's Figure 2b. tzap cannot read
+them, since they are OpenQASM 3; they run through `feynopt -qasm3`. See
+[`amy-lunderville/README.md`](amy-lunderville/README.md) for the index and T-counts.
 
 ## `feynman`
 
