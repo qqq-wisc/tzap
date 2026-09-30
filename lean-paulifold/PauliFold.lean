@@ -11,3 +11,11 @@ import PauliFold.StateFold.Counterexample
 import PauliFold.StateFold.Incomparable
 import PauliFold.StateFold.Strengthen
 import PauliFold.StateFold.DegreeTwo
+import PauliFold.Tableau
+import PauliFold.Domains
+import PauliFold.TableauContainment
+import PauliFold.Affine
+import PauliFold.Join
+import PauliFold.Disjunctive
+import PauliFold.FoldRule
+import PauliFold.Alpha

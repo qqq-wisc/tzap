@@ -13,9 +13,11 @@ so every path with `P = 1` cancels, even when `P = 0` cannot be solved as a subs
 `z := R` (which would be an HH step). Predicates may then be compared modulo the constraints:
 two rotations fold if their predicates agree on the paths where every witnessed `P`
 vanishes. With the field equations `x² = x`, ideal membership over `F₂` is exactly vanishing
-on this set (Hilbert's Nullstellensatz), so this models reduction modulo a Gröbner basis
-exactly. Feynman's implementation, which reduces by non-canonical multivariate division,
-proves no more.
+on this set (Hilbert's Nullstellensatz). So, for the constraints collected here, this
+models reduction modulo a Gröbner basis exactly. It is a *restricted* model of Algorithm 2,
+which collects different constraints (see below), so it does not show that Feynman proves
+no more. The degree bound `d` limits HH substitutions only; witnesses have no degree bound,
+so `ProvesS 1` may use non-linear constraints.
 
 **Modeling choice.** Witnesses are taken on the state at the end of the HH/ω trace, and
 no constraint may mention a witness variable. Algorithm 2 collects constraints after every
@@ -221,8 +223,8 @@ theorem trace_refl_of_exposed {d : ℕ} {A C : State n} {f g f' g' : Poly}
 
 /-- On `cx q0,q1; h q0; h q1; cx q1,q0; h q1`, no witness exists either, since every path
 variable is in a wire: Strengthen proves nothing, at any degree. -/
-theorem mid_not_provesS (d : ℕ) (q : Fin 2) (s : Bool) :
-    ¬ ProvesS d (run cexMid) (BoolPolynomial.var 1) q s := by
+theorem mid_not_provesS_var (d k : ℕ) (hk2 : k ≠ 2) (hk4 : k ≠ 4) (q : Fin 2) (s : Bool) :
+    ¬ ProvesS d (run cexMid) (BoolPolynomial.var k) q s := by
   rintro ⟨C, f', g', W, ws, htr, hws, -, -, heq⟩
   have hexp : ∀ y ∈ (run cexMid).temps, ∃ q,
       ¬ Supp (fun ν => ev ν ((run cexMid).ket q)) ((run cexMid).dom \ {y}) := by
@@ -242,8 +244,12 @@ theorem mid_not_provesS (d : ℕ) (q : Fin 2) (s : Bool) :
     · have := flip 0; rw [mid_ket0, mid_ket0, h] at this; simp at this
     · have := flip 0; rw [mid_ket0, mid_ket0, h] at this; simp at this
     · have := flip 1; rw [mid_ket1, mid_ket1, h] at this; simp at this
-  exact mid_not_proves d q s ⟨_, _, _, .refl _ _ _,
+  exact mid_not_proves_var d k hk2 hk4 q s ⟨_, _, _, .refl _ _ _,
     fun ν => heq ν fun p hp => (hnone p hp).elim⟩
+
+theorem mid_not_provesS (d : ℕ) (q : Fin 2) (s : Bool) :
+    ¬ ProvesS d (run cexMid) (BoolPolynomial.var 1) q s :=
+  mid_not_provesS_var d 1 (by norm_num) (by norm_num) q s
 
 /-- On this segment, PauliFold is strictly more precise than Strengthen. -/
 theorem mid_ssubsetS (d : ℕ) : pauliCandidate cexMid 1 ⊂ sfCandidateS d cexMid 1 := by
