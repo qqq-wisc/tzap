@@ -290,9 +290,9 @@ theorem mid_ket1 (ν : Val) : ev ν ((run cexMid).ket 1) = ν 4 := by
   simp [run, cexMid, runFrom, step, init]
 
 /-- Every path variable appears in a wire, so no trace applies, and neither wire predicate is
-equal or complementary to `x₁`: StateFold proves nothing, at any degree. -/
-theorem mid_not_proves (d : ℕ) (q : Fin 2) (s : Bool) :
-    ¬ Proves d (run cexMid) (BoolPolynomial.var 1) q s := by
+equal or complementary to an input variable `x_k`: StateFold proves nothing, at any degree. -/
+theorem mid_not_proves_var (d k : ℕ) (hk2 : k ≠ 2) (hk4 : k ≠ 4) (q : Fin 2) (s : Bool) :
+    ¬ Proves d (run cexMid) (BoolPolynomial.var k) q s := by
   rintro ⟨C, f', g', htr, heq⟩
   have hexp : ∀ y ∈ (run cexMid).temps, ∃ q,
       ¬ Supp (fun ν => ev ν ((run cexMid).ket q)) ((run cexMid).dom \ {y}) := by
@@ -305,11 +305,15 @@ theorem mid_not_proves (d : ℕ) (q : Fin 2) (s : Bool) :
   have h₁ := heq fun _ => false
   fin_cases q
   · have h₂ := heq (Function.update (fun _ => false) 2 true)
-    simp only [Fin.zero_eta, mid_ket0, ev_var] at h₁ h₂
+    simp only [Fin.zero_eta, mid_ket0, ev_var, Function.update_of_ne hk2] at h₁ h₂
     cases s <;> simp at h₁ h₂
   · have h₂ := heq (Function.update (fun _ => false) 4 true)
-    simp only [Fin.mk_one, mid_ket1, ev_var] at h₁ h₂
+    simp only [Fin.mk_one, mid_ket1, ev_var, Function.update_of_ne hk4] at h₁ h₂
     cases s <;> simp at h₁ h₂
+
+theorem mid_not_proves (d : ℕ) (q : Fin 2) (s : Bool) :
+    ¬ Proves d (run cexMid) (BoolPolynomial.var 1) q s :=
+  mid_not_proves_var d 1 (by norm_num) (by norm_num) q s
 
 /-- On this segment, PauliFold's concretization is strictly smaller than StateFold's, at every
 degree. -/
