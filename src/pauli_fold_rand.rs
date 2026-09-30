@@ -220,7 +220,7 @@ fn live_hash(events: &mut [Event], start: Option<usize>) -> Option<usize> {
     result
 }
 
-/// The rotations recorded since the last barrier, with an index by support.
+/// The rotations and blockers recorded so far, with an index by support.
 struct History {
     l: usize,
     /// Work allowed per fold attempt.
@@ -275,12 +275,21 @@ impl History {
         Some(())
     }
 
-    /// Forget everything: nothing may fold across a barrier.
-    fn clear(&mut self) {
-        self.events.clear();
-        self.axes.clear();
-        self.touching.iter_mut().for_each(Vec::clear);
-        self.last.clear();
+    /// Record a fixed obstacle: a later fold across it must commute with
+    /// `axis`. `None` when the axis storage cap is reached.
+    fn block(&mut self, axis: &[u64]) -> Option<()> {
+        let blocker = Event {
+            gate: None,
+            offset: 0,
+            sign: 1,
+            angle: Angle {
+                eighths: 1,
+                residual: 0.0,
+            },
+            prev_hash: None,
+            live: true,
+        };
+        self.push(blocker, axis, None)
     }
 
     /// The newest live candidate with exactly this axis, within the attempt
@@ -509,8 +518,9 @@ fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: us
     }
 
     // No exact tableau or stored axes on the common no-candidate path.
-    // Measurements and resets are barriers here too; CCX and CCZ change no
-    // frame row.
+    // Measurements, resets, CCX and CCZ change no frame row; rotations may
+    // fold across the first two (see the scan below), so they do not reset
+    // the candidates.
     let mut sketch = SketchFrame::new(labels);
     let mut seen = FxHashSet::default();
     let mut possible = false;
@@ -529,8 +539,7 @@ fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: us
                     break;
                 }
             }
-            Gate::measure { .. } | Gate::reset(_) => seen.clear(),
-            Gate::ccx { .. } | Gate::ccz { .. } => {}
+            Gate::measure { .. } | Gate::reset(_) | Gate::ccx { .. } | Gate::ccz { .. } => {}
             _ => sketch.apply(gate),
         }
     }
@@ -643,27 +652,33 @@ fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: us
                     target_x,
                 );
                 for axis in axes {
-                    let blocker = Event {
-                        gate: None,
-                        offset: 0,
-                        sign: 1,
-                        angle: Angle {
-                            eighths: 1,
-                            residual: 0.0,
-                        },
-                        prev_hash: None,
-                        live: true,
-                    };
-                    if history.push(blocker, &axis, None).is_none() {
+                    if history.block(&axis).is_none() {
                         break 'scan;
                     }
                 }
             }
-            // Folding a rotation across a measurement or reset is not a
-            // unitary rewrite; nothing before one may fold with anything
-            // after it. The frame stays a valid reference for later axes:
-            // equal and commuting axes are compared after the same prefix.
-            Gate::measure { .. } | Gate::reset(_) => history.clear(),
+            // A rotation about P commutes with a Z-basis measurement of q,
+            // whose projectors are (1 ± Z_q)/2, exactly when P commutes with
+            // Z_q. It commutes with a reset of q, whose Kraus maps are
+            // |0⟩⟨b|, when P acts trivially on q: P commutes with Z_q and X_q.
+            // So each is a blocker on the input-frame images of those
+            // Paulis, and only folds that cross it with an anticommuting axis
+            // are refused. The frame stays a valid reference for later axes:
+            // folds only move a rotation forward, and both axes are compared
+            // after the same Clifford prefix.
+            Gate::measure { qubit, .. } => {
+                if history.block(&exact.z[qubit as usize].words).is_none() {
+                    break 'scan;
+                }
+            }
+            Gate::reset(q) => {
+                let q = q as usize;
+                if history.block(&exact.z[q].words).is_none()
+                    || history.block(&exact.x[q].words).is_none()
+                {
+                    break 'scan;
+                }
+            }
             _ => {
                 sketch.apply(gate);
                 exact.apply(gate);
@@ -700,7 +715,7 @@ mod tests {
     use crate::pbc::{Pauli, Phase, to_pbc};
     use crate::phase_fold_rand::phase_fold_rand;
     use crate::qasm;
-    use crate::unitary::circuits_equiv;
+    use crate::unitary::{C, circuit_unitary, circuits_equiv};
 
     struct Rng(u64);
 
@@ -1103,34 +1118,120 @@ mod tests {
         assert_eq!(count_t(&out), 0);
     }
 
-    /// Nothing folds across a measurement or reset, though the gates on
-    /// either side still fold among themselves.
-    #[test]
-    fn measurements_and_resets_are_barriers() {
-        for barrier in [Gate::measure { qubit: 1, cbit: 0 }, Gate::reset(1)] {
-            let mut c = Circuit::with_cbits(2, 1);
-            for gate in [
-                Gate::t(0),
-                Gate::t(0),
-                Gate::t(0),
-                barrier.clone(),
-                Gate::t(0),
-                Gate::t(0),
-            ] {
-                c.apply(gate);
-            }
-            let out = pauli_fold_rand(&c);
-            // T T T -> S T before, T T -> S after; the barrier stays put.
-            assert_eq!(count_t(&out), 1, "{barrier:?}: {:?}", out.gates);
-            let at = out.gates.iter().position(|g| *g == barrier).unwrap();
-            assert_eq!(
-                count_t(&Circuit {
-                    gates: out.gates[at..].to_vec(),
-                    ..c.clone()
-                }),
-                0
-            );
+    fn circuit_of(n: usize, gates: &[Gate]) -> Circuit {
+        let mut c = Circuit::with_cbits(n, n);
+        for gate in gates {
+            c.apply(gate.clone());
         }
+        c
+    }
+
+    /// A rotation folds across a measurement or reset it commutes with, on
+    /// another qubit or, for a measurement, about Z on the measured qubit.
+    #[test]
+    fn folds_cross_commuting_measurements_and_resets() {
+        let cnot = |control, target| Gate::cnot { control, target };
+        for (name, gates) in [
+            (
+                "measure other",
+                vec![
+                    Gate::t(0),
+                    Gate::measure { qubit: 1, cbit: 1 },
+                    Gate::tdg(0),
+                ],
+            ),
+            (
+                "measure same",
+                vec![
+                    Gate::t(0),
+                    Gate::measure { qubit: 0, cbit: 0 },
+                    Gate::tdg(0),
+                ],
+            ),
+            (
+                "reset other",
+                vec![Gate::t(0), Gate::reset(1), Gate::tdg(0)],
+            ),
+            (
+                "measure Z0 under Z0Z1",
+                vec![
+                    cnot(0, 1),
+                    Gate::t(1),
+                    cnot(0, 1),
+                    Gate::measure { qubit: 0, cbit: 0 },
+                    cnot(0, 1),
+                    Gate::tdg(1),
+                    cnot(0, 1),
+                ],
+            ),
+        ] {
+            let c = circuit_of(2, &gates);
+            let out = pauli_fold_rand(&c);
+            assert_eq!(count_t(&out), 0, "{name}: {:?}", out.gates);
+        }
+    }
+
+    /// A fold whose axis anticommutes with a measured Z, or touches a reset
+    /// qubit, is refused; the rotations on either side still fold.
+    #[test]
+    fn measurements_and_resets_block_anticommuting_folds() {
+        let cnot = |control, target| Gate::cnot { control, target };
+        for (name, gates) in [
+            (
+                "X0 across measure q0",
+                vec![
+                    Gate::h(0),
+                    Gate::t(0),
+                    Gate::h(0),
+                    Gate::measure { qubit: 0, cbit: 0 },
+                    Gate::h(0),
+                    Gate::tdg(0),
+                    Gate::h(0),
+                ],
+            ),
+            (
+                "Z0 across reset q0",
+                vec![Gate::t(0), Gate::reset(0), Gate::tdg(0)],
+            ),
+            (
+                "Z0Z1 across reset q0",
+                vec![
+                    cnot(0, 1),
+                    Gate::t(1),
+                    cnot(0, 1),
+                    Gate::reset(0),
+                    cnot(0, 1),
+                    Gate::tdg(1),
+                    cnot(0, 1),
+                ],
+            ),
+        ] {
+            let c = circuit_of(2, &gates);
+            let out = pauli_fold_rand(&c);
+            assert_eq!(count_t(&out), 2, "{name}: {:?}", out.gates);
+        }
+        // T T T | reset q0 | T T: S T before, S after.
+        let c = circuit_of(
+            1,
+            &[
+                Gate::t(0),
+                Gate::t(0),
+                Gate::t(0),
+                Gate::reset(0),
+                Gate::t(0),
+                Gate::t(0),
+            ],
+        );
+        let out = pauli_fold_rand(&c);
+        assert_eq!(count_t(&out), 1, "{:?}", out.gates);
+        let at = out.gates.iter().position(|g| *g == Gate::reset(0)).unwrap();
+        assert_eq!(
+            count_t(&Circuit {
+                gates: out.gates[at..].to_vec(),
+                ..c.clone()
+            }),
+            0
+        );
     }
 
     /// An attempt whose interval exceeds its budget is treated as blocked;
@@ -1180,6 +1281,68 @@ mod tests {
         // With the default budget the Z0 pair folds too.
         let full = pauli_fold_with_labels(&c, &labels);
         assert_eq!(count_t(&full), count_t(&c) - 4);
+    }
+
+    fn random_clifford(rng: &mut Rng, n: usize, len: usize) -> Vec<Gate> {
+        (0..len)
+            .map(|_| {
+                let q = rng.up_to(n) as u32;
+                let r = (q + 1 + rng.up_to(n - 1) as u32) % n as u32;
+                match rng.up_to(5) {
+                    0 | 1 => Gate::h(q),
+                    2 => Gate::s(q),
+                    3 => Gate::cnot {
+                        control: q,
+                        target: r,
+                    },
+                    _ => Gate::cz {
+                        control: q,
+                        target: r,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn inverse(gates: &[Gate]) -> Vec<Gate> {
+        gates
+            .iter()
+            .rev()
+            .map(|g| match *g {
+                Gate::s(q) => Gate::sdg(q),
+                Gate::sdg(q) => Gate::s(q),
+                ref g => g.clone(),
+            })
+            .collect()
+    }
+
+    /// `prefix · T_q · D · barrier · D⁻¹ · T_q^± · suffix`: the two rotations
+    /// share an axis, and the barrier decides whether they may fold.
+    fn sandwich(rng: &mut Rng, n: usize, barrier: Gate) -> Circuit {
+        let q = rng.up_to(n) as u32;
+        let (before, middle, after) = (rng.up_to(4), 1 + rng.up_to(5), rng.up_to(4));
+        let prefix = random_clifford(rng, n, before);
+        let d = random_clifford(rng, n, middle);
+        let suffix = random_clifford(rng, n, after);
+        let second = if rng.up_to(2) == 0 {
+            Gate::t(q)
+        } else {
+            Gate::tdg(q)
+        };
+        let mut c = Circuit::with_cbits(n, n);
+        let pieces = [
+            prefix,
+            vec![Gate::t(q)],
+            d.clone(),
+            vec![barrier],
+            inverse(&d),
+            vec![second],
+            suffix,
+        ];
+        for gate in pieces.into_iter().flatten() {
+            c.apply(gate);
+        }
+        c
     }
 
     fn random_gate(rng: &mut Rng, n: usize, measured: bool) -> Gate {
@@ -1241,12 +1404,18 @@ mod tests {
         use crate::semantics::channel::{ChannelLimits, circuit_channel};
         let mut rng = Rng(0x3ea5_0000_1234_5678);
         let mut folded = 0;
-        for case in 0..150 {
+        for case in 0..450 {
             let n = 2 + case % 2;
-            let mut c = Circuit::with_cbits(n, n);
-            for _ in 0..16 {
-                c.apply(random_gate(&mut rng, n, true));
-            }
+            let c = if case < 150 {
+                let mut c = Circuit::with_cbits(n, n);
+                for _ in 0..16 {
+                    c.apply(random_gate(&mut rng, n, true));
+                }
+                c
+            } else {
+                let m = rng.up_to(n) as u32;
+                sandwich(&mut rng, n, Gate::measure { qubit: m, cbit: m })
+            };
             let out = pauli_fold_rand(&c);
             folded += usize::from(out.gates != c.gates);
             let store = vec![false; n];
@@ -1255,6 +1424,110 @@ mod tests {
             let actual = circuit_channel(&out, &store, limits).unwrap();
             assert_eq!(expected.compare(&actual), Ok(()), "case {case}\n{c}");
         }
-        assert!(folded > 30, "only {folded} cases changed");
+        assert!(folded > 150, "only {folded} cases changed");
+    }
+
+    /// The channel of a circuit whose only non-unitary gates are resets, as
+    /// its images of the matrix units |i⟩⟨j|, from dense unitary segments and
+    /// the reset map ρ ↦ Σ_b |0⟩⟨b| ρ |b⟩⟨0|.
+    fn reset_channel(c: &Circuit) -> Vec<Vec<Vec<C>>> {
+        let n = c.num_qubits;
+        let d = 1usize << n;
+        let mut steps: Vec<Result<Vec<Vec<C>>, usize>> = Vec::new();
+        let mut segment = Circuit::new(n);
+        for gate in &c.gates {
+            if let Gate::reset(q) = *gate {
+                steps.push(Ok(circuit_unitary(&segment)));
+                steps.push(Err(q as usize));
+                segment = Circuit::new(n);
+            } else {
+                segment.apply(gate.clone());
+            }
+        }
+        steps.push(Ok(circuit_unitary(&segment)));
+        let mut images = Vec::with_capacity(d * d);
+        for i in 0..d {
+            for j in 0..d {
+                let mut rho = vec![vec![C::ZERO; d]; d];
+                rho[i][j] = C::ONE;
+                for step in &steps {
+                    rho = match step {
+                        Ok(u) => {
+                            let mut left = vec![vec![C::ZERO; d]; d];
+                            for r in 0..d {
+                                for k in 0..d {
+                                    for col in 0..d {
+                                        left[r][col] = left[r][col] + u[r][k] * rho[k][col];
+                                    }
+                                }
+                            }
+                            let mut out = vec![vec![C::ZERO; d]; d];
+                            for r in 0..d {
+                                for col in 0..d {
+                                    for k in 0..d {
+                                        out[r][col] = out[r][col] + left[r][k] * u[col][k].conj();
+                                    }
+                                }
+                            }
+                            out
+                        }
+                        Err(q) => {
+                            let bit = 1 << (n - 1 - q);
+                            let mut out = vec![vec![C::ZERO; d]; d];
+                            for r in (0..d).filter(|r| r & bit == 0) {
+                                for col in (0..d).filter(|col| col & bit == 0) {
+                                    out[r][col] = rho[r][col] + rho[r | bit][col | bit];
+                                }
+                            }
+                            out
+                        }
+                    };
+                }
+                images.push(rho);
+            }
+        }
+        images
+    }
+
+    /// Random circuits with resets, including Toffolis and forced
+    /// fingerprint collisions, keep their exact channel.
+    #[test]
+    fn random_reset_circuits_preserve_the_channel() {
+        let mut rng = Rng(0x7e5e_7000_9abc_def1);
+        let mut folded = 0;
+        for case in 0..400 {
+            let n = 2 + case % 2;
+            let c = if case < 200 {
+                let mut c = Circuit::new(n);
+                for _ in 0..20 {
+                    if rng.up_to(8) == 0 {
+                        c.apply(Gate::reset(rng.up_to(n) as u32));
+                    } else {
+                        c.apply(random_gate(&mut rng, n, false));
+                    }
+                }
+                c
+            } else {
+                let q = rng.up_to(n) as u32;
+                sandwich(&mut rng, n, Gate::reset(q))
+            };
+            let expected = reset_channel(&c);
+            let mut outputs = vec![pauli_fold_rand(&c)];
+            if case < 50 {
+                outputs.push(pauli_fold_with_labels(&c, &vec![(0, 0); n]));
+            }
+            folded += usize::from(outputs[0].gates != c.gates);
+            for out in outputs {
+                let actual = reset_channel(&out);
+                for (e, a) in expected.iter().zip(&actual) {
+                    for (er, ar) in e.iter().zip(a) {
+                        for (&x, &y) in er.iter().zip(ar) {
+                            assert!((x - y).norm_sq() < 1e-18, "case {case}\n{c}\n{out}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(folded > 100, "only {folded} cases changed");
     }
 }
