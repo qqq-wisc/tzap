@@ -367,8 +367,9 @@ binary search. Rotations on unrelated qubits cost nothing.
 
 ### Flat axis storage
 
-All exact axes are appended to one `Vec<u64>`, and events store offsets. This
-reduces allocator traffic and keeps word comparisons and symplectic products
+All exact axes are appended to one `Vec<u64>`, `2L` words each, so event `i`'s
+axis starts at word `2Li` and events need not store offsets. This reduces
+allocator traffic and keeps word comparisons and symplectic products
 contiguous in memory.
 
 ### Early exits
