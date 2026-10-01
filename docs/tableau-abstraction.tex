@@ -57,8 +57,8 @@ Clifford gate updates the tableau exactly. A $T$ gate is not tracked exactly: it
 tableau unchanged and records its axis. We give the concretization of an abstract state as
 a set of unitaries, and prove soundness: the unitary of every circuit lies in the
 concretization of its abstract state. The development follows the Lean formalization in
-\texttt{lean-paulifold/PauliFold/Tableau.lean}; Appendix~\ref{app:lean} lists the
-correspondence.
+\texttt{PauliFold/Tableau.lean} of the separate \texttt{lean-paulifold} repository;
+Appendix~\ref{app:lean} lists the correspondence.
 \end{abstract}
 
 \section{Preliminaries}
@@ -2055,8 +2055,8 @@ stabilizer extension and a non-linear component.
 Everything above is proved in Lean, except Proposition~\ref{prop:char}, its corollary,
 Lemma~\ref{lem:products}, the examples before Section~\ref{sec:loops}, and
 Section~\ref{sec:rust} apart from Theorem~\ref{thm:fold}, which are argued on paper only. The loop examples of Section~\ref{sec:loops} are checked in Lean by evaluation.
-The development is in the files
-\begin{center}\texttt{lean-paulifold/PauliFold/Tableau.lean}, \quad \texttt{Join.lean}, \quad
+The development is in the separate \texttt{lean-paulifold} repository, in the files
+\begin{center}\texttt{PauliFold/Tableau.lean}, \quad \texttt{Join.lean}, \quad
 \texttt{Disjunctive.lean}, \quad \texttt{FoldRule.lean},\end{center}
 and its proofs are against the gate matrices of \texttt{TzapLean.gateUnitary}.
 
