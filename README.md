@@ -107,7 +107,7 @@ Pauli ⊊ Phase     Pauli ⋈ StateFold d     Pauli ⋈ Strengthen d     Strengt
 ```
 
 Every theorem depends only on the standard axioms `propext`, `Classical.choice`, and
-`Quot.sound`. The concrete semantics is that of [`../lean`](../lean) (`tzap-lean`):
+`Quot.sound`. The concrete semantics is that of `tzap-lean`, the Lean development in the `lean` directory of [tzap](https://github.com/qqq-wisc/tzap), which this project depends on at a pinned commit (see `lakefile.lean`):
 operators are its `Density n` matrices, and gates denote `TzapLean.gateUnitary`.
 
 ## The tableau abstraction (`Tableau.lean`)
@@ -279,7 +279,7 @@ theorem loopSwap_ZZ (hU : Exec loopSwapSeg U) : conj U (Z_a Z_b) = Z_a Z_b    --
 ## The fold theorem (`FoldRule.lean`)
 
 The rewrite that `PhaseFoldPauli` performs, justified by one fact of a segment's tableau
-abstraction. This is Theorem 9.1 of `docs/tableau-abstraction.tex`.
+abstraction. This is Theorem 9.1 of `docs/tableau-abstraction.tex` in the tzap repository.
 
 Let `m` be the segment between two rotations and `σ = (init n).run m`. The hypotheses are:
 
@@ -684,7 +684,7 @@ theorem gammaS_incomparable (d : ℕ) (hd : 1 ≤ d) :
 ## Proof notes
 
 - **Containment** (Section 10 of
-  [`docs/pauli-axis-abstract-interpretation.md`](../docs/pauli-axis-abstract-interpretation.md)).
+  [`docs/pauli-axis-abstract-interpretation.md`](https://github.com/qqq-wisc/tzap/blob/pauli-fold/docs/pauli-axis-abstract-interpretation.md) in tzap).
   The invariant `Inv` has two parts:
   - *freshness:* every variable in the wires and the label is below the fresh counter;
   - *agreement:* every wire set that expresses the label's linear part has, as its signed
@@ -737,9 +737,12 @@ The three circuits are in `circuits/`, as OpenQASM:
 
 ## Building
 
-The project shares `../lean`'s Mathlib checkout. After building `../lean` once:
+`lakefile.lean` pulls `tzap-lean` from the tzap repository, pinned to a commit, and Mathlib with
+it. Fetch Mathlib's prebuilt cache first, then build:
 
 ```sh
-mkdir -p .lake && ln -sfn ../../lean/.lake/packages .lake/packages
+lake exe cache get
 lake build
 ```
+
+To move to a newer tzap, change the commit in `lakefile.lean` and run `lake update tzap-lean`.

@@ -9,7 +9,7 @@ distinct wires. Each gate maps to a `TzapLean.Gate`, so the concrete semantics i
 
 The *concrete domain* of rotation folding is the operator being transported: a rotation
 about `P` moved forward through a gate `U` becomes a rotation about `U P U†` (the transport
-lemma of `docs/pauli-axis-abstract-interpretation.md`, Section 1). Concrete values are
+lemma of tzap's `docs/pauli-axis-abstract-interpretation.md`, Section 1). Concrete values are
 therefore `2ⁿ × 2ⁿ` matrices (`TzapLean.Density n`), and a gate's concrete transformer is
 conjugation by its unitary.
 -/
