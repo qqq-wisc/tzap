@@ -9,7 +9,7 @@ Sections 4 and 5 define the **abstraction** — sets of Pauli axes — with its
 Galois connection, abstract transformers, and soundness theorem. Section 6
 shows where the abstraction loses precision, Section 7 turns an analysis
 result into a sound rewrite, and Section 8 relates the analysis to the domains
-used in practice, including the one `PauliFoldRand` implements. Section 10
+used in practice, including the one `PhaseFoldPauli` implements. Section 10
 proves that, on Clifford+T circuits, Pauli folding strictly subsumes symbolic
 phase folding. Section 11 extends the analysis to measurements, resets,
 classically controlled gates, and loops.
@@ -647,7 +647,7 @@ site.
 The support domain has up to $4^n$ axes per value. Practical analyses use
 coarser or bounded domains, and a finer one when cancellations matter.
 
-### 8.1 Singleton or top: the domain of `PauliFoldRand`
+### 8.1 Singleton or top: the domain of `PhaseFoldPauli`
 
 **Definition 8.1.**
 $\mathcal D^\#_{\mathrm{one}}=\{\bot\}\cup\{\mathrm{One}(P):P\in\mathbb
@@ -658,7 +658,7 @@ $P$ and $Q$ commute and otherwise yields $\top$. Every transformer maps
 $\top$ to $\top$.
 
 This domain is the support domain with every non-singleton set widened to
-$\top$, so it is sound and loses at least as much. It is what `PauliFoldRand`
+$\top$, so it is sound and loses at least as much. It is what `PhaseFoldPauli`
 computes. The pass tracks the Clifford part exactly with a signed tableau,
 which also supplies the sign for Theorem 7.1. It declares $\top$ as soon as
 the candidate axis anticommutes with one intervening rotation, which is the
@@ -790,7 +790,7 @@ and folds with neither.
 For comparison, take the Pauli analysis as a relation on the same sites. Let
 $C_{<k}$ be the product of the *Clifford* gates before site $k$ (the
 rotations are omitted), and let $P_k=\pm C_{<k}^\dagger Z_qC_{<k}$ be the
-site's axis pulled back to the circuit input, as `PauliFoldRand` computes it.
+site's axis pulled back to the circuit input, as `PhaseFoldPauli` computes it.
 
 **Definition 10.4 (Pauli fold relation).** Sites $k<l$ are *Pauli-foldable*,
 $k\approx_P l$, when $P_k$ and $P_l$ are equal up to sign, and $P_k$ commutes
@@ -893,7 +893,7 @@ are Pauli-foldable (Example 7.2). $\square$
 Phase folding loses here because a fresh variable forgets that $H\,H$ is the
 identity; the Pauli frame tracks the Clifford exactly. Running the two passes
 on this circuit leaves 3 T gates after `PhaseFoldRand` and 1 after
-`PauliFoldRand`.
+`PhaseFoldPauli`.
 
 As a check, all 1,560 pairs of T sites in 400 random Clifford+T circuits on
 two and three qubits were classified by both relations: all 417
@@ -914,7 +914,7 @@ t q[2]; ccx q[0],q[1],q[2]; cx q[0],q[3]; ccx q[0],q[1],q[2]; t q[2];
 both T gates are labelled $x_2$, because the second CCX undoes the first.
 Phase folding merges them. The Pauli analysis is blocked: the first CCX's
 rotations include the axis $X_2$, which anticommutes with $Z_2$. Here
-`PhaseFoldRand` leaves no T gate and `PauliFoldRand` leaves 2. Decomposing
+`PhaseFoldRand` leaves no T gate and `PhaseFoldPauli` leaves 2. Decomposing
 the Toffolis into Clifford+T first restores Theorem 10.5, since then both
 analyses see only Clifford+T gates.
 
@@ -944,7 +944,7 @@ either outcome. $\square$
 In the abstract analysis a measurement is therefore one more fixed blocker,
 exactly like the rotations of a Toffoli: $\mathrm{One}(P)$ survives it if $P$
 commutes with $M$ and becomes $\top$ otherwise. The Clifford frame passes
-through a measurement unchanged. `PauliFoldRand` currently treats
+through a measurement unchanged. `PhaseFoldPauli` currently treats
 measurements as full barriers, which is sound but loses folds such as
 
 ```text
@@ -1027,7 +1027,7 @@ pairs to the same analysis.
 
 ### 11.4 The pulled-back frame under control flow
 
-`PauliFoldRand` avoids per-candidate propagation by pulling every axis back
+`PhaseFoldPauli` avoids per-candidate propagation by pulling every axis back
 to the circuit input through one shared Clifford frame (Section 8.1). With
 control flow the frame itself can differ between paths. The shared-frame
 method still works on any region where the frame is the same on all paths,

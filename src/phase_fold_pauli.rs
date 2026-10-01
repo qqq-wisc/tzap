@@ -29,21 +29,21 @@ const MAX_SLICED_QUBITS: usize = 32;
 
 /// Folds T and Rz rotations across Clifford gates, including Hadamards.
 /// Can run independently or after [`crate::phase_fold_rand::PhaseFoldRand`].
-pub struct PauliFoldRand;
+pub struct PhaseFoldPauli;
 
-impl Pass for PauliFoldRand {
+impl Pass for PhaseFoldPauli {
     fn name(&self) -> &str {
         "Pauli folding"
     }
 
     fn run(&self, circuit: &Circuit) -> Circuit {
-        pauli_fold_rand(circuit)
+        phase_fold_pauli(circuit)
     }
 }
 
 /// Circuit rewrite up to global phase. Random fingerprints only select
 /// candidates; exact axis and commutation checks authorize every rewrite.
-pub fn pauli_fold_rand(circuit: &Circuit) -> Circuit {
+pub fn phase_fold_pauli(circuit: &Circuit) -> Circuit {
     let labels: Vec<_> = (0..circuit.num_qubits)
         .map(|_| (fresh_label(), fresh_label()))
         .collect();
@@ -959,7 +959,7 @@ mod tests {
         let mut c = Circuit::new(1);
         c.apply(Gate::t(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(out.gates, vec![Gate::s(0)]);
     }
 
@@ -971,7 +971,7 @@ mod tests {
         c.apply(Gate::t(1));
         c.apply(Gate::h(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 1);
         assert!(circuits_equiv(&c, &out, 1e-10));
     }
@@ -984,7 +984,7 @@ mod tests {
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 3);
         assert!(circuits_equiv(&c, &out, 1e-10));
     }
@@ -996,7 +996,7 @@ mod tests {
         c.apply(Gate::h(1));
         c.apply(Gate::x(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 0);
         assert!(circuits_equiv(&c, &out, 1e-10));
     }
@@ -1009,7 +1009,7 @@ mod tests {
         c.apply(Gate::rz(0.37, 1));
         c.apply(Gate::h(0));
         c.apply(Gate::rz(0.21, 0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 0);
         assert_eq!(count_rz(&out), 2);
         assert_eq!(out.gates.len(), c.gates.len() - 1);
@@ -1022,7 +1022,7 @@ mod tests {
         c.apply(Gate::rz(PI / 4.0, 0));
         c.apply(Gate::x(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(out.gates, vec![Gate::x(0)]);
         assert!(circuits_equiv(&c, &out, 1e-10));
     }
@@ -1036,7 +1036,7 @@ mod tests {
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_rz(&out), 0);
         assert_eq!(out.gates.first(), Some(&Gate::s(0)));
         assert!(circuits_equiv(&c, &out, 1e-10));
@@ -1050,7 +1050,7 @@ mod tests {
         c.apply(Gate::rz(0.3, 0));
         c.apply(Gate::h(0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(out.gates, c.gates);
     }
 
@@ -1063,7 +1063,7 @@ mod tests {
         c.apply(Gate::h(0));
         c.apply(Gate::rz(PI / 2.0, 0));
         c.apply(Gate::t(0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 0);
         assert!(circuits_equiv(&c, &out, 1e-10));
     }
@@ -1073,7 +1073,7 @@ mod tests {
         let mut c = Circuit::new(1);
         c.apply(Gate::rz(PI / 4.0 + 1e-10, 0));
         c.apply(Gate::rz(PI / 4.0, 0));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_rz(&out), 1);
         assert_eq!(count_t(&out), 0);
         assert!(circuits_equiv(&c, &out, 1e-12));
@@ -1091,7 +1091,7 @@ mod tests {
         c.apply(Gate::rz(0.2, 64));
         c.apply(cx);
         c.apply(Gate::rz(0.4, 64));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_rz(&out), 2);
         assert_eq!(out.gates.len(), 4);
         assert!(
@@ -1115,7 +1115,7 @@ mod tests {
         let input = qasm::parse(include_str!("../benchmarks/feynman/mod5_4.qasm")).unwrap();
         let cancelled = CancelGates.run(&input);
         let baseline = phase_fold_rand(&cancelled);
-        let improved = pauli_fold_rand(&baseline);
+        let improved = phase_fold_pauli(&baseline);
         assert!(count_t(&improved) < count_t(&baseline));
         assert!(circuits_equiv(&baseline, &improved, 1e-9));
     }
@@ -1224,7 +1224,7 @@ mod tests {
                 c.apply(gate);
             }
             let baseline = phase_fold_rand(&c);
-            let out = pauli_fold_rand(&baseline);
+            let out = phase_fold_pauli(&baseline);
             assert!(count_t(&out) <= count_t(&baseline));
             assert!(out.gates.len() <= baseline.gates.len());
             assert!(circuits_equiv(&baseline, &out, 1e-9));
@@ -1265,7 +1265,7 @@ mod tests {
                 };
                 c.apply(gate);
             }
-            let out = pauli_fold_rand(&c);
+            let out = phase_fold_pauli(&c);
             assert!(count_t(&out) + count_rz(&out) <= count_t(&c) + count_rz(&c));
             assert!(out.gates.len() <= c.gates.len());
             assert!(circuits_equiv(&c, &out, 1e-9), "case {case}");
@@ -1301,7 +1301,7 @@ mod tests {
         c.apply(Gate::t(2));
         c.apply(ccx(0, 1, 2));
         c.apply(Gate::t(2));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(out.gates, c.gates);
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
             c.apply(Gate::t(q));
             c.apply(gate.clone());
             c.apply(Gate::t(q));
-            let out = pauli_fold_rand(&c);
+            let out = phase_fold_pauli(&c);
             assert_eq!(count_t(&out), 0, "{gate:?} on q{q}");
             assert!(out.gates.contains(&gate));
             assert!(circuits_equiv(&c, &out, 1e-10));
@@ -1333,7 +1333,7 @@ mod tests {
         c.apply(ccx(0, 1, 2));
         c.apply(Gate::h(2));
         c.apply(Gate::t(2));
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         // Both T gates act on X2 in the input frame; the CCX's rotations
         // commute with X2 exactly when its target axis is X2 -- here it is.
         assert!(circuits_equiv(&c, &out, 1e-10));
@@ -1388,7 +1388,7 @@ mod tests {
             ),
         ] {
             let c = circuit_of(2, &gates);
-            let out = pauli_fold_rand(&c);
+            let out = phase_fold_pauli(&c);
             assert_eq!(count_t(&out), 0, "{name}: {:?}", out.gates);
         }
     }
@@ -1429,7 +1429,7 @@ mod tests {
             ),
         ] {
             let c = circuit_of(2, &gates);
-            let out = pauli_fold_rand(&c);
+            let out = phase_fold_pauli(&c);
             assert_eq!(count_t(&out), 2, "{name}: {:?}", out.gates);
         }
         // T T T | reset q0 | T T: S T before, S after.
@@ -1444,7 +1444,7 @@ mod tests {
                 Gate::t(0),
             ],
         );
-        let out = pauli_fold_rand(&c);
+        let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 1, "{:?}", out.gates);
         let at = out.gates.iter().position(|g| *g == Gate::reset(0)).unwrap();
         assert_eq!(
@@ -1627,7 +1627,7 @@ mod tests {
             for _ in 0..40 {
                 c.apply(random_gate(&mut rng, n, false));
             }
-            let out = pauli_fold_rand(&c);
+            let out = phase_fold_pauli(&c);
             assert!(count_t(&out) <= count_t(&c));
             assert!(circuits_equiv(&c, &out, 1e-9), "case {case}\n{c}");
             folded += usize::from(out.gates != c.gates);
@@ -1658,7 +1658,7 @@ mod tests {
                 let m = rng.up_to(n) as u32;
                 sandwich(&mut rng, n, Gate::measure { qubit: m, cbit: m })
             };
-            let out = pauli_fold_rand(&c);
+            let out = phase_fold_pauli(&c);
             folded += usize::from(out.gates != c.gates);
             let store = vec![false; n];
             let limits = ChannelLimits::default();
@@ -1754,7 +1754,7 @@ mod tests {
                 sandwich(&mut rng, n, Gate::reset(q))
             };
             let expected = reset_channel(&c);
-            let mut outputs = vec![pauli_fold_rand(&c)];
+            let mut outputs = vec![phase_fold_pauli(&c)];
             if case < 50 {
                 outputs.push(pauli_fold_with_labels(&c, &vec![(0, 0); n]));
             }

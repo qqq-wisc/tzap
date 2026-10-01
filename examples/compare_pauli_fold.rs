@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use tzap::cancel::CancelGates;
 use tzap::pass::{Pass, count_rz, count_t};
-use tzap::pauli_fold_rand::pauli_fold_rand;
+use tzap::phase_fold_pauli::phase_fold_pauli;
 use tzap::phase_fold_rand::phase_fold_rand;
 use tzap::qasm;
 
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // are barriers), so every circuit is eligible.
         let eligible = true;
         let started = Instant::now();
-        let pauli = eligible.then(|| pauli_fold_rand(pauli_input));
+        let pauli = eligible.then(|| phase_fold_pauli(pauli_input));
         let pauli_ms = started.elapsed().as_secs_f64() * 1e3;
         let result = pauli.as_ref().unwrap_or(pauli_input);
         assert!(count_t(result) + count_rz(result) <= count_t(pauli_input) + count_rz(pauli_input));

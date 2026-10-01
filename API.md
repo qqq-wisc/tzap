@@ -167,17 +167,17 @@ A custom pass only needs to supply `name` and `run`.
 | `CancelGates` | `tzap::cancel` | Removes adjacent self-inverse gate pairs (HH, XX, etc.) |
 | `SuperOpt` | `tzap::super_opt` | Replaces small windows using its shared MURM |
 | `PhaseFoldRand` | `tzap::phase_fold_rand` | Merges T/Rz gates across the circuit via randomized parity tracking |
-| `PauliFoldRand` | `tzap::pauli_fold_rand` | Merges T/Rz rotations across Clifford gates using exact axis and commutation checks; CCX/CCZ block the folds they anticommute with, measurements and resets are barriers |
+| `PhaseFoldPauli` | `tzap::phase_fold_pauli` | Merges T/Rz rotations across Clifford gates using exact axis and commutation checks; CCX/CCZ block the folds they anticommute with, measurements and resets are barriers |
 | `CnotMin` | `tzap::cnot_min` | Re-synthesizes CNOT-dihedral blocks to cut two-qubit gates |
 
-`PauliFoldRand` is currently opt-in. Run it after `PhaseFoldRand` to seek
+`PhaseFoldPauli` is currently opt-in. Run it after `PhaseFoldRand` to seek
 folds across H; it handles every gate kind (see the guide). It also runs independently on the original circuit. The CLI
 equivalent for the combined pipeline is
-`--passes CancelGates,PhaseFoldRand,PauliFoldRand`. Axis equality is exact;
+`--passes CancelGates,PhaseFoldRand,PhaseFoldPauli`. Axis equality is exact;
 random fingerprints only locate possible matches, and intervening commutation
 is checked exactly. Arbitrary Rz angles use floating-point addition. Rz angles
 close to a Clifford+T angle are not rounded to it. See
-[the implementation guide](docs/pauli-fold-rand.md).
+[the implementation guide](docs/phase-fold-pauli.md).
 
 ### Running passes
 

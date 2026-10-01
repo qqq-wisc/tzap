@@ -3,7 +3,7 @@ import PauliFold.Circuit
 /-!
 # The Pauli-fold abstract domain
 
-The abstraction used by `PauliFoldRand` (Section 8.1 of the notes): a candidate rotation's
+The abstraction used by `PhaseFoldPauli` (Section 8.1 of the notes): a candidate rotation's
 transported axis is either a single *signed Pauli string* or unknown (`⊤`).
 
 * Cliffords act exactly, as signed permutations of Pauli strings. The tables below are the

@@ -281,7 +281,7 @@ theorem pauli_stateFold_incomparable (d : ℕ) (hd : 1 ≤ d) :
       (by rw [← midA_eq]; exact SF.midA_proves d hd)
     exact hn (h hU _ hf)
 
-/-- The same on the 21-gate relative-Toffoli circuit, where the PauliFoldRand pass also
+/-- The same on the 21-gate relative-Toffoli circuit, where the PhaseFoldPauli pass also
 misses the fold: for `d ≥ 2`, StateFold proves `Z₀ ↦ Z₀` and the Pauli facts do not imply
 it. -/
 theorem midE_sf_not_pauli (d : ℕ) (hd : 2 ≤ d) : ¬ pauliGamma SF.midE ⊆ sfGamma d SF.midE := by

@@ -1,10 +1,10 @@
-# Implementing `PauliFoldRand`
+# Implementing `PhaseFoldPauli`
 
 For a formal view of Pauli-axis propagation as an abstract interpretation,
 including its abstract domain, gate transformers, and soundness theorem, see
 [Pauli-axis propagation as abstract interpretation](pauli-axis-abstract-interpretation.md).
 
-`PauliFoldRand` is a circuit-level Pauli-rotation folding pass. It merges T,
+`PhaseFoldPauli` is a circuit-level Pauli-rotation folding pass. It merges T,
 T†, and Rz rotations that have the same Pauli axis after the intervening
 Clifford circuit is taken into account.
 
@@ -18,7 +18,7 @@ the pass accept an invalid rewrite.
 The pass is opt-in:
 
 ```bash
-tzap input.qasm --passes PauliFoldRand -o output.qasm
+tzap input.qasm --passes PhaseFoldPauli -o output.qasm
 ```
 
 It folds T, T†, and finite-angle Rz rotations across H, X, Z, S, S†, CX, and

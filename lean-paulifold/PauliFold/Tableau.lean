@@ -5,7 +5,7 @@ import Mathlib.LinearAlgebra.Matrix.SemiringInverse
 /-!
 # A tableau abstraction of Clifford+T circuits
 
-The abstraction the Rust `PauliFoldRand` pass computes, for whole circuits.
+The abstraction the Rust `PhaseFoldPauli` pass computes, for whole circuits.
 
 **The state.** A Clifford tableau and a list of axes:
 

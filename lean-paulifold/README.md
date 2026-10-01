@@ -1,13 +1,13 @@
 # pauli-fold (Lean)
 
 A Lean 4 formalization comparing three abstract domains of Clifford+T circuits: the Pauli
-domain of `PauliFoldRand`, symbolic phase folding, and a restricted model of Feynman's
+domain of `PhaseFoldPauli`, symbolic phase folding, and a restricted model of Feynman's
 StateFold (with a restricted model of Amy and Lunderville's Strengthen). See **Scope of the
 StateFold model** below for what is and is not modeled.
 
 | domain | used by | what it tracks |
 |---|---|---|
-| **Pauli** | `PauliFoldRand` | how the circuit conjugates Pauli strings: one signed Pauli, or `⊤` |
+| **Pauli** | `PhaseFoldPauli` | how the circuit conjugates Pauli strings: one signed Pauli, or `⊤` |
 | **Phase** | `PhaseFoldRand`; the symbolic variant of *Linear time T gate optimization* | affine Boolean forms on the wires |
 | **StateFold `d`** (+ **Strengthen**) | a restricted model of Feynman `-statefold d` and Amy and Lunderville, POPL 2025 | an exact path sum, reduced by HH (substitution degree `≤ d`) and ω; only `Z_q ↦ ±Z_{q'}` facts are kept; Strengthen adds witnessed constraints on the final state |
 
@@ -91,7 +91,7 @@ theorem pauli_strengthen_incomparable (d) (hd : 1 ≤ d) : …   -- the same for
 >   circuit starts with `h; t`, so every Pauli that Pauli can track has `I` or `X` at `q0`.
 >   Then `U · X₀` satisfies every Pauli fact, but sends `Z₀` to `−Z₀` (`sf_fact_not_pauli`).
 > - **The 21-gate relative-Toffoli circuit** `midE` is the same for `d ≥ 2`. On it, the
->   PauliFoldRand pass also misses the fold.
+>   PhaseFoldPauli pass also misses the fold.
 
 ```lean
 theorem strengthen_refines_stateFold (d gs) : sfGammaS d gs ⊆ sfGamma d gs
@@ -112,7 +112,7 @@ operators are its `Density n` matrices, and gates denote `TzapLean.gateUnitary`.
 
 ## The tableau abstraction (`Tableau.lean`)
 
-This is the abstraction the Rust `PauliFoldRand` pass computes, formalized for whole
+This is the abstraction the Rust `PhaseFoldPauli` pass computes, formalized for whole
 circuits. It says nothing about merging rotations; it only approximates the circuit's
 semantics.
 
@@ -278,7 +278,7 @@ theorem loopSwap_ZZ (hU : Exec loopSwapSeg U) : conj U (Z_a Z_b) = Z_a Z_b    --
 
 ## The fold theorem (`FoldRule.lean`)
 
-The rewrite that `PauliFoldRand` performs, justified by one fact of a segment's tableau
+The rewrite that `PhaseFoldPauli` performs, justified by one fact of a segment's tableau
 abstraction. This is Theorem 9.1 of `docs/tableau-abstraction.tex`.
 
 Let `m` be the segment between two rotations and `σ = (init n).run m`. The hypotheses are:
@@ -527,7 +527,7 @@ theorem gamma_incomparable (d : ℕ) (hd : 1 ≤ d) :
 >   degree.
 
 **A separation that survives the tools.** `h; t; tdg; h` separates the *domains*, but the
-PauliFoldRand *pass* still clears it: it first merges the adjacent inner T and T†, which
+PhaseFoldPauli *pass* still clears it: it first merges the adjacent inner T and T†, which
 share an axis. `DegreeTwo.lean` gives a 21-gate, 11-T circuit on which the tools differ as
 well (`circuits/statefold-beats-paulifold.qasm`):
 
@@ -559,7 +559,7 @@ theorem midE_ssubset (d : ℕ) (hd : 2 ≤ d) : sfCandidate d midE 0 ⊂ pauliCa
 >
 > - Feynman `-statefold 2`: 11 → 9 Ts.
 > - `-statefold 1`: 11 → 11.
-> - tzap's PauliFoldRand + CancelGates fixpoint: 11 → 11.
+> - tzap's PhaseFoldPauli + CancelGates fixpoint: 11 → 11.
 > - tzap `-O3`: 11 → 11.
 >
 > **Minimality.**
@@ -718,7 +718,7 @@ theorem gammaS_incomparable (d : ℕ) (hd : 1 ≤ d) :
 | `PauliFold/StateFold/Fold.lean` | traces, the shifting lemma, `fold_sound`, `Trace.mono` |
 | `PauliFold/StateFold/Counterexample.lean` | the 7-gate fold that StateFold misses at every degree |
 | `PauliFold/StateFold/Incomparable.lean` | StateFold's concretization, `proves_sound`, `gamma_incomparable` |
-| `PauliFold/StateFold/DegreeTwo.lean` | a 21-gate, 11-T circuit where degree-2 StateFold folds and PauliFoldRand does not, end to end |
+| `PauliFold/StateFold/DegreeTwo.lean` | a 21-gate, 11-T circuit where degree-2 StateFold folds and PhaseFoldPauli does not, end to end |
 | `PauliFold/Tableau.lean` | the tableau abstraction of the Rust pass: phased Pauli strings, their product, row updates, the invariant, and soundness |
 | `PauliFold/TableauContainment.lean` | the tableau refines the Pauli and phase domains (strictly) |
 | `PauliFold/Affine.lean` | the affine domain as a transition relation; soundness; the tableau and Pauli domains refine it |

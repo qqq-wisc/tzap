@@ -5,7 +5,7 @@ import PauliFold.Domains
 
 The containment theorems of `Domains.lean` are stated for `pauliGamma`, the concretization
 of the per-string Pauli transformer. This file transfers them to the tableau abstraction
-of `Tableau.lean`, the one the Rust `PauliFoldRand` pass computes.
+of `Tableau.lean`, the one the Rust `PhaseFoldPauli` pass computes.
 
 The bridge is `tab_gamma_subset_pauli`: every fact of the Pauli domain is also a fact of
 the tableau. The proof runs the two analyses side by side (`joint_run`). For a fixed input

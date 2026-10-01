@@ -29,7 +29,7 @@ The tools behave the same way:
 |---|---|
 | Feynman `-statefold 2` or `-statefold 0` | 9 (the outer Ts merge into an S) |
 | Feynman `-statefold 1` | 11 |
-| tzap `--passes PauliFoldRand,CancelGates --fixpoint` | 11 |
+| tzap `--passes PhaseFoldPauli,CancelGates --fixpoint` | 11 |
 | tzap `-O3` | 11 |
 
 **Minimality.** The circuit was found by a random search over Toffoli circuits, followed by
