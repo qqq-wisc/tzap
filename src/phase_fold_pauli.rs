@@ -10,7 +10,7 @@ use std::hash::{BuildHasher, Hasher};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::circuit::{Circuit, Gate, qubits_of};
+use crate::circuit::{Circuit, Gate, qubit_operands};
 use crate::pass::Pass;
 use crate::pbc::{packed_anticommutes, support_signature};
 
@@ -673,7 +673,8 @@ fn well_formed(circuit: &Circuit) -> bool {
         if matches!(g, Gate::rz(theta, _) if !theta.is_finite()) {
             return false;
         }
-        let mut qubits = qubits_of(g);
+        let (len, mut qubits) = qubit_operands(g);
+        let qubits = &mut qubits[..len];
         qubits.sort_unstable();
         qubits.iter().all(|&q| (q as usize) < n) && qubits.windows(2).all(|w| w[0] != w[1])
     })
