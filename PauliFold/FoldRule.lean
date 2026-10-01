@@ -4,7 +4,7 @@ import PauliFold.StateFold.Incomparable
 /-!
 # The fold theorem
 
-The rewrite `PauliFoldRand` performs, justified by one fact of the tableau abstraction.
+The rewrite `PhaseFoldPauli` performs, justified by one fact of the tableau abstraction.
 
 Let `m` be a segment of a circuit and `σ` its abstract state from the identity tableau.
 Suppose that
