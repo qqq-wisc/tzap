@@ -1213,9 +1213,9 @@ order, or a program with many independent branches, exceeds the bound and falls 
 the per-row join.
 \end{remark}
 
-\section{The optimizer: \texttt{PauliFoldRand}}\label{sec:rust}
+\section{The optimizer: \texttt{PhaseFoldPauli}}\label{sec:rust}
 
-This section describes the Rust pass \texttt{PauliFoldRand}
+This section describes the Rust pass \texttt{PhaseFoldPauli}
 (\texttt{src/pauli\_fold\_rand.rs}), which uses the tableau abstraction to reduce
 $T$-count. It adds two things to the abstraction.
 \begin{itemize}[nosep]
@@ -1225,7 +1225,8 @@ $T$-count. It adds two things to the abstraction.
 \end{itemize}
 The pass is a single forward scan over the circuit. It rewrites gates in place and never
 reorders them. We present the algorithm without the engineering that makes the
-implementation fast; that engineering changes the cost of the scan, not its output.
+implementation fast. Section~\ref{sec:fast} describes it; it changes the cost of the scan,
+not its verdicts.
 
 \subsection{What the pass keeps}
 
@@ -1260,7 +1261,7 @@ commute with them to move across them.
 \subsection{The scan}
 
 \begin{algorithm}[h]
-\caption{\texttt{PauliFoldRand} (one pass).}
+\caption{\texttt{PhaseFoldPauli} (one pass).}
 \label{alg:pfr}
 \begin{algorithmic}[1]
 \State frame $\gets$ the identity tableau; \ history $\gets$ empty
@@ -1495,7 +1496,7 @@ $Z_0Z_1$, so they cannot meet.}
 \end{table}
 
 The output is the circuit with gate 1 deleted and gate 5 replaced by $\gate S$. It has
-three $T$ gates instead of five; this is exactly what \texttt{tzap --passes PauliFoldRand}
+three $T$ gates instead of five; this is exactly what \texttt{tzap --passes PhaseFoldPauli}
 produces. Without gates 6--8 the $T$ at gate 3 and the $T\adj$ at gate 10 would merge and
 cancel as well.
 
@@ -1517,6 +1518,237 @@ Theorem~\ref{thm:fold} is proved in Lean (\texttt{FoldRule.lean}), with phase-ex
 rotations $\mathrm{diag}(1, e^{i\pi\theta})$ in place of $R_P(\theta)$. For the sign $-$,
 the two versions differ by the global phase $e^{i\pi\theta}$. Corollary~\ref{cor:fold-programs}
 and Lemma~\ref{lem:scan-check} are argued on paper only.
+
+\section{Making the scan fast}\label{sec:fast}
+
+Algorithm~\ref{alg:pfr} as written costs $O(rn)$ per rotation: it compares a new axis with
+every earlier event, and it tests commutation against every event since the candidate. On
+circuits with $10^7$ gates this is far too slow. This section describes how the Rust pass
+gets its speed, in the order the pieces matter. Every optimization here either answers the
+same question faster or refuses a fold. None of them can authorize a rewrite that
+Algorithm~\ref{alg:pfr} would reject.
+
+\subsection{Finding the candidate: fingerprints}
+
+\paragraph{Fingerprints.}
+Each generator $X_q$, $Z_q$ gets a random 128-bit label $\lambda(X_q)$, $\lambda(Z_q)$. The
+\emph{fingerprint} of a Pauli string, ignoring its sign, is the XOR of the labels of the
+generators it contains, with $Y_q$ counting as both $X_q$ and $Z_q$:
+\[
+  f(\tX^u \tZ^w) = \bigoplus_{u_q = 1} \lambda(X_q) \;\oplus\; \bigoplus_{w_q = 1} \lambda(Z_q).
+\]
+Multiplying Pauli strings XORs their bit vectors, so $f(PQ) = f(P) \oplus f(Q)$. Every row
+update of Table~\ref{tab:rows} is a swap, a sign change, or a product of two rows. So a
+second, \emph{sketch} frame can hold the fingerprints of the rows and update them with the
+same pattern, at $O(1)$ per gate instead of $O(n/64)$.
+
+\paragraph{The candidate index.}
+A hash map sends each fingerprint to its newest event, and each event links to the
+previous event with the same fingerprint. The candidate search on line~7 is then one
+lookup, followed by exact axis comparisons along that chain until one matches. Two cases
+remain:
+\begin{itemize}[nosep]
+  \item \emph{Collisions.} Different axes collide with probability $2^{-128}$. A collision
+  only costs a wasted comparison, because the exact axes decide.
+  \item \emph{Dead links.} Links to dead events are skipped and then compressed, so a long
+  run of folds on one axis does not make later lookups walk it again.
+\end{itemize}
+The randomness therefore affects only speed. The output is deterministic.
+
+\paragraph{The pre-check.}
+Before building anything, the pass runs the sketch frame alone and records the
+fingerprint of every rotation's axis. If no fingerprint repeats, no two rotations share an
+axis, and the circuit is returned unchanged without ever building the exact frame.
+
+\subsection{Checking commutation: support lists}
+
+\paragraph{Support lists.}
+Two Pauli strings can anticommute only on a qubit where both act. For each qubit block $b$
+(the qubits are split into at most 64 blocks), the pass keeps the list of events whose
+axis acts on $b$, in increasing order. To check line~8, it looks at the lists of the blocks
+where $A$ acts. In each one, it binary-searches for the first event after the candidate
+and tests the events from there.
+
+\paragraph{Test each event once.}
+An event that shares several blocks with $A$ appears in several of these lists. Each event
+records its \emph{signature}, the 64-bit mask of blocks it acts on. It is tested only in
+the list of the lowest block it shares with $A$, that is, when
+$\mathrm{ctz}(\mathrm{sig}_e \wedge \mathrm{sig}_A)$ is the current block.
+
+\paragraph{Liveness without indirection.}
+The scan needs each event's liveness and axis. Liveness is kept in a separate bitset, one
+bit per event. Axes are stored contiguously, $2\lceil n/64\rceil$ words each, so event
+$e$'s axis starts at a fixed offset. The inner loop therefore reads two small arrays
+instead of following a pointer into a large event record.
+
+\subsection{The dominant cost: folded rotations}
+
+\paragraph{The problem.}
+On the large cobble circuits, 98\% of the $T$ gates fold away. Their events die, but their
+ids stayed in the support lists. We measured the lists on \texttt{ols-ridge-d24} (20M gates,
+28 qubits):
+\begin{itemize}[nosep]
+  \item the commutation checks visited $6.2 \times 10^9$ list entries;
+  \item 98\% of those entries were dead;
+  \item the check took 88\% of the pass.
+\end{itemize}
+Most of the visits came from \emph{blocked} attempts. A rotation whose axis last appeared
+tens of thousands of events earlier has a long window. The scan then walks thousands of
+dead entries before it meets the live event that blocks the fold.
+
+\paragraph{Compaction.}
+Each list keeps a count of its dead entries. When a rotation dies, the count goes up in
+each of its lists. A list is compacted, keeping only live ids and preserving their order,
+once a quarter of it is dead. Each compaction is linear in the list, and at least a
+quarter of its entries died since the previous one, so the cost is $O(1)$ amortized per
+death. On \texttt{ols-ridge-d24} this cut the visits from $6.2 \times 10^9$ to
+$3.6 \times 10^8$, and the output did not change.
+
+\paragraph{Scan order does not help.}
+The verdict, whether some live event in the window anticommutes with $A$, does not depend
+on the order of the scan. We tried scanning newest first, and the result depended on the
+circuit:
+\begin{itemize}[nosep]
+  \item on some circuits it was 2$\times$ faster;
+  \item on the \texttt{ols-ridge} family it was 3.5$\times$ slower, because there the
+  blockers sit near the old end of the window.
+\end{itemize}
+Alternating between the two ends gave middling results everywhere. The scan stays
+oldest-first.
+
+\subsection{Bit-sliced lists}
+
+The remaining cost is testing one event at a time. For circuits with at most 32 qubits, an
+axis is one X word and one Z word. Two axes $P = (x, z)$ and $Q = (x', z')$ anticommute
+exactly when
+\[
+  \omega(P, Q) \;=\; \mathrm{popcount}\big((x \wedge z') \oplus (z \wedge x')\big) \bmod 2 \;=\; 1 .
+\]
+Its terms can be regrouped by qubit, so the test runs on 64 events at once.
+
+\paragraph{The layout.}
+Each qubit's list is stored in blocks of 64 entries. Entry $i$ of a block owns bit $i$ of
+every mask in that block. A block holds, for each qubit $p$:
+\begin{itemize}[nosep]
+  \item $\mathrm{X}_p$, the mask of entries whose axis has $X$ or $Y$ on $p$;
+  \item $\mathrm{Z}_p$, the mask of entries with $Z$ or $Y$ on $p$;
+\end{itemize}
+and one mask $\mathrm{L}$ of live entries.
+
+\paragraph{The test.}
+Anticommutation with $A = (a_x, a_z)$ is the parity, over the qubits $p$ of $A$'s support,
+of ``$A$ has $X$ on $p$ and the entry has $Z$ on $p$'' plus ``$A$ has $Z$ on $p$ and the
+entry has $X$ on $p$''. For all 64 entries at once, that is
+\[
+  \mathrm{hit} \;=\; \Big( \bigoplus_{p \,:\, a_x(p) = 1} \mathrm{Z}_p \;\;\oplus\;
+  \bigoplus_{p \,:\, a_z(p) = 1} \mathrm{X}_p \Big) \wedge \mathrm{L} .
+\]
+Any set bit is a live anticommuting event, so the fold is blocked. A block costs
+$\mathrm{wt}(A)$ word XORs instead of 64 separate tests. The per-entry storage is small:
+$2n$ bits of masks plus a 32-bit id, about 11 bytes for $n = 28$.
+
+\begin{example}[One block]
+Take two qubits and a block with four entries,
+$e_0 = Z_0Z_1$, $e_1 = X_1$, $e_2 = X_0X_1$ and $e_3 = Y_0$, with $e_1$ dead. Writing
+masks as $e_3e_2e_1e_0$:
+\[
+  \mathrm{X}_0 = 1100,\quad \mathrm{Z}_0 = 1001,\quad \mathrm{X}_1 = 0110,\quad
+  \mathrm{Z}_1 = 0001,\quad \mathrm{L} = 1101 .
+\]
+\begin{itemize}[nosep]
+  \item For $A = Z_1$, only $a_z(1) = 1$, so $\mathrm{hit} = \mathrm{X}_1 \wedge \mathrm{L}
+  = 0100$. That is $e_2 = X_0X_1$, the only live entry that anticommutes with $Z_1$. The
+  entry $e_1 = X_1$ also anticommutes, but it is dead.
+  \item For $A = X_0Z_1$, $\mathrm{Z}_0 \oplus \mathrm{X}_1 = 1111$: every entry
+  anticommutes with $X_0Z_1$, and $\mathrm{hit} = 1101$.
+\end{itemize}
+\end{example}
+
+\paragraph{Updates.}
+\begin{itemize}[nosep]
+  \item \emph{A new event} with support $w$ goes into $w$ lists and sets up to $w$ mask bits
+  in each, so recording it costs $O(w^2)$ rather than $O(w)$.
+  \item \emph{A death} clears one bit of $\mathrm{L}$ in each of the event's lists. Its
+  position there is found by a galloping search from the end, because rotations usually
+  fold soon after they are recorded.
+  \item \emph{Compaction.} A list is rebuilt from its live entries once half of it is dead.
+\end{itemize}
+
+\paragraph{When to use it.}
+Scans get cheaper and insertions get more expensive. The trade pays off when fold attempts
+scan long windows, as on the cobble circuits, and loses when axes are dense and few
+rotations fold, as on QFT. On 50-qubit QFT, bit-slicing made the pass 2.2$\times$ slower.
+The pass therefore uses bit-sliced lists up to 32 qubits and the scalar lists above that.
+A test checks that the two kinds reach the same verdicts: with an unbounded budget, they
+produce identical rewrites on 600 random circuits with measurements, CCX and CCZ.
+
+\subsection{The budget}
+
+Each fold attempt gets a budget of $2^{16}$ steps. The candidate search and the
+commutation check share it.
+\begin{itemize}[nosep]
+  \item \emph{Candidate search:} one step per live chain entry compared.
+  \item \emph{Scalar lists:} one step per list entry visited.
+  \item \emph{Bit-sliced lists:} one step per live entry in each block scanned.
+\end{itemize}
+An attempt that runs out counts as blocked. The rotation is then recorded as a new event,
+and the scan goes on. This bounds the pass by $O(m + r \cdot 2^{16})$. It is sound, because
+it only refuses folds.
+
+Once the scan was fast, the budget stopped mattering. Across 63 benchmark circuits:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+budget per attempt & pass time & rotations left & lost folds vs.\ $2^{20}$ \\
+\midrule
+$2^{8}$ & 6.9 s & 13{,}220{,}606 & 10{,}823{,}123 \\
+$2^{10}$ & 5.8 s & 2{,}402{,}329 & 4{,}846 \\
+$2^{12}$ & 5.9 s & 2{,}398{,}399 & 916 \\
+$2^{16}$ & 6.1 s & 2{,}397{,}821 & 338 \\
+$2^{20}$ & 6.2 s & 2{,}397{,}483 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Below about $2^{10}$ folds collapse, and the pass even gets slower: unfolded rotations stay
+live and lengthen every list. Above it, the time moves by less than 7\%.
+
+\subsection{Results}
+
+These timings are for the pass alone: one thread, on the whole circuit, timed in process
+on the same parsed input. \texttt{PhaseFoldRand} is shown for scale.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+circuit & gates & original & compaction & all & \texttt{PhaseFoldRand} \\
+\midrule
+\texttt{ols-ridge-d24} & 19.8M & 3.73 s & 3.01 s & 2.42 s & 0.56 s \\
+\texttt{hamiltonian-n18} & 10.6M & 4.97 s & 2.27 s & 0.97 s & 0.24 s \\
+\texttt{chebyshev-n36} & 10.4M & 2.32 s & 1.50 s & 0.99 s & 0.25 s \\
+\texttt{spectral-n29} & 10.2M & 11.69 s & 6.54 s & 1.14 s & 0.26 s \\
+all 63 circuits & & 23.6 s & 13.8 s & 6.2 s & 1.5 s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Over all 63 circuits the pass is 3.8$\times$ faster than it was. It still costs about four
+times \texttt{PhaseFoldRand}, but it leaves 2.4M rotations to \texttt{PhaseFoldRand}'s
+19.4M. On the 97-circuit corpus, the CLI output is byte-identical on 93 circuits. The other
+4 have a few more folds, from attempts that used to exhaust the budget on dead entries.
+
+The CLI splits a circuit into chunks and runs them in parallel. Each chunk then has a short
+history, so there the gain is larger. On \texttt{ols-ridge-d24}, compaction alone took the
+pass itself from about 5 s to about 0.1 s, against a trivial pass on the same file. The price is that chunking gives up the folds that would cross a
+chunk boundary.
+
+What remains is spread out: the commutation check, deaths, the candidate hash lookup, and
+the frame updates each take 10--30\% of the pass. A further step would choose bit-sliced
+lists by average axis density rather than by qubit count, to recover QFT's 20- and
+30-qubit cases, which are now 0.75--0.83$\times$ their old speed.
 
 \section{Comparison with Amy and Lunderville's relational analyses}\label{sec:al}
 
@@ -1623,7 +1855,7 @@ their Proposition~9) needs.
 \paragraph{Tool check.}
 The straight-line examples were run through both tools.
 \begin{itemize}[nosep]
-  \item \emph{tzap.} \texttt{tzap --passes PauliFoldRand}, with each output checked for
+  \item \emph{tzap.} \texttt{tzap --passes PhaseFoldPauli}, with each output checked for
   equivalence by simulation.
   \item \emph{Feynman.} \texttt{feynopt -verify}, at commit \texttt{4c4c488}, through its
   \texttt{.qc} frontend. Every output verified. The QASM2 frontend with
