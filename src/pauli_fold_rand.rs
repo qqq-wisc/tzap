@@ -21,6 +21,12 @@ const MAX_AXIS_WORDS: usize = 1 << 25;
 /// check). An attempt that runs out is treated as blocked, and the scan goes
 /// on, so one expensive candidate cannot end the pass.
 const MAX_ATTEMPT_STEPS: usize = 1 << 16;
+
+/// Widest circuit that uses bit-sliced support lists. A rotation with support
+/// `w` costs `O(w²)` to record there (it sets `w` bits in each of `w` lists),
+/// which dense wide circuits such as QFT do not recover in faster scans.
+const MAX_SLICED_QUBITS: usize = 32;
+
 /// Folds T and Rz rotations across Clifford gates, including Hadamards.
 /// Can run independently or after [`crate::phase_fold_rand::PhaseFoldRand`].
 pub struct PauliFoldRand;
@@ -226,23 +232,48 @@ struct History {
     /// Work allowed per fold attempt.
     attempt_steps: usize,
     events: Vec<Event>,
-    /// Exact unsigned axes, `2 l` words per event.
+    /// Exact unsigned axes, `2 l` words per event, so event `id`'s axis starts
+    /// at `2 l id`.
     axes: Vec<u64>,
+    /// Liveness of each event, one bit per event, so scans need not touch
+    /// `events`.
+    live: Vec<u64>,
+    /// Support signature of each event.
+    sigs: Vec<u64>,
     /// Per support-signature bit, the events whose axis touches it, in order.
     /// Only these can anticommute with an axis whose signature has that bit.
     touching: [Vec<u32>; 64],
+    /// Bit-sliced support lists, one per qubit, when the circuit has at most
+    /// [`MAX_SLICED_QUBITS`] qubits; `touching` is then unused. Empty
+    /// otherwise.
+    sliced: Vec<SliceList>,
+    /// Qubit count, the stride of a bit-sliced block.
+    n: usize,
+    /// Per support-signature bit, how many ids in `touching` are dead. Most
+    /// rotations fold away, so a list is compacted once a quarter of it is
+    /// dead; otherwise every later scan walks past them.
+    dead_in: [usize; 64],
     /// Newest event per axis fingerprint (merge candidates only).
     last: FxHashMap<u128, usize>,
 }
 
 impl History {
-    fn new(l: usize, attempt_steps: usize) -> Self {
+    fn new(n: usize, l: usize, attempt_steps: usize, sliced: bool) -> Self {
         Self {
             l,
+            n,
+            sliced: if sliced {
+                (0..n).map(|_| SliceList::default()).collect()
+            } else {
+                Vec::new()
+            },
             attempt_steps,
             events: Vec::new(),
             axes: Vec::new(),
+            live: Vec::new(),
+            sigs: Vec::new(),
             touching: std::array::from_fn(|_| Vec::new()),
+            dead_in: [0; 64],
             last: FxHashMap::default(),
         }
     }
@@ -268,11 +299,50 @@ impl History {
             event.prev_hash = self.last.insert(h, id);
         }
         self.axes.extend_from_slice(axis);
-        for bit in bits(support_signature(axis, self.l)) {
-            self.touching[bit].push(id as u32);
+        let signature = support_signature(axis, self.l);
+        if self.sliced.is_empty() {
+            for bit in bits(signature) {
+                self.touching[bit].push(id as u32);
+            }
+        } else {
+            for q in bits(signature) {
+                self.sliced[q].push(id as u32, axis[0], axis[1], self.n);
+            }
         }
+        if id % 64 == 0 {
+            self.live.push(0);
+        }
+        self.live[id / 64] |= 1 << (id % 64);
+        self.sigs.push(signature);
         self.events.push(event);
         Some(())
+    }
+
+    /// Mark a folded rotation dead, compacting the support lists it is in once
+    /// a quarter of each is dead. Compaction keeps each list's order, which
+    /// [`History::commutes_after`] relies on.
+    fn kill(&mut self, id: usize) {
+        self.events[id].live = false;
+        self.live[id / 64] &= !(1 << (id % 64));
+        if !self.sliced.is_empty() {
+            for q in bits(self.sigs[id]) {
+                let list = &mut self.sliced[q];
+                list.kill(id as u32);
+                if 2 * list.dead > list.ids.len() {
+                    list.rebuild(&self.live, &self.axes, self.n);
+                }
+            }
+            return;
+        }
+        let live = &self.live;
+        for bit in bits(self.sigs[id]) {
+            self.dead_in[bit] += 1;
+            let list = &mut self.touching[bit];
+            if 4 * self.dead_in[bit] > list.len() {
+                list.retain(|&e| is_live(live, e as usize));
+                self.dead_in[bit] = 0;
+            }
+        }
     }
 
     /// Record a fixed obstacle: a later fold across it must commute with
@@ -312,10 +382,33 @@ impl History {
 
     /// Whether `axis` commutes with every live rotation recorded after event
     /// `after`. Only rotations sharing a support-signature bit can fail to
-    /// commute, so only those are checked. `None` if the attempt budget runs
-    /// out first.
-    fn commutes_after(&self, after: usize, axis: &[u64], steps: &mut usize) -> Option<bool> {
-        for bit in bits(support_signature(axis, self.l)) {
+    /// commute, so only those are checked, and each only in the list of the
+    /// lowest bit it shares with `axis`. `None` if the attempt budget runs out
+    /// first.
+    ///
+    /// Each list is scanned newest first, and the dead ids met on the way are
+    /// dropped. The scanned part is a suffix, so compacting it in place only
+    /// moves the live ids already visited.
+    fn commutes_after(&mut self, after: usize, axis: &[u64], steps: &mut usize) -> Option<bool> {
+        if self.sliced.is_empty() {
+            self.commutes_scalar(after, axis, steps)
+        } else {
+            self.commutes_sliced(after, axis, steps)
+        }
+    }
+
+    fn check(&self, id: usize, bit: usize, signature: u64, axis: &[u64]) -> bool {
+        let l = self.l;
+        (self.sigs[id] & signature).trailing_zeros() as usize == bit
+            && packed_anticommutes(&self.axes[2 * l * id..2 * l * (id + 1)], axis, l)
+    }
+
+    /// The scalar scan, for circuits wider than 64 qubits: every entry of
+    /// each support list after `after`, oldest first. Each event is checked
+    /// only in the list of the lowest bit it shares with `axis`.
+    fn commutes_scalar(&self, after: usize, axis: &[u64], steps: &mut usize) -> Option<bool> {
+        let signature = support_signature(axis, self.l);
+        for bit in bits(signature) {
             let list = &self.touching[bit];
             let start = list.partition_point(|&id| id as usize <= after);
             for &id in &list[start..] {
@@ -324,13 +417,127 @@ impl History {
                     return None;
                 }
                 let id = id as usize;
-                if self.events[id].live && packed_anticommutes(self.axis(id), axis, self.l) {
+                if is_live(&self.live, id) && self.check(id, bit, signature, axis) {
                     return Some(false);
                 }
             }
         }
         Some(true)
     }
+}
+
+impl History {
+    /// [`History::commutes_after`] on bit-sliced lists (at most
+    /// [`MAX_SLICED_QUBITS`] qubits, so an axis is one X word and one Z word
+    /// and its signature is `x | z`).
+    /// A block's anticommutation mask against `axis` is the XOR of the Z
+    /// masks of the qubits where `axis` has X and the X masks of those where
+    /// it has Z; its set live bits are the anticommuting live events.
+    fn commutes_sliced(&self, after: usize, axis: &[u64], steps: &mut usize) -> Option<bool> {
+        let (ax, az) = (axis[0], axis[1]);
+        let n = self.n;
+        // Mask word indices to XOR: Z masks where `axis` has X, X masks where
+        // it has Z.
+        let mut words = [0u8; 128];
+        let mut count = 0;
+        for p in bits(ax) {
+            words[count] = (2 * p + 1) as u8;
+            count += 1;
+        }
+        for p in bits(az) {
+            words[count] = (2 * p) as u8;
+            count += 1;
+        }
+        let words = &words[..count];
+        for q in bits(ax | az) {
+            let list = &self.sliced[q];
+            let start = list.ids.partition_point(|&id| id as usize <= after);
+            let mut first = !0u64 << (start % 64);
+            for block in start / 64..list.live.len() {
+                *steps += list.live[block].count_ones() as usize;
+                if *steps > self.attempt_steps {
+                    return None;
+                }
+                let masks = &list.masks[2 * n * block..2 * n * (block + 1)];
+                let mut acc = 0;
+                for &w in words {
+                    acc ^= masks[w as usize];
+                }
+                if acc & list.live[block] & first != 0 {
+                    return Some(false);
+                }
+                first = !0;
+            }
+        }
+        Some(true)
+    }
+}
+
+/// One qubit's support list, bit-sliced in blocks of 64 entries: block `b`
+/// holds, for each qubit `p`, the mask of its entries with X on `p` (word
+/// `2 p`) and with Z on `p` (word `2 p + 1`), and a mask of its live entries.
+#[derive(Default)]
+struct SliceList {
+    /// Event ids, increasing.
+    ids: Vec<u32>,
+    /// `2 n` words per block.
+    masks: Vec<u64>,
+    /// One word per block.
+    live: Vec<u64>,
+    /// Dead entries still in the list.
+    dead: usize,
+}
+
+impl SliceList {
+    fn push(&mut self, id: u32, x: u64, z: u64, n: usize) {
+        let pos = self.ids.len();
+        if pos % 64 == 0 {
+            self.masks.resize(self.masks.len() + 2 * n, 0);
+            self.live.push(0);
+        }
+        let (block, bit) = (pos / 64, 1u64 << (pos % 64));
+        let masks = &mut self.masks[2 * n * block..2 * n * (block + 1)];
+        for p in bits(x) {
+            masks[2 * p] |= bit;
+        }
+        for p in bits(z) {
+            masks[2 * p + 1] |= bit;
+        }
+        self.live[block] |= bit;
+        self.ids.push(id);
+    }
+
+    fn kill(&mut self, id: u32) {
+        // Folded rotations are usually recent, so gallop back from the end.
+        let ids = &self.ids;
+        let (mut lo, mut span) = (ids.len() - 1, 1);
+        while lo > 0 && ids[lo] > id {
+            lo = lo.saturating_sub(span);
+            span *= 2;
+        }
+        let pos = lo + ids[lo..].partition_point(|&e| e < id);
+        debug_assert_eq!(ids[pos], id, "a live event is in its lists");
+        self.live[pos / 64] &= !(1 << (pos % 64));
+        self.dead += 1;
+    }
+
+    /// Rebuild from the live entries, in order.
+    fn rebuild(&mut self, live: &[u64], axes: &[u64], n: usize) {
+        let ids = std::mem::take(&mut self.ids);
+        self.masks.clear();
+        self.live.clear();
+        self.dead = 0;
+        for id in ids {
+            let id = id as usize;
+            if is_live(live, id) {
+                self.push(id as u32, axes[2 * id], axes[2 * id + 1], n);
+            }
+        }
+    }
+}
+
+fn is_live(live: &[u64], id: usize) -> bool {
+    live[id / 64] >> (id % 64) & 1 != 0
 }
 
 fn bits(mut w: u64) -> impl Iterator<Item = usize> {
@@ -505,6 +712,18 @@ fn pauli_fold_with_labels(circuit: &Circuit, labels: &[(u128, u128)]) -> Circuit
 
 /// [`pauli_fold_with_labels`] with a given per-attempt budget.
 fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: usize) -> Circuit {
+    let sliced = circuit.num_qubits <= MAX_SLICED_QUBITS;
+    pauli_fold_impl(circuit, labels, attempt_steps, sliced)
+}
+
+/// [`pauli_fold_with`], choosing bit-sliced or scalar support lists. Both
+/// give the same verdicts; only the budget accounting differs.
+fn pauli_fold_impl(
+    circuit: &Circuit,
+    labels: &[(u128, u128)],
+    attempt_steps: usize,
+    sliced: bool,
+) -> Circuit {
     if labels.len() != circuit.num_qubits || !well_formed(circuit) {
         return circuit.clone();
     }
@@ -560,11 +779,13 @@ fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: us
 
     let mut sketch = SketchFrame::new(labels);
     let mut exact = ExactFrame::new(circuit.num_qubits);
-    let mut history = History::new(l, attempt_steps);
+    let mut history = History::new(circuit.num_qubits, l, attempt_steps, sliced);
     // 0: keep; 1: delete; >=2: index into replacements.
     let mut edits = vec![0u32; circuit.gates.len()];
     let mut replacements: Vec<Angle> = Vec::new();
     let mut rewrites = 0;
+    // The current rotation's axis, reused across rotations.
+    let mut axis: Vec<u64> = Vec::with_capacity(2 * l);
 
     'scan: for (idx, gate) in circuit.gates.iter().enumerate() {
         match *gate {
@@ -580,7 +801,8 @@ fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: us
                 let h = sketch.z[q as usize];
                 let row = &exact.z[q as usize];
                 let sign = row.sign(l);
-                let axis = row.words.clone();
+                axis.clear();
+                axis.extend_from_slice(&row.words);
                 // One attempt: find the newest candidate with this exact axis
                 // and check that nothing live since it anticommutes. Running
                 // out of budget counts as blocked.
@@ -609,7 +831,7 @@ fn pauli_fold_with(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: us
                         }
                         let source = prior.gate.expect("candidates are rewritable rotations");
                         edits[source] = 1;
-                        history.events[id].live = false;
+                        history.kill(id);
                         rewrites += 1;
                         edits[idx] = replacements.len() as u32 + 2;
                         replacements.push(merged);
@@ -1370,6 +1592,26 @@ mod tests {
             13 if n >= 3 => ccz(q, r, s),
             14 => Gate::measure { qubit: q, cbit: q },
             _ => Gate::t(q),
+        }
+    }
+
+    /// The bit-sliced and scalar support lists reach the same verdicts, so
+    /// with a budget neither can exhaust they rewrite identically.
+    #[test]
+    fn sliced_and_scalar_lists_agree() {
+        let mut rng = Rng(0x51ce_d0ff_5ca1_a400);
+        let labels: Vec<_> = (0..8)
+            .map(|q| (q as u128 * 7 + 1, q as u128 * 13 + 5))
+            .collect();
+        for case in 0..600 {
+            let n = 2 + case % 7;
+            let mut c = Circuit::with_cbits(n, n);
+            for _ in 0..(20 + rng.up_to(120)) {
+                c.apply(random_gate(&mut rng, n, case % 3 == 0));
+            }
+            let sliced = pauli_fold_impl(&c, &labels[..n], usize::MAX, true);
+            let scalar = pauli_fold_impl(&c, &labels[..n], usize::MAX, false);
+            assert_eq!(sliced.gates, scalar.gates, "case {case}");
         }
     }
 
