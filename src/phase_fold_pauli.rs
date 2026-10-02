@@ -81,7 +81,48 @@ pub fn phase_fold_pauli(circuit: &Circuit) -> Circuit {
         .map(|_| (random_label(), random_label()))
         .collect();
     let sliced = circuit.num_qubits <= MAX_SLICED_QUBITS;
-    fold(circuit, &labels, MAX_ATTEMPT_STEPS, sliced)
+    let (attempt_steps, knobs) = env_knobs();
+    fold_with(circuit, &labels, attempt_steps, sliced, knobs)
+}
+
+/// Switches for measuring what each speedup buys. Turning one off changes
+/// only how fold candidates are found and checked, never which folds are
+/// sound.
+#[derive(Clone, Copy)]
+struct Knobs {
+    /// Find a candidate through the fingerprint index; otherwise search
+    /// every earlier live rotation, newest first.
+    index: bool,
+    /// Check commutation through the support lists; otherwise test every
+    /// live event after the candidate.
+    support: bool,
+}
+
+impl Default for Knobs {
+    fn default() -> Self {
+        Self {
+            index: true,
+            support: true,
+        }
+    }
+}
+
+/// The budget and knobs, from hidden environment variables used by the
+/// evaluation: `TZAP_PFP_BUDGET` (steps per attempt, or `inf`),
+/// `TZAP_PFP_INDEX=0` and `TZAP_PFP_SUPPORT=0`.
+fn env_knobs() -> (usize, Knobs) {
+    let var = |name| std::env::var(name).ok();
+    let budget = match var("TZAP_PFP_BUDGET").as_deref() {
+        None => MAX_ATTEMPT_STEPS,
+        Some("inf") => usize::MAX,
+        Some(v) => v.parse().expect("TZAP_PFP_BUDGET is a number or `inf`"),
+    };
+    let off = |name| var(name).as_deref() == Some("0");
+    let knobs = Knobs {
+        index: !off("TZAP_PFP_INDEX"),
+        support: !off("TZAP_PFP_SUPPORT"),
+    };
+    (budget, knobs)
 }
 
 fn random_label() -> u128 {
@@ -94,7 +135,19 @@ fn random_label() -> u128 {
 /// per-attempt budget, and bit-sliced (`sliced`) or scalar support lists. The
 /// two kinds of list reach the same verdicts; only the budget accounting
 /// differs.
+#[cfg(test)]
 fn fold(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: usize, sliced: bool) -> Circuit {
+    fold_with(circuit, labels, attempt_steps, sliced, Knobs::default())
+}
+
+/// [`fold`] with the speedups selected by `knobs`.
+fn fold_with(
+    circuit: &Circuit,
+    labels: &[(u128, u128)],
+    attempt_steps: usize,
+    sliced: bool,
+    knobs: Knobs,
+) -> Circuit {
     let n = circuit.num_qubits;
     let l = n.div_ceil(64).max(1);
     // The exact frame has 2n rows of 2l words. Bound it before allocating it,
@@ -105,7 +158,7 @@ fn fold(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: usize, sliced
     if labels.len() != n || !frame_fits || !well_formed(circuit) || !may_fold(circuit, labels) {
         return circuit.clone();
     }
-    let mut folder = Folder::new(labels, n, l, attempt_steps, sliced, circuit.gates.len());
+    let mut folder = Folder::new(labels, n, l, attempt_steps, sliced, knobs, circuit.gates.len());
     for (idx, gate) in circuit.gates.iter().enumerate() {
         if folder.step(idx, gate).is_none() {
             break; // axis storage is full
@@ -191,12 +244,13 @@ impl Folder {
         l: usize,
         attempt_steps: usize,
         sliced: bool,
+        knobs: Knobs,
         num_gates: usize,
     ) -> Self {
         Self {
             sketch: SketchFrame::new(labels),
             exact: ExactFrame::new(n, l),
-            history: History::new(n, l, attempt_steps, sliced),
+            history: History::new(n, l, attempt_steps, sliced, knobs),
             deleted: BitSet::new(num_gates),
             replacements: Vec::new(),
             axis: Vec::with_capacity(2 * l),
@@ -368,6 +422,7 @@ struct History {
     /// [`Event::older`].
     newest: FxHashMap<u128, usize>,
     lists: SupportLists,
+    knobs: Knobs,
 }
 
 struct Event {
@@ -387,7 +442,7 @@ struct Rotation {
 }
 
 impl History {
-    fn new(n: usize, l: usize, attempt_steps: usize, sliced: bool) -> Self {
+    fn new(n: usize, l: usize, attempt_steps: usize, sliced: bool, knobs: Knobs) -> Self {
         let lists = if sliced {
             assert!(n <= MAX_SLICED_QUBITS);
             SupportLists::Sliced((0..n).map(|_| SlicedList::default()).collect())
@@ -403,6 +458,7 @@ impl History {
             live: BitSet::new(0),
             newest: FxHashMap::default(),
             lists,
+            knobs,
         }
     }
 
@@ -436,7 +492,9 @@ impl History {
         }
         let id = self.events.len();
         let signature = support_signature(axis, self.l);
-        self.lists.push(id as u32, axis, signature);
+        if self.knobs.support {
+            self.lists.push(id as u32, axis, signature);
+        }
         self.axes.extend_from_slice(axis);
         self.sigs.push(signature);
         self.live.insert(id);
@@ -450,8 +508,10 @@ impl History {
     /// Mark a rotation that merged away dead.
     fn kill(&mut self, id: usize) {
         self.live.remove(id);
-        self.lists
-            .kill(id as u32, self.sigs[id], &self.live, &self.axes);
+        if self.knobs.support {
+            self.lists
+                .kill(id as u32, self.sigs[id], &self.live, &self.axes);
+        }
     }
 
     /// The rotation `axis` can merge into, if one fold attempt finds it
@@ -467,6 +527,9 @@ impl History {
     /// The newest live rotation with exactly `axis`, on the chain of
     /// fingerprint `hash`. One step per axis compared.
     fn candidate(&mut self, hash: u128, axis: &[u64], budget: &mut Budget) -> Option<usize> {
+        if !self.knobs.index {
+            return self.candidate_linear(axis, budget);
+        }
         let mut cursor = self.newest_live(self.newest.get(&hash).copied());
         while let Some(id) = cursor {
             if !budget.spend(1) {
@@ -476,6 +539,23 @@ impl History {
                 return Some(id);
             }
             cursor = self.newest_live(self.events[id].older);
+        }
+        None
+    }
+
+    /// [`History::candidate`] without the index: every earlier live
+    /// rotation, newest first, one step per axis compared.
+    fn candidate_linear(&self, axis: &[u64], budget: &mut Budget) -> Option<usize> {
+        for id in (0..self.events.len()).rev() {
+            if !self.live.contains(id) || self.events[id].rotation.is_none() {
+                continue;
+            }
+            if !budget.spend(1) {
+                return None;
+            }
+            if self.axis(id) == axis {
+                return Some(id);
+            }
         }
         None
     }
@@ -504,10 +584,30 @@ impl History {
     /// id order, so the events after `after` are a suffix, found by binary
     /// search, and scanned oldest first.
     fn commutes_after(&self, after: usize, axis: &[u64], budget: &mut Budget) -> bool {
+        if !self.knobs.support {
+            return self.commutes_linear(after, axis, budget);
+        }
         match &self.lists {
             SupportLists::Scalar(lists) => self.commutes_scalar(lists, after, axis, budget),
             SupportLists::Sliced(lists) => commutes_sliced(lists, after, axis, budget),
         }
+    }
+
+    /// [`History::commutes_after`] without the support lists: every live
+    /// event after `after`, one step each.
+    fn commutes_linear(&self, after: usize, axis: &[u64], budget: &mut Budget) -> bool {
+        for id in after + 1..self.events.len() {
+            if !self.live.contains(id) {
+                continue;
+            }
+            if !budget.spend(1) {
+                return false;
+            }
+            if packed_anticommutes(self.axis(id), axis, self.l) {
+                return false;
+            }
+        }
+        true
     }
 
     /// [`History::commutes_after`] on scalar lists, one step per entry
@@ -1716,6 +1816,30 @@ mod tests {
             let sliced = fold(&c, &labels[..n], usize::MAX, true);
             let scalar = fold(&c, &labels[..n], usize::MAX, false);
             assert_eq!(sliced.gates, scalar.gates, "case {case}");
+        }
+    }
+
+    /// Without the index or the support lists, the pass finds the same
+    /// candidates and verdicts, so with an unbounded budget it rewrites
+    /// identically.
+    #[test]
+    fn knobs_agree_without_budget() {
+        let mut rng = Rng(0x6b0b_5a9e_e000_0001);
+        let labels: Vec<_> = (0..8)
+            .map(|q| (q as u128 * 7 + 1, q as u128 * 13 + 5))
+            .collect();
+        for case in 0..600 {
+            let n = 2 + case % 7;
+            let mut c = Circuit::with_cbits(n, n);
+            for _ in 0..(20 + rng.up_to(120)) {
+                c.apply(random_gate(&mut rng, n, case % 3 == 0));
+            }
+            let base = fold(&c, &labels[..n], usize::MAX, true);
+            for (index, support) in [(false, true), (true, false), (false, false)] {
+                let knobs = Knobs { index, support };
+                let out = fold_with(&c, &labels[..n], usize::MAX, true, knobs);
+                assert_eq!(base.gates, out.gates, "case {case}, index {index}, support {support}");
+            }
         }
     }
 
