@@ -135,6 +135,14 @@ impl StageKind {
 }
 
 impl PassName {
+    /// The name this pass is selected by in [`Options::passes`].
+    pub fn label(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(_, p, _)| *p == self)
+            .map_or("pass", |(name, _, _)| name)
+    }
+
     /// All passes — `(name, variant, description)` — in a stable order
     /// suitable for listing to a user.
     pub const ALL: [(&'static str, PassName, &'static str); 12] = [
@@ -979,7 +987,12 @@ fn run_explicit_sweep(
         observer.progress_update(round, &current, baseline);
     }
     for &name in names {
-        current = run_explicit_pass(&current, name, options, num_chunks, observer)?;
+        // Timed here, around the pass alone, so `--json` reports each pass's
+        // own time apart from parsing, metrics and output.
+        let start = Instant::now();
+        let next = run_explicit_pass(&current, name, options, num_chunks, observer)?;
+        observer.pass_done(name.label(), &current, &next, start.elapsed());
+        current = next;
         if !options.parallel {
             observer.progress_update(round, &current, baseline);
         }

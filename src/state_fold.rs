@@ -478,7 +478,9 @@ fn distribute_into(a: Angle, p: &BoolPoly, pp: &mut PhasePoly) {
 /// variables whose monomials changed since it was last drained.
 #[derive(Default)]
 struct PhasePoly {
-    ids: HashMap<Mono, u32>,
+    /// The slots of the monomials with each hash. Monomials are stored only
+    /// in the slab, so memory per monomial is one copy plus an id.
+    ids: HashMap<u64, SmallVec<[u32; 1]>>,
     slab: Vec<(Mono, Angle, bool)>,
     free: Vec<u32>,
     by_var: HashMap<Var, Vec<u32>>,
@@ -495,40 +497,51 @@ impl PhasePoly {
         self.count.keys().copied().collect()
     }
 
+    fn mono_hash(m: &Mono) -> u64 {
+        use std::hash::BuildHasher;
+        rustc_hash::FxBuildHasher.hash_one(m)
+    }
+
     fn add_term(&mut self, m: Mono, a: Angle) {
-        use std::collections::hash_map::Entry;
         self.dirty.extend(m.0.iter().copied());
-        match self.ids.entry(m) {
-            Entry::Occupied(e) => {
-                let id = *e.get();
-                let slot = &mut self.slab[id as usize];
-                slot.1 = slot.1.add(a);
-                if slot.1.is_zero() {
-                    e.remove();
-                    self.release(id);
-                }
+        let hash = Self::mono_hash(&m);
+        let found = self.ids.get(&hash).and_then(|ids| {
+            ids.iter().copied().find(|&id| self.slab[id as usize].0 == m)
+        });
+        if let Some(id) = found {
+            let slot = &mut self.slab[id as usize];
+            slot.1 = slot.1.add(a);
+            if slot.1.is_zero() {
+                self.unhash(hash, id);
+                self.release(id);
             }
-            Entry::Vacant(e) => {
-                if a.is_zero() {
-                    return;
-                }
-                let m = e.key().clone();
-                let id = match self.free.pop() {
-                    Some(id) => {
-                        self.slab[id as usize] = (m.clone(), a, true);
-                        id
-                    }
-                    None => {
-                        self.slab.push((m.clone(), a, true));
-                        (self.slab.len() - 1) as u32
-                    }
-                };
-                e.insert(id);
-                for &v in &m.0 {
-                    self.by_var.entry(v).or_default().push(id);
-                    *self.count.entry(v).or_default() += 1;
-                }
+            return;
+        }
+        if a.is_zero() {
+            return;
+        }
+        for &v in &m.0 {
+            *self.count.entry(v).or_default() += 1;
+        }
+        let id = match self.free.pop() {
+            Some(id) => id,
+            None => {
+                self.slab.push((Mono::one(), Angle::ZERO, false));
+                (self.slab.len() - 1) as u32
             }
+        };
+        for &v in &m.0 {
+            self.by_var.entry(v).or_default().push(id);
+        }
+        self.slab[id as usize] = (m, a, true);
+        self.ids.entry(hash).or_default().push(id);
+    }
+
+    fn unhash(&mut self, hash: u64, id: u32) {
+        let ids = self.ids.get_mut(&hash).expect("hashed monomial");
+        ids.retain(|&mut i| i != id);
+        if ids.is_empty() {
+            self.ids.remove(&hash);
         }
     }
 
@@ -544,8 +557,9 @@ impl PhasePoly {
                 self.by_var.remove(&v);
             }
         }
-        // The slot is reused only after `by_var` lists that may still name it
-        // are rebuilt; see `live`.
+        // Drop the monomial now; stale `by_var` entries for the slot are
+        // recognized by `live`.
+        slot.0 = Mono::one();
         self.free.push(id);
     }
 
@@ -569,7 +583,7 @@ impl PhasePoly {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let (m, a, _) = self.slab[id as usize].clone();
-            self.ids.remove(&m);
+            self.unhash(Self::mono_hash(&m), id);
             self.dirty.extend(m.0.iter().copied());
             self.release(id);
             out.push((m, a));
