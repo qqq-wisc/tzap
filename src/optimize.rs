@@ -19,6 +19,7 @@ use crate::cnot_min::CnotMin;
 use crate::decompose::{DecomposeCz, DecomposeRz, DecomposeToffoli};
 use crate::pass::Pass;
 use crate::phase_fold_pauli::PhaseFoldPauli;
+use crate::state_fold::StateFold;
 use crate::phase_fold_rand::PhaseFoldRand;
 #[cfg(test)]
 use crate::super_opt::OPTIONAL_GATE_KINDS;
@@ -105,6 +106,7 @@ pub enum PassName {
     SuperOpt,
     PhaseFoldRand,
     PhaseFoldPauli,
+    StateFold(Option<usize>),
     CnotMin,
 }
 
@@ -135,7 +137,7 @@ impl StageKind {
 impl PassName {
     /// All passes — `(name, variant, description)` — in a stable order
     /// suitable for listing to a user.
-    pub const ALL: [(&'static str, PassName, &'static str); 8] = [
+    pub const ALL: [(&'static str, PassName, &'static str); 12] = [
         (
             "DecomposeToffoli",
             PassName::DecomposeToffoli,
@@ -170,6 +172,26 @@ impl PassName {
             "PhaseFoldPauli",
             PassName::PhaseFoldPauli,
             "Fold T/Rz rotations across Cliffords with exact commutation checks",
+        ),
+        (
+            "StateFold1",
+            PassName::StateFold(Some(1)),
+            "Experimental: Feynman's state folding, degree 1",
+        ),
+        (
+            "StateFold2",
+            PassName::StateFold(Some(2)),
+            "Experimental: Feynman's state folding, degree 2",
+        ),
+        (
+            "StateFold3",
+            PassName::StateFold(Some(3)),
+            "Experimental: Feynman's state folding, degree 3",
+        ),
+        (
+            "StateFoldInf",
+            PassName::StateFold(None),
+            "Experimental: Feynman's state folding, unbounded degree",
         ),
         (
             "CnotMin",
@@ -917,6 +939,7 @@ fn run_explicit_pass(
         PassName::CancelGates => map_pass!(CancelGates),
         PassName::PhaseFoldRand => map_pass!(PhaseFoldRand),
         PassName::PhaseFoldPauli => map_pass!(PhaseFoldPauli),
+        PassName::StateFold(degree) => map_pass!(StateFold { degree }),
         PassName::CnotMin => map_pass!(CnotMin::default()),
         PassName::SuperOpt => {
             let basis = options.superopt_gates.effective(circuit.gate_set());

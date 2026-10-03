@@ -10,6 +10,9 @@ pub mod pbc;
 pub mod phase_fold_pauli;
 pub mod phase_fold_rand;
 pub mod qasm;
+pub mod state_fold;
+#[cfg(test)]
+mod state_fold_ref;
 pub mod super_opt;
 
 #[cfg(feature = "python")]
