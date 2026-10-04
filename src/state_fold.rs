@@ -22,7 +22,7 @@
 //! where Feynman's rule changes the circuit.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use smallvec::SmallVec;
 
@@ -476,7 +476,9 @@ fn distribute_into(a: Angle, p: &BoolPoly, pp: &mut PhasePoly) {
 /// The phase polynomial. Each monomial present is stored once, in a slab, by
 /// id; `by_var` lists, for each variable, the ids of monomials containing it
 /// (entries of removed monomials are skipped and dropped lazily), and
-/// `count` how many present monomials contain it. `dirty` collects the
+/// `count` how many present monomials contain it and how many of those have a
+/// coefficient other than pi, which rules most variables out of a reduction
+/// without looking at their monomials. `dirty` collects the
 /// variables whose monomials changed since it was last drained.
 #[derive(Default)]
 struct PhasePoly {
@@ -486,7 +488,7 @@ struct PhasePoly {
     slab: Vec<(Mono, Angle, bool)>,
     free: Vec<u32>,
     by_var: HashMap<Var, Vec<u32>>,
-    count: HashMap<Var, u32>,
+    count: HashMap<Var, [u32; 2]>,
     dirty: HashSet<Var>,
 }
 
@@ -516,9 +518,17 @@ impl PhasePoly {
             ids.iter().copied().find(|&id| self.slab[id as usize].0 == m)
         });
         if let Some(id) = found {
-            let slot = &mut self.slab[id as usize];
-            slot.1 = slot.1.add(a);
-            if slot.1.is_zero() {
+            let old = self.slab[id as usize].1;
+            let new = old.add(a);
+            self.slab[id as usize].1 = new;
+            if (old != Angle::PI) != (new != Angle::PI) {
+                let d = if new != Angle::PI { 1 } else { u32::MAX };
+                for &v in &m.0 {
+                    let c = self.count.get_mut(&v).expect("counted");
+                    c[1] = c[1].wrapping_add(d);
+                }
+            }
+            if new.is_zero() {
                 self.unhash(hash, id);
                 self.release(id);
             }
@@ -528,7 +538,9 @@ impl PhasePoly {
             return;
         }
         for &v in &m.0 {
-            *self.count.entry(v).or_default() += 1;
+            let c = self.count.entry(v).or_default();
+            c[0] += 1;
+            c[1] += (a != Angle::PI) as u32;
         }
         let id = match self.free.pop() {
             Some(id) => id,
@@ -558,8 +570,9 @@ impl PhasePoly {
         slot.2 = false;
         for &v in &slot.0 .0 {
             let c = self.count.get_mut(&v).expect("counted");
-            *c -= 1;
-            if *c == 0 {
+            c[0] -= 1;
+            c[1] -= (slot.1 != Angle::PI) as u32;
+            if c[0] == 0 {
                 self.count.remove(&v);
                 self.by_var.remove(&v);
             }
@@ -605,10 +618,55 @@ impl PhasePoly {
         }
     }
 
+    /// Whether `boolean_quotient(v, None)` has a `first_solution` that `ok`
+    /// accepts, without building the quotient. Distinct monomials containing
+    /// `v` have distinct quotients, so nothing cancels.
+    fn has_hh(&mut self, v: Var, ok: impl Fn(Var, isize) -> bool) -> bool {
+        if self.count.get(&v).is_none_or(|c| c[1] != 0) {
+            return false;
+        }
+        let ids = self.live(v);
+        let (mut lin, mut in_high) = (Vec::new(), HashSet::default());
+        let mut top = -1isize;
+        for &id in &ids {
+            let m = &self.slab[id as usize].0 .0;
+            match m.len() {
+                1 => top = top.max(0),
+                2 => lin.push(if m[0] == v { m[1] } else { m[0] }),
+                n => {
+                    in_high.extend(m.iter().copied().filter(|&u| u != v));
+                    top = top.max(n as isize - 1);
+                }
+            }
+        }
+        let rest_degree = if top < 1 && lin.len() > 1 { 1 } else { top };
+        lin.iter().any(|&u| !in_high.contains(&u) && ok(u, rest_degree))
+    }
+
+    /// Whether `boolean_quotient(v, Some(3pi/2))` is a polynomial: every
+    /// coefficient is pi but that of the linear monomial `v`, pi/2 or 3pi/2.
+    fn has_omega(&self, v: Var) -> bool {
+        if self.count.get(&v).is_none_or(|c| c[1] != 1) {
+            return false;
+        }
+        let m = Mono::var(v);
+        let Some(ids) = self.ids.get(&Self::mono_hash(&m)) else { return false };
+        ids.iter().any(|&id| {
+            let (n, a, _) = &self.slab[id as usize];
+            *n == m && (a.add(Angle::dyadic(3, 1)).is_zero() || a.add(Angle::dyadic(3, 1)) == Angle::PI)
+        })
+    }
+
     /// `toBooleanPoly (quotVar v pp)`, with `constant` added to the constant
     /// term first: the quotient as a Boolean polynomial, if every coefficient
     /// is pi.
     fn boolean_quotient(&mut self, v: Var, constant: Option<Angle>) -> Option<BoolPoly> {
+        // Every coefficient must be pi, except, with a constant, that of the
+        // linear monomial `v`, which must then be pi/2 or 3pi/2.
+        let nonpi = self.count.get(&v).map_or(0, |c| c[1]);
+        if nonpi != constant.is_some() as u32 {
+            return None;
+        }
         let ids = self.live(v);
         if ids.is_empty() {
             return None;
@@ -878,8 +936,10 @@ impl Ctx {
     /// variable are cached, and only variables whose terms or state
     /// membership changed are looked at again.
     fn reduce(&mut self, cutoff: Option<usize>) {
-        let mut hh: BTreeMap<Var, (Var, BoolPoly)> = BTreeMap::new();
-        let mut omega: BTreeMap<Var, BoolPoly> = BTreeMap::new();
+        // The variables with a match; the match itself is built only for the
+        // one reduced, as most are looked at again before they are reached.
+        let mut hh: BTreeSet<Var> = BTreeSet::new();
+        let mut omega: BTreeSet<Var> = BTreeSet::new();
         let mut todo: Vec<Var> = self.pp.vars();
         self.pp.dirty.clear();
         let ok = |u: Var, d: isize| is_temp(u) && cutoff.is_none_or(|c| d <= c as isize);
@@ -890,19 +950,20 @@ impl Ctx {
                 if !self.is_candidate(x) {
                     continue;
                 }
-                if let Some(q) = self.pp.boolean_quotient(x, None) {
-                    if let Some(sol) = q.first_solution(ok) {
-                        hh.insert(x, sol);
-                    }
+                if self.pp.has_hh(x, ok) {
+                    hh.insert(x);
                 }
-                if let Some(q) = self.pp.boolean_quotient(x, Some(Angle::dyadic(3, 1))) {
-                    omega.insert(x, q);
+                if self.pp.has_omega(x) {
+                    omega.insert(x);
                 }
             }
-            if let Some((x, (y, sub))) = hh.pop_first() {
+            if let Some(x) = hh.pop_first() {
+                let q = self.pp.boolean_quotient(x, None).expect("a quotient");
+                let (y, sub) = q.first_solution(ok).expect("a solution");
                 self.pp.take_var(x);
                 self.subst(y, &sub);
-            } else if let Some((x, q)) = omega.pop_first() {
+            } else if let Some(x) = omega.pop_first() {
+                let q = self.pp.boolean_quotient(x, Some(Angle::dyadic(3, 1))).expect("a quotient");
                 self.pp.take_var(x);
                 self.pp.add_term(Mono::one(), Angle::dyadic(1, 2));
                 distribute_into(Angle::dyadic(3, 1), &q, &mut self.pp);
