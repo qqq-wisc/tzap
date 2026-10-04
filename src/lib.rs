@@ -9,6 +9,7 @@ pub mod pass;
 pub mod pbc;
 pub mod phase_fold_pauli;
 pub mod phase_fold_rand;
+pub mod program;
 pub mod qasm;
 pub mod state_fold;
 #[cfg(test)]

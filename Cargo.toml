@@ -22,6 +22,10 @@ crate-type = ["rlib", "cdylib"]
 name = "tzap"
 path = "src/main.rs"
 
+[[bin]]
+name = "tzap-prog"
+path = "src/bin/tzap_prog.rs"
+
 [dependencies]
 pyo3 = { version = "0.29", optional = true, features = ["abi3-py310"] }
 rayon = "1"

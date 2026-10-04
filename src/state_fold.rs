@@ -32,6 +32,8 @@ use std::f64::consts::PI;
 use crate::circuit::{Circuit, Gate};
 use crate::pass::Pass;
 
+pub(crate) mod program;
+
 /// State folding up to degree `degree` (`None`: unbounded).
 pub struct StateFold {
     pub degree: Option<usize>,
@@ -489,6 +491,11 @@ struct PhasePoly {
 }
 
 impl PhasePoly {
+    /// The present terms.
+    fn terms(&self) -> Vec<(Mono, Angle)> {
+        self.slab.iter().filter(|s| s.2).map(|s| (s.0.clone(), s.1)).collect()
+    }
+
     fn contains_var(&self, v: Var) -> bool {
         self.count.contains_key(&v)
     }
@@ -658,6 +665,10 @@ struct Ctx {
     /// entries are skipped on use.
     terms_by_var: HashMap<Var, Vec<usize>>,
     pp: PhasePoly,
+    /// Programs only: the terms of finished branch and loop bodies, which
+    /// merge with nothing outside them, and the accumulated transition ideal.
+    orphans: Vec<(Vec<(usize, bool)>, Option<Angle>)>,
+    ideal: Vec<Vec<Mono>>,
 }
 
 impl Ctx {
@@ -670,6 +681,8 @@ impl Ctx {
             term_of_key: HashMap::default(),
             terms_by_var: HashMap::default(),
             pp: PhasePoly::default(),
+            orphans: Vec::new(),
+            ideal: Vec::new(),
         }
     }
 
