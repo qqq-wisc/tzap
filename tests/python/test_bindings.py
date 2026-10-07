@@ -145,6 +145,7 @@ def test_passes_accept_a_one_shot_generator():
         "CancelGates",
         "SuperOpt",
         "PhaseFoldRand",
+        "PhaseFoldPauli",
         "CnotMin",
     ],
 )

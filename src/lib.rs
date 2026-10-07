@@ -7,6 +7,7 @@ pub mod decompose;
 pub mod optimize;
 pub mod pass;
 pub mod pbc;
+pub mod phase_fold_pauli;
 pub mod phase_fold_rand;
 pub mod qasm;
 pub mod super_opt;

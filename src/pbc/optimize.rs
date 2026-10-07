@@ -35,6 +35,8 @@ use super::{
 };
 use clifford::Clifford;
 use words::{Axes, Rot, anticommutes, normalize, pack, product};
+/// Packed-word helpers shared with circuit-level passes.
+pub(crate) use words::{anticommutes as packed_anticommutes, support_signature};
 
 /// Limits for [`PbcCircuit::optimize_rotations`].
 #[derive(Clone, Copy, Debug)]
