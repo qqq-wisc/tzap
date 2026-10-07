@@ -30,6 +30,7 @@ pub use ascii::AsciiOptions;
 pub use convert::{ToPbc, to_pbc};
 pub use frame::CliffordFrame;
 pub use optimize::{OptimizeOptions, OptimizeStats, Strategy};
+pub(crate) use optimize::{packed_anticommutes, support_signature};
 pub use pauli::{ExpandedPauli, Pauli, PauliAxis, PauliNode, PauliRef, Phase};
 pub use svg::SvgOptions;
 pub use text::TextOptions;

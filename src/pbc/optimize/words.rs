@@ -14,7 +14,24 @@ use super::super::{Pauli, PbcError};
 
 /// Whether two canonical words anticommute: the parity of positions where
 /// both are non-identity and differ.
-pub(super) fn anticommutes(p: &[u64], q: &[u64], l: usize) -> bool {
+/// A 64-bit summary of a word's support: bit `q / l` for each qubit q it
+/// acts on (l words per plane), so words acting on disjoint qubit ranges have
+/// disjoint signatures.
+pub(crate) fn support_signature(words: &[u64], l: usize) -> u64 {
+    let (x, z) = words.split_at(l);
+    let mut signature = 0;
+    for (j, (x, z)) in x.iter().zip(z).enumerate() {
+        let mut w = x | z;
+        while w != 0 {
+            let q = 64 * j + w.trailing_zeros() as usize;
+            signature |= 1 << (q / l);
+            w &= w - 1;
+        }
+    }
+    signature
+}
+
+pub(crate) fn anticommutes(p: &[u64], q: &[u64], l: usize) -> bool {
     let (px, pz) = p.split_at(l);
     let (qx, qz) = q.split_at(l);
     let mut acc = 0;
@@ -149,17 +166,7 @@ impl Axes {
     }
 
     pub fn signature(words: &[u64], l: usize) -> u64 {
-        let (x, z) = words.split_at(l);
-        let mut signature = 0;
-        for (j, (x, z)) in x.iter().zip(z).enumerate() {
-            let mut w = x | z;
-            while w != 0 {
-                let q = 64 * j + w.trailing_zeros() as usize;
-                signature |= 1 << (q / l);
-                w &= w - 1;
-            }
-        }
-        signature
+        support_signature(words, l)
     }
 
     /// The id of `words`, interning it if new. A new entry is refused if the

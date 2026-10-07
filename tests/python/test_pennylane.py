@@ -588,7 +588,7 @@ def test_laplacian_filter_matches_native_pipeline():
     assert _operation_signatures(transformed.operations) == _operation_signatures(
         native_operations
     )
-    assert len(transformed.operations) == 26_402
+    assert len(transformed.operations) == 26_420
 
 
 def _operation_signatures(operations):

@@ -18,6 +18,7 @@ use crate::circuit::{Circuit, Gate, GateKind, GateSet, qubit_operands};
 use crate::cnot_min::CnotMin;
 use crate::decompose::{DecomposeCz, DecomposeRz, DecomposeToffoli};
 use crate::pass::Pass;
+use crate::phase_fold_pauli::PhaseFoldPauli;
 use crate::phase_fold_rand::PhaseFoldRand;
 #[cfg(test)]
 use crate::super_opt::OPTIONAL_GATE_KINDS;
@@ -103,6 +104,7 @@ pub enum PassName {
     CancelGates,
     SuperOpt,
     PhaseFoldRand,
+    PhaseFoldPauli,
     CnotMin,
 }
 
@@ -131,9 +133,17 @@ impl StageKind {
 }
 
 impl PassName {
+    /// The name this pass is selected by in [`Options::passes`].
+    pub fn label(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(_, p, _)| *p == self)
+            .map_or("pass", |(name, _, _)| name)
+    }
+
     /// All passes — `(name, variant, description)` — in a stable order
     /// suitable for listing to a user.
-    pub const ALL: [(&'static str, PassName, &'static str); 7] = [
+    pub const ALL: [(&'static str, PassName, &'static str); 8] = [
         (
             "DecomposeToffoli",
             PassName::DecomposeToffoli,
@@ -163,6 +173,11 @@ impl PassName {
             "PhaseFoldRand",
             PassName::PhaseFoldRand,
             "Merge T/Rz rotations via randomized parity tracking",
+        ),
+        (
+            "PhaseFoldPauli",
+            PassName::PhaseFoldPauli,
+            "Fold T/Rz rotations across Cliffords with exact commutation checks",
         ),
         (
             "CnotMin",
@@ -909,6 +924,7 @@ fn run_explicit_pass(
         }),
         PassName::CancelGates => map_pass!(CancelGates),
         PassName::PhaseFoldRand => map_pass!(PhaseFoldRand),
+        PassName::PhaseFoldPauli => map_pass!(PhaseFoldPauli),
         PassName::CnotMin => map_pass!(CnotMin::default()),
         PassName::SuperOpt => {
             let basis = options.superopt_gates.effective(circuit.gate_set());
@@ -948,7 +964,12 @@ fn run_explicit_sweep(
         observer.progress_update(round, &current, baseline);
     }
     for &name in names {
-        current = run_explicit_pass(&current, name, options, num_chunks, observer)?;
+        // Timed here, around the pass alone, so `--json` reports each pass's
+        // own time apart from parsing, metrics and output.
+        let start = Instant::now();
+        let next = run_explicit_pass(&current, name, options, num_chunks, observer)?;
+        observer.pass_done(name.label(), &current, &next, start.elapsed());
+        current = next;
         if !options.parallel {
             observer.progress_update(round, &current, baseline);
         }
@@ -1018,6 +1039,9 @@ fn optimize_default(
 ) -> Result<Circuit, Error> {
     let cancel_pass = CancelGates;
     let global = PhaseFoldRand;
+    // Finds the folds across H that parity tracking cannot; PhaseFoldRand
+    // still runs first, as it also merges S, S† and Z phases.
+    let pauli = PhaseFoldPauli;
     let cnot_min_pass = CnotMin::default();
 
     if level_uses_superopt(options.level) {
@@ -1036,11 +1060,12 @@ fn optimize_default(
             passes.push(superopt_pass);
         }
         passes.push(&global);
+        passes.push(&pauli);
         Ok(run_to_fixpoint(
             circuit, &passes, None, observer, max_rounds,
         ))
     } else {
-        let optimization_passes: Vec<&dyn Pass> = vec![&cancel_pass, &global];
+        let optimization_passes: Vec<&dyn Pass> = vec![&cancel_pass, &global, &pauli];
         Ok(if options.fixpoint {
             run_to_fixpoint(circuit, &optimization_passes, None, observer, None)
         } else {

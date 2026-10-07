@@ -421,8 +421,8 @@ fn mod5_4_reduces_t_count() {
         .count();
 
     assert_eq!(
-        t_count, 16,
-        "mod5_4 should optimize to 16 T/Tdg, got {t_count}"
+        t_count, 8,
+        "mod5_4 should optimize to 8 T/Tdg, got {t_count}"
     );
     assert!(gates.len() < 79, "mod5_4 gate count did not decrease");
 }
