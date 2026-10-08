@@ -268,9 +268,9 @@ enum Node {
     Clifford(Gate),
     Rot(Qubit, Angle),
     Reset(Qubit),
-    Measure(Qubit),
-    If(Vec<Node>, Vec<Node>),
-    While(Vec<Node>),
+    Measure(Qubit, Option<String>),
+    If(String, Vec<Node>, Vec<Node>),
+    While(String, Vec<Node>),
 }
 
 fn rotation_angle(g: &Gate) -> Option<(Qubit, Angle)> {
@@ -289,18 +289,18 @@ fn to_nodes(s: &Stmt, out: &mut Vec<Node>) {
             None => Node::Clifford(g.clone()),
         }),
         Stmt::Reset(q) => out.push(Node::Reset(*q)),
-        Stmt::Measure(q) => out.push(Node::Measure(*q)),
+        Stmt::Measure(q, bit) => out.push(Node::Measure(*q, bit.clone())),
         Stmt::Seq(xs) => xs.iter().for_each(|x| to_nodes(x, out)),
-        Stmt::If(a, b) => {
+        Stmt::If(cond, a, b) => {
             let (mut na, mut nb) = (Vec::new(), Vec::new());
             to_nodes(a, &mut na);
             to_nodes(b, &mut nb);
-            out.push(Node::If(na, nb));
+            out.push(Node::If(cond.clone(), na, nb));
         }
-        Stmt::While(b) => {
+        Stmt::While(cond, b) => {
             let mut nb = Vec::new();
             to_nodes(b, &mut nb);
-            out.push(Node::While(nb));
+            out.push(Node::While(cond.clone(), nb));
         }
     }
 }
@@ -312,9 +312,9 @@ fn to_stmt(nodes: &[Node]) -> Stmt {
             Node::Clifford(g) => out.push(Stmt::Gate(g.clone())),
             Node::Rot(q, a) => a.emit(*q, &mut out),
             Node::Reset(q) => out.push(Stmt::Reset(*q)),
-            Node::Measure(q) => out.push(Stmt::Measure(*q)),
-            Node::If(a, b) => out.push(Stmt::If(Box::new(to_stmt(a)), Box::new(to_stmt(b)))),
-            Node::While(b) => out.push(Stmt::While(Box::new(to_stmt(b)))),
+            Node::Measure(q, bit) => out.push(Stmt::Measure(*q, bit.clone())),
+            Node::If(cond, a, b) => out.push(Stmt::If(cond.clone(), Box::new(to_stmt(a)), Box::new(to_stmt(b)))),
+            Node::While(cond, b) => out.push(Stmt::While(cond.clone(), Box::new(to_stmt(b)))),
         }
     }
     Stmt::Seq(out)
@@ -374,14 +374,14 @@ fn alpha_set(n: usize, nodes: &[Node], k: usize) -> Vec<Rel> {
 /// `α(node) ∘ set`, disjunct by disjunct.
 fn step_set(n: usize, set: Vec<Rel>, node: &Node, k: usize) -> Vec<Rel> {
     let after: Vec<Rel> = match node {
-        Node::If(a, b) => {
+        Node::If(_, a, b) => {
             let mut sides = alpha_set(n, a, k);
             for r in alpha_set(n, b, k) {
                 insert(&mut sides, r);
             }
             compose_sets(&set, &sides)
         }
-        Node::While(b) => compose_sets(&set, &loop_set(n, &alpha_set(n, b, k), k)),
+        Node::While(_, b) => compose_sets(&set, &loop_set(n, &alpha_set(n, b, k), k)),
         Node::Clifford(g) => set
             .into_iter()
             .map(|mut r| {
@@ -410,7 +410,7 @@ fn own_rel(n: usize, node: &Node) -> Rel {
     let mut rel = Rel::identity(n);
     match node {
         Node::Clifford(g) => rel.clifford(g),
-        Node::Rot(q, _) | Node::Measure(q) => rel.push_axis(Axis::Known(Pauli::single(n, *q as usize, false, true))),
+        Node::Rot(q, _) | Node::Measure(q, _) => rel.push_axis(Axis::Known(Pauli::single(n, *q as usize, false, true))),
         Node::Reset(q) => {
             rel.push_axis(Axis::Known(Pauli::single(n, *q as usize, true, false)));
             rel.push_axis(Axis::Known(Pauli::single(n, *q as usize, false, true)));
@@ -593,14 +593,14 @@ impl Facts {
                 let (x, z) = f.single(*q as usize, false, true);
                 f.commute_with(&x, &z);
             }
-            Node::Measure(q) | Node::Reset(q) => {
+            Node::Measure(q, _) | Node::Reset(q) => {
                 // Afterwards the qubit is a Z eigenstate (|0⟩ after a reset).
                 let (x, z) = f.single(*q as usize, false, true);
                 f.commute_with(&x, &z);
                 f.add(x, z);
             }
-            Node::If(a, b) => f = f.block(a).meet(&f.block(b)),
-            Node::While(b) => f = f.loop_invariant(b),
+            Node::If(_, a, b) => f = f.block(a).meet(&f.block(b)),
+            Node::While(_, b) => f = f.loop_invariant(b),
         }
         f
     }
@@ -710,14 +710,14 @@ fn fold_block(n: usize, nodes: &mut [Node], opts: Options, facts_in: &Facts) -> 
     let mut facts = facts_in.clone();
     for i in 0..nodes.len() {
         match &mut nodes[i] {
-            Node::If(a, b) => {
+            Node::If(_, a, b) => {
                 let fa = fold_block(n, a, opts, &facts);
                 let fb = fold_block(n, b, opts, &facts);
                 if opts.zero_facts {
                     facts = fa.meet(&fb);
                 }
             }
-            Node::While(b) => {
+            Node::While(_, b) => {
                 let head = facts.loop_invariant(b);
                 fold_block(n, b, opts, &head);
                 if opts.zero_facts {
@@ -811,7 +811,7 @@ pub fn fold_with(prog: &Program, opts: Options) -> Program {
     let mut nodes = Vec::new();
     to_nodes(&prog.body, &mut nodes);
     fold_block(prog.num_qubits, &mut nodes, opts, &Facts::new(prog.num_qubits));
-    Program { num_qubits: prog.num_qubits, body: super::parse::flatten(to_stmt(&nodes)) }
+    Program { num_qubits: prog.num_qubits, decls: prog.decls.clone(), body: super::parse::flatten(to_stmt(&nodes)) }
 }
 
 #[cfg(test)]
@@ -836,7 +836,7 @@ mod tests {
         for case in 0..1500 {
             let n = 2 + (case % 2) as u32;
             let body = random_stmt(&mut rng, n, 5 + case % 5, 2);
-            let prog = Program { num_qubits: n as usize, body: super::super::parse::flatten(body) };
+            let prog = Program { num_qubits: n as usize, decls: Vec::new(), body: super::super::parse::flatten(body) };
             if count(&prog.body, 2) > 2000 {
                 continue;
             }
@@ -892,17 +892,17 @@ mod tests {
             let b = next(n as u64) as u32;
             let inner = random_stmt(&mut (next(1 << 30) | 1), n, 1 + next(2) as usize, 0);
             let middle = match next(4) {
-                0 => Stmt::Measure(b),
+                0 => Stmt::Measure(b, None),
                 1 => Stmt::Reset(b),
-                2 => Stmt::If(Box::new(inner), Box::new(Stmt::Seq(Vec::new()))),
-                _ => Stmt::While(Box::new(inner)),
+                2 => Stmt::If("true".into(), Box::new(inner), Box::new(Stmt::Seq(Vec::new()))),
+                _ => Stmt::While("true".into(), Box::new(inner)),
             };
             let mut body = vec![Stmt::Gate(Gate::t(q))];
             body.extend(cliffords.into_iter().map(Stmt::Gate));
             body.push(middle);
             body.extend(inverse.into_iter().map(Stmt::Gate));
             body.push(Stmt::Gate(Gate::t(q)));
-            let prog = Program { num_qubits: n as usize, body: super::super::parse::flatten(Stmt::Seq(body)) };
+            let prog = Program { num_qubits: n as usize, decls: Vec::new(), body: super::super::parse::flatten(Stmt::Seq(body)) };
             if count(&prog.body, 2) > 2000 {
                 continue;
             }

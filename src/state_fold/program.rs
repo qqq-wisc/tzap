@@ -229,14 +229,15 @@ fn star(f: &[GPoly]) -> Vec<GPoly> {
 // ---------------------------------------------------------------------------
 // The analysis of programs.
 
-/// A program statement with each gate's location.
+/// A program statement with each gate's location. Conditions and
+/// measurement targets are carried through for output only.
 pub(crate) enum PStmt {
     Gate(usize, Gate),
     Reset(u32),
-    Measure(u32),
+    Measure(u32, Option<String>),
     Seq(Vec<PStmt>),
-    If(Box<PStmt>, Box<PStmt>),
-    While(Box<PStmt>),
+    If(String, Box<PStmt>, Box<PStmt>),
+    While(String, Box<PStmt>),
 }
 
 /// The angle `√2 · a` that marks a summarized phase as opaque.
@@ -342,16 +343,16 @@ impl Ctx {
         match s {
             PStmt::Gate(loc, g) => self.gate(g, *loc),
             PStmt::Reset(q) => self.set_ket(*q as usize, BoolPoly::default()),
-            PStmt::Measure(_) => {}
+            PStmt::Measure(..) => {}
             PStmt::Seq(xs) => xs.iter().for_each(|x| self.apply_stmt(d, x)),
-            PStmt::If(a, b) => {
+            PStmt::If(_, a, b) => {
                 let n = self.ket.len();
                 let ca = Ctx::process_block(n, d, a);
                 let cb = Ctx::process_block(n, d, b);
                 let summary = self.branch_summary(ca, cb);
                 self.fast_forward(summary);
             }
-            PStmt::While(b) => {
+            PStmt::While(_, b) => {
                 let body = Ctx::process_block(self.ket.len(), d, b);
                 let summary = self.loop_summary(body);
                 self.fast_forward(summary);
@@ -431,10 +432,14 @@ fn rewrite(s: &PStmt, angles: &HashMap<usize, Angle>) -> Vec<crate::program::Stm
             _ => vec![Stmt::Gate(g.clone())],
         },
         PStmt::Reset(q) => vec![Stmt::Reset(*q)],
-        PStmt::Measure(q) => vec![Stmt::Measure(*q)],
+        PStmt::Measure(q, bit) => vec![Stmt::Measure(*q, bit.clone())],
         PStmt::Seq(xs) => xs.iter().flat_map(|x| rewrite(x, angles)).collect(),
-        PStmt::If(a, b) => vec![Stmt::If(Box::new(Stmt::Seq(rewrite(a, angles))), Box::new(Stmt::Seq(rewrite(b, angles))))],
-        PStmt::While(b) => vec![Stmt::While(Box::new(Stmt::Seq(rewrite(b, angles))))],
+        PStmt::If(cond, a, b) => vec![Stmt::If(
+            cond.clone(),
+            Box::new(Stmt::Seq(rewrite(a, angles))),
+            Box::new(Stmt::Seq(rewrite(b, angles))),
+        )],
+        PStmt::While(cond, b) => vec![Stmt::While(cond.clone(), Box::new(Stmt::Seq(rewrite(b, angles))))],
     }
 }
 

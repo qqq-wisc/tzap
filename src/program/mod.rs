@@ -23,18 +23,23 @@ pub use parse::{parse, ParseError};
 pub enum Stmt {
     Gate(Gate),
     Reset(Qubit),
-    Measure(Qubit),
+    /// A measurement, into the classical bit the source names, if any.
+    Measure(Qubit, Option<String>),
     Seq(Vec<Stmt>),
-    /// A non-deterministic branch: either side may run.
-    If(Box<Stmt>, Box<Stmt>),
-    /// A non-deterministic loop: the body runs any number of times.
-    While(Box<Stmt>),
+    /// A branch on a classical condition, kept as source text for output.
+    /// Analyses ignore the condition: either side may run.
+    If(String, Box<Stmt>, Box<Stmt>),
+    /// A loop on a classical condition, kept as source text for output.
+    /// Analyses ignore the condition: the body runs any number of times.
+    While(String, Box<Stmt>),
 }
 
 /// A program over `num_qubits` qubits, named for output.
 #[derive(Clone, Debug)]
 pub struct Program {
     pub num_qubits: usize,
+    /// Classical declarations, as source text, for output.
+    pub decls: Vec<String>,
     pub body: Stmt,
 }
 
@@ -49,13 +54,13 @@ impl Stmt {
     fn visit_gates<'a>(&'a self, f: &mut impl FnMut(&'a Gate)) {
         match self {
             Stmt::Gate(g) => f(g),
-            Stmt::Reset(_) | Stmt::Measure(_) => {}
+            Stmt::Reset(_) | Stmt::Measure(..) => {}
             Stmt::Seq(xs) => xs.iter().for_each(|x| x.visit_gates(f)),
-            Stmt::If(a, b) => {
+            Stmt::If(_, a, b) => {
                 a.visit_gates(f);
                 b.visit_gates(f);
             }
-            Stmt::While(b) => b.visit_gates(f),
+            Stmt::While(_, b) => b.visit_gates(f),
         }
     }
 }
@@ -81,10 +86,14 @@ impl Program {
             .count()
     }
 
-    /// The program as OpenQASM 3 over one register `q`.
+    /// The program as OpenQASM 3 over one qubit register `q`, with the
+    /// source's classical declarations and conditions.
     pub fn to_qasm3(&self) -> String {
         let mut out = String::from("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n");
         let _ = writeln!(out, "qubit[{}] q;", self.num_qubits);
+        for d in &self.decls {
+            let _ = writeln!(out, "{d};");
+        }
         write_stmt(&mut out, &self.body, 0);
         out
     }
@@ -99,19 +108,24 @@ fn write_stmt(out: &mut String, s: &Stmt, depth: usize) {
         Stmt::Reset(q) => {
             let _ = writeln!(out, "{pad}reset q[{q}];");
         }
-        Stmt::Measure(q) => {
+        Stmt::Measure(q, None) => {
             let _ = writeln!(out, "{pad}measure q[{q}];");
         }
+        Stmt::Measure(q, Some(bit)) => {
+            let _ = writeln!(out, "{pad}{bit} = measure q[{q}];");
+        }
         Stmt::Seq(xs) => xs.iter().for_each(|x| write_stmt(out, x, depth)),
-        Stmt::If(a, b) => {
-            let _ = writeln!(out, "{pad}if (true) {{");
+        Stmt::If(cond, a, b) => {
+            let _ = writeln!(out, "{pad}if ({cond}) {{");
             write_stmt(out, a, depth + 1);
-            let _ = writeln!(out, "{pad}}} else {{");
-            write_stmt(out, b, depth + 1);
+            if !matches!(&**b, Stmt::Seq(xs) if xs.is_empty()) {
+                let _ = writeln!(out, "{pad}}} else {{");
+                write_stmt(out, b, depth + 1);
+            }
             let _ = writeln!(out, "{pad}}}");
         }
-        Stmt::While(b) => {
-            let _ = writeln!(out, "{pad}while (true) {{");
+        Stmt::While(cond, b) => {
+            let _ = writeln!(out, "{pad}while ({cond}) {{");
             write_stmt(out, b, depth + 1);
             let _ = writeln!(out, "{pad}}}");
         }
@@ -157,7 +171,7 @@ pub(crate) mod testing {
     pub fn paths(s: &Stmt, bound: usize) -> Vec<Vec<Action>> {
         match s {
             Stmt::Gate(g) => vec![vec![Action::Gate(g.clone())]],
-            Stmt::Measure(q) => vec![vec![Action::Assume(*q, false)], vec![Action::Assume(*q, true)]],
+            Stmt::Measure(q, _) => vec![vec![Action::Assume(*q, false)], vec![Action::Assume(*q, true)]],
             Stmt::Reset(q) => vec![
                 vec![Action::Assume(*q, false)],
                 vec![Action::Assume(*q, true), Action::Gate(Gate::x(*q))],
@@ -173,8 +187,8 @@ pub(crate) mod testing {
                 }
                 acc
             }
-            Stmt::If(a, b) => [paths(a, bound), paths(b, bound)].concat(),
-            Stmt::While(b) => {
+            Stmt::If(_, a, b) => [paths(a, bound), paths(b, bound)].concat(),
+            Stmt::While(_, b) => {
                 let body = paths(b, bound);
                 let mut out = vec![Vec::new()];
                 let mut layer = vec![Vec::new()];
@@ -194,10 +208,10 @@ pub(crate) mod testing {
     pub fn count(s: &Stmt, bound: usize) -> usize {
         match s {
             Stmt::Gate(_) => 1,
-            Stmt::Measure(_) | Stmt::Reset(_) => 2,
+            Stmt::Measure(..) | Stmt::Reset(_) => 2,
             Stmt::Seq(xs) => xs.iter().map(|x| count(x, bound)).fold(1usize, |a, b| a.saturating_mul(b)),
-            Stmt::If(a, b) => count(a, bound) + count(b, bound),
-            Stmt::While(b) => {
+            Stmt::If(_, a, b) => count(a, bound) + count(b, bound),
+            Stmt::While(_, b) => {
                 let c = count(b, bound);
                 (0..=bound as u32).map(|k| c.saturating_pow(k)).fold(0usize, |a, b| a.saturating_add(b))
             }
@@ -297,19 +311,19 @@ pub(crate) mod testing {
                 8 => Stmt::Gate(Gate::x(q)),
                 9 | 10 => Stmt::Gate(Gate::cnot { control: q, target: r }),
                 11 => Stmt::Gate(Gate::rz(0.3, q)),
-                12 | 13 => Stmt::Measure(q),
+                12 | 13 => Stmt::Measure(q, None),
                 14 => Stmt::Reset(q),
                 15 => {
                     let seed = next(1 << 30);
                     let mut s2 = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
                     let a = random_stmt(&mut s2, n, 1 + (seed % 3) as usize, depth - 1);
                     let b = random_stmt(&mut s2, n, (seed % 2) as usize, depth - 1);
-                    Stmt::If(Box::new(a), Box::new(b))
+                    Stmt::If("true".into(), Box::new(a), Box::new(b))
                 }
                 _ => {
                     let seed = next(1 << 30);
                     let mut s2 = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-                    Stmt::While(Box::new(random_stmt(&mut s2, n, 1 + (seed % 3) as usize, depth - 1)))
+                    Stmt::While("true".into(), Box::new(random_stmt(&mut s2, n, 1 + (seed % 3) as usize, depth - 1)))
                 }
             });
         }

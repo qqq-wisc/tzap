@@ -10,10 +10,10 @@ fn locate(s: &Stmt, next: &mut usize) -> PStmt {
             PStmt::Gate(*next - 1, g.clone())
         }
         Stmt::Reset(q) => PStmt::Reset(*q),
-        Stmt::Measure(q) => PStmt::Measure(*q),
+        Stmt::Measure(q, bit) => PStmt::Measure(*q, bit.clone()),
         Stmt::Seq(xs) => PStmt::Seq(xs.iter().map(|x| locate(x, next)).collect()),
-        Stmt::If(a, b) => PStmt::If(Box::new(locate(a, next)), Box::new(locate(b, next))),
-        Stmt::While(b) => PStmt::While(Box::new(locate(b, next))),
+        Stmt::If(cond, a, b) => PStmt::If(cond.clone(), Box::new(locate(a, next)), Box::new(locate(b, next))),
+        Stmt::While(cond, b) => PStmt::While(cond.clone(), Box::new(locate(b, next))),
     }
 }
 
@@ -21,5 +21,5 @@ fn locate(s: &Stmt, next: &mut usize) -> PStmt {
 pub fn fold(prog: &Program, degree: Option<usize>) -> Program {
     let located = locate(&prog.body, &mut 0);
     let body = super::parse::flatten(Stmt::Seq(fold_located(prog.num_qubits, degree, &located)));
-    Program { num_qubits: prog.num_qubits, body }
+    Program { num_qubits: prog.num_qubits, decls: prog.decls.clone(), body }
 }

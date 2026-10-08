@@ -31,9 +31,52 @@ enum Tok {
     Sym(&'static str),
 }
 
-const SYMS: [&str; 17] = [
-    "->", "(", ")", "[", "]", "{", "}", ";", ",", ":", "+", "-", "*", "/", "=", "!", "<",
+// Longer symbols first, so `!=` is not read as `!` then `=`.
+const SYMS: [&str; 30] = [
+    "->", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "(", ")", "[", "]", "{", "}", ";", ",", ":", "+", "-",
+    "*", "/", "%", "=", "!", "~", "<", ">", "&", "|",
 ];
+
+/// Operators printed with a space on each side.
+const SPACED: [&str; 16] = ["->", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "+", "-", "*", "/", "%", "=", "<"];
+
+/// Source text for a condition or declaration, with `for` variables replaced
+/// by their values and constant indices evaluated.
+fn source_text(toks: &[Tok], env: &HashMap<String, i64>) -> String {
+    let mut out = String::new();
+    // Whether the previous token was a word, and whether it was a binary operator.
+    let (mut word, mut binary) = (false, false);
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = &toks[i];
+        if *tok == Tok::Sym("[") {
+            let close = (i + 1..toks.len()).find(|&j| toks[j] == Tok::Sym("]"));
+            if let Some(v) = close.and_then(|j| eval_int(&toks[i + 1..j], env).ok()) {
+                out.push_str(&format!("[{v}]"));
+                (word, binary) = (false, false);
+                i = close.unwrap() + 1;
+                continue;
+            }
+        }
+        let (text, is_word) = match tok {
+            Tok::Ident(s) => (env.get(s).map_or_else(|| s.clone(), i64::to_string), true),
+            Tok::Num(n) => (n.to_string(), true),
+            Tok::Str(s) => (format!("\"{s}\""), true),
+            Tok::Sym(s) => (s.to_string(), false),
+        };
+        // `-` after an operator, an opening bracket or a comma is unary.
+        let unary = *tok == Tok::Sym("-") && (i == 0 || !matches!(toks[i - 1], Tok::Ident(_) | Tok::Num(_) | Tok::Sym(")" | "]")));
+        let is_binary = matches!(tok, Tok::Sym(s) if SPACED.contains(s) || matches!(*s, ">" | "&" | "|")) && !unary;
+        let after_close = i > 0 && matches!(toks[i - 1], Tok::Sym(")" | "]"));
+        if i > 0 && (((word || after_close) && is_word) || is_binary || binary || toks[i - 1] == Tok::Sym(",")) {
+            out.push(' ');
+        }
+        out.push_str(&text);
+        (word, binary) = (is_word, is_binary);
+        i += 1;
+    }
+    out
+}
 
 fn strip_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
@@ -331,12 +374,12 @@ impl Ctx {
         match word.as_str() {
             "while" => {
                 p.next()?;
-                p.skip_group()?;
-                Ok(Stmt::While(Box::new(self.block(p, scope, params, env)?)))
+                let cond = source_text(&p.skip_group()?, env);
+                Ok(Stmt::While(cond, Box::new(self.block(p, scope, params, env)?)))
             }
             "if" => {
                 p.next()?;
-                p.skip_group()?;
+                let cond = source_text(&p.skip_group()?, env);
                 let a = self.block(p, scope, params, env)?;
                 let b = if matches!(p.peek(), Some(Tok::Ident(w)) if w == "else") {
                     p.next()?;
@@ -344,7 +387,7 @@ impl Ctx {
                 } else {
                     Stmt::Seq(Vec::new())
                 };
-                Ok(Stmt::If(Box::new(a), Box::new(b)))
+                Ok(Stmt::If(cond, Box::new(a), Box::new(b)))
             }
             "for" => {
                 // for uint i in [a:b] body
@@ -380,10 +423,18 @@ impl Ctx {
                 Ok(Stmt::Seq(qs.into_iter().map(Stmt::Reset).collect()))
             }
             "measure" => {
+                // `measure q;` or `measure q -> c;`
                 p.next()?;
                 let qs = self.operand(p, scope, env)?;
-                p.skip_statement()?;
-                Ok(Stmt::Seq(qs.into_iter().map(Stmt::Measure).collect()))
+                let bits = if p.eat("->") {
+                    let start = p.pos;
+                    p.skip_statement()?;
+                    bits(&p.toks[start..p.pos - 1], env, qs.len())?
+                } else {
+                    p.expect(";")?;
+                    vec![None; qs.len()]
+                };
+                Ok(Stmt::Seq(qs.into_iter().zip(bits).map(|(q, b)| Stmt::Measure(q, b)).collect()))
             }
             _ => {
                 // `c = measure q;`
@@ -394,7 +445,8 @@ impl Ctx {
                     if let Some(m) = stmt.iter().position(|t| *t == Tok::Ident("measure".into())) {
                         let mut sub = Parser { toks: &stmt[m + 1..], pos: 0 };
                         let qs = self.operand(&mut sub, scope, env)?;
-                        return Ok(Stmt::Seq(qs.into_iter().map(Stmt::Measure).collect()));
+                        let bits = bits(&stmt[..m - 1], env, qs.len())?;
+                        return Ok(Stmt::Seq(qs.into_iter().zip(bits).map(|(q, b)| Stmt::Measure(q, b)).collect()));
                     }
                     return Ok(Stmt::Seq(Vec::new()));
                 }
@@ -521,8 +573,8 @@ pub(super) fn flatten(s: Stmt) -> Stmt {
             }
             if out.len() == 1 { out.pop().unwrap() } else { Stmt::Seq(out) }
         }
-        Stmt::If(a, b) => Stmt::If(Box::new(flatten(*a)), Box::new(flatten(*b))),
-        Stmt::While(b) => Stmt::While(Box::new(flatten(*b))),
+        Stmt::If(cond, a, b) => Stmt::If(cond, Box::new(flatten(*a)), Box::new(flatten(*b))),
+        Stmt::While(cond, b) => Stmt::While(cond, Box::new(flatten(*b))),
         other => other,
     }
 }
@@ -534,13 +586,31 @@ pub fn parse(src: &str) -> Result<Program> {
     let mut ctx = Ctx { num_qubits: 0, regs: HashMap::new(), defs: HashMap::new() };
     let mut p = Parser { toks: &toks, pos: 0 };
     let mut body = Vec::new();
+    let mut decls = Vec::new();
     let empty_scope = HashMap::new();
     let empty_env = HashMap::new();
     let empty_params = HashMap::new();
     while let Some(tok) = p.peek().cloned() {
         match tok {
-            Tok::Ident(w) if w == "OPENQASM" || w == "include" || w == "bit" || w == "creg" || w == "input" || w == "output" => {
+            Tok::Ident(w) if w == "OPENQASM" || w == "include" => {
                 p.skip_statement()?;
+            }
+            Tok::Ident(w) if w == "bit" || w == "creg" || w == "input" || w == "output" => {
+                let start = p.pos;
+                p.skip_statement()?;
+                let decl = &p.toks[start..p.pos - 1];
+                // `bit[2] c = measure q;` declares `c`, then measures into it.
+                match decl.iter().position(|t| *t == Tok::Ident("measure".into())) {
+                    Some(m) => {
+                        let lhs = &decl[..m - 1];
+                        decls.push(source_text(lhs, &empty_env));
+                        let mut sub = Parser { toks: &decl[m + 1..], pos: 0 };
+                        let qs = ctx.operand(&mut sub, &empty_scope, &empty_env)?;
+                        let bits = bits(&lhs[lhs.len() - 1..], &empty_env, qs.len())?;
+                        body.extend(qs.into_iter().zip(bits).map(|(q, b)| Stmt::Measure(q, b)));
+                    }
+                    None => decls.push(source_text(decl, &empty_env)),
+                }
             }
             Tok::Ident(w) if w == "qubit" || w == "qreg" => {
                 p.next()?;
@@ -577,7 +647,31 @@ pub fn parse(src: &str) -> Result<Program> {
             _ => body.push(ctx.stmt(&mut p, &empty_scope, &empty_params, &empty_env)?),
         }
     }
-    Ok(Program { num_qubits: ctx.num_qubits as usize, body: flatten(Stmt::Seq(body)) })
+    Ok(Program { num_qubits: ctx.num_qubits as usize, decls, body: flatten(Stmt::Seq(body)) })
+}
+
+/// The classical bits a measurement of `count` qubits writes: `c`, `c[k]` or
+/// `c[a:b]`, one per qubit.
+fn bits(toks: &[Tok], env: &HashMap<String, i64>, count: usize) -> Result<Vec<Option<String>>> {
+    let Some(Tok::Ident(name)) = toks.first() else {
+        return err("expected a classical bit");
+    };
+    let out: Vec<Option<String>> = match &toks[1..] {
+        [] if count == 1 => vec![Some(name.clone())],
+        [] => (0..count).map(|k| Some(format!("{name}[{k}]"))).collect(),
+        [Tok::Sym("["), ix @ .., Tok::Sym("]")] => match ix.iter().position(|t| *t == Tok::Sym(":")) {
+            Some(colon) => {
+                let (a, b) = (eval_int(&ix[..colon], env)?, eval_int(&ix[colon + 1..], env)?);
+                (a..=b).map(|k| Some(format!("{name}[{k}]"))).collect()
+            }
+            None => vec![Some(format!("{name}[{}]", eval_int(ix, env)?))],
+        },
+        _ => return err(format!("bad classical bit {}", source_text(toks, env))),
+    };
+    if out.len() != count {
+        return err(format!("measuring {count} qubits into {} bits", out.len()));
+    }
+    Ok(out)
 }
 
 /// Ry(θ) = S H Rz(θ) H S†, as gates in circuit order.
@@ -611,7 +705,32 @@ mod tests {
         assert_eq!(prog.num_qubits, 3);
         assert_eq!(prog.t_count(), 3);
         let Stmt::Seq(top) = &prog.body else { panic!() };
-        assert!(matches!(top[1], Stmt::While(_)));
-        assert!(matches!(top[2], Stmt::If(_, _)));
+        assert!(matches!(top[1], Stmt::While(..)));
+        assert!(matches!(top[2], Stmt::If(..)));
+    }
+
+    #[test]
+    fn keeps_conditions_measurement_targets_and_declarations() {
+        let src = r#"
+            qubit[2] q; bit[2] f = "11"; bit[3] m;
+            while (int[2](f) != 0) { measure q[0:1] -> f[0:1]; }
+            for uint i in [0:1] { m[i + 1] = measure q[i]; if (m[i + 1] == 1) { x q[i]; } }
+            if (!m[0] && f[1] >= -1) { z q[0]; }
+        "#;
+        let out = parse(src).unwrap().to_qasm3();
+        for line in [
+            "bit[2] f = \"11\";",
+            "bit[3] m;",
+            "while (int[2](f) != 0) {",
+            "f[0] = measure q[0];",
+            "f[1] = measure q[1];",
+            "m[2] = measure q[1];",
+            "if (m[2] == 1) {",
+            "if (!m[0] && f[1] >= -1) {",
+        ] {
+            assert!(out.contains(line), "missing `{line}` in\n{out}");
+        }
+        // The output parses back to itself.
+        assert_eq!(parse(&out).unwrap().to_qasm3(), out);
     }
 }
