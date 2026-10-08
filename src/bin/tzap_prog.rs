@@ -4,7 +4,8 @@
 //!
 //! `<pass>` is `none`, `pauli` (PhaseFoldPauli over programs; `pauli-disj`
 //! with up to 100 disjuncts, `pauli-zero` with eigenstate facts from resets and
-//! measurements, `pauli-full` with both), or
+//! measurements, `pauli-full` with both, `pauli-full<k>` with both and up to k
+//! disjuncts), or
 //! `statefold1`, `statefold2`, `statefold0` (StateFold over programs; 0 is
 //! unbounded degree). Prints the static T-count before and after, and the
 //! optimized program with `--print`.
@@ -24,14 +25,18 @@ fn run(pass: &str, prog: &Program) -> Result<Program, String> {
         "statefold1" => program::state_fold::fold(prog, Some(1)),
         "statefold2" => program::state_fold::fold(prog, Some(2)),
         "statefold0" => program::state_fold::fold(prog, None),
-        other => return Err(format!("unknown pass {other}")),
+        // `pauli-full<k>`: eigenstate facts and up to k disjuncts.
+        other => match other.strip_prefix("pauli-full").and_then(|k| k.parse().ok()) {
+            Some(disjuncts) => program::pauli_fold::fold_with(prog, Options { disjuncts, zero_facts: true }),
+            None => return Err(format!("unknown pass {other}")),
+        },
     })
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: tzap-prog <none|pauli|statefold1|statefold2|statefold0> <program.qasm> [--print]");
+        eprintln!("usage: tzap-prog <none|pauli|pauli-disj|pauli-zero|pauli-full[<k>]|statefold1|statefold2|statefold0> <program.qasm> [--print]");
         std::process::exit(2);
     }
     let src = std::fs::read_to_string(&args[2]).unwrap_or_else(|e| {

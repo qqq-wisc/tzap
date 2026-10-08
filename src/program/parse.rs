@@ -474,6 +474,35 @@ impl Ctx {
             ])),
             ("ccx", [a, b, c]) => Ok(Stmt::Seq(lower(Gate::ccx { control1: *a, control2: *b, target: *c }, n))),
             ("ccz", [a, b, c]) => Ok(Stmt::Seq(lower(Gate::ccz { control1: *a, control2: *b, target: *c }, n))),
+            // Arbitrary rotations, up to global phase, over H, S and Rz:
+            // Ry(θ) = S H Rz(θ) H S†, U(θ, φ, λ) = Rz(φ) Ry(θ) Rz(λ), and the
+            // controlled forms by the usual two-CX constructions.
+            ("ry", [q]) => Ok(Stmt::Seq(ry(angles[0], *q))),
+            ("U" | "u" | "u3", [q]) => {
+                let mut g = vec![Stmt::Gate(Gate::rz(angles[2], *q))];
+                g.extend(ry(angles[0], *q));
+                g.push(Stmt::Gate(Gate::rz(angles[1], *q)));
+                Ok(Stmt::Seq(g))
+            }
+            ("cry", [c, t]) => {
+                let cx = || Stmt::Gate(Gate::cnot { control: *c, target: *t });
+                let mut g = ry(angles[0] / 2.0, *t);
+                g.push(cx());
+                g.extend(ry(-angles[0] / 2.0, *t));
+                g.push(cx());
+                Ok(Stmt::Seq(g))
+            }
+            ("cu1" | "cp" | "cphase", [c, t]) => {
+                let cx = || Stmt::Gate(Gate::cnot { control: *c, target: *t });
+                let half = angles[0] / 2.0;
+                Ok(Stmt::Seq(vec![
+                    Stmt::Gate(Gate::rz(half, *c)),
+                    cx(),
+                    Stmt::Gate(Gate::rz(-half, *t)),
+                    cx(),
+                    Stmt::Gate(Gate::rz(half, *t)),
+                ]))
+            }
             _ => err(format!("unsupported gate {name} on {} qubits", qs.len())),
         }
     }
@@ -549,6 +578,17 @@ pub fn parse(src: &str) -> Result<Program> {
         }
     }
     Ok(Program { num_qubits: ctx.num_qubits as usize, body: flatten(Stmt::Seq(body)) })
+}
+
+/// Ry(θ) = S H Rz(θ) H S†, as gates in circuit order.
+fn ry(theta: f64, q: Qubit) -> Vec<Stmt> {
+    vec![
+        Stmt::Gate(Gate::sdg(q)),
+        Stmt::Gate(Gate::h(q)),
+        Stmt::Gate(Gate::rz(theta, q)),
+        Stmt::Gate(Gate::h(q)),
+        Stmt::Gate(Gate::s(q)),
+    ]
 }
 
 #[cfg(test)]
