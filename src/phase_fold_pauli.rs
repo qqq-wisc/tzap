@@ -31,8 +31,9 @@
 //! - **Bit slicing.** Up to [`MAX_SLICED_QUBITS`] qubits, each support list
 //!   is stored as per-qubit X and Z masks over blocks of 64 entries, and a
 //!   whole block is tested against an axis with a few word XORs.
-//! - **Budget.** Each fold attempt may do a fixed amount of work. Running out
-//!   counts as blocked, which bounds the pass to linear time.
+//! - **Budget.** Optionally, each fold attempt may do a fixed amount of work
+//!   (`TZAP_PFP_BUDGET`). Running out counts as blocked, which bounds the pass
+//!   to linear time. By default there is no budget.
 
 use std::collections::hash_map::RandomState;
 use std::f64::consts::PI;
@@ -51,8 +52,9 @@ use crate::pbc::{packed_anticommutes, support_signature};
 const MAX_AXIS_WORDS: usize = 1 << 25;
 
 /// Work allowed for one fold attempt (candidate lookup plus the commutation
-/// check). An attempt that runs out is treated as blocked, and the scan goes
-/// on, so one expensive candidate cannot end the pass.
+/// check) when a budget is set. An attempt that runs out is treated as blocked,
+/// and the scan goes on, so one expensive candidate cannot end the pass.
+#[cfg(test)]
 const MAX_ATTEMPT_STEPS: usize = 1 << 16;
 
 /// Widest circuit that uses bit-sliced support lists. A rotation with support
@@ -113,7 +115,9 @@ impl Default for Knobs {
 fn env_knobs() -> (usize, Knobs) {
     let var = |name| std::env::var(name).ok();
     let budget = match var("TZAP_PFP_BUDGET").as_deref() {
-        None => MAX_ATTEMPT_STEPS,
+        // Unbounded unless asked: on real circuits a budget of 2^12 or more
+        // already loses almost nothing, so the cap only matters as a guard.
+        None => usize::MAX,
         Some("inf") => usize::MAX,
         Some(v) => v.parse().expect("TZAP_PFP_BUDGET is a number or `inf`"),
     };
