@@ -4,7 +4,6 @@ use crate::circuit::{
     Circuit, Gate, Qubit, canonical_ccx, canonical_pair, canonical_triple, qubit_operands,
 };
 use crate::pass::Pass;
-use crate::phase_fold_rand::classify_quarter_pi;
 
 /// Working buffers shared by every sweep of one [`CancelGates::run`].
 ///
@@ -242,7 +241,7 @@ fn diagonal_k(g: &Gate, q: Qubit) -> Option<Option<u32>> {
         Gate::z(p) => (4, p),
         Gate::rz(theta, p) => {
             return if *p == q {
-                Some(classify_quarter_pi(*theta).map(|k| k as u32))
+                Some(theta.quarter_turns().map(|k| k as u32))
             } else {
                 None
             };
@@ -678,6 +677,8 @@ impl Pass for CancelGates {
         "Gate cancellation"
     }
     fn run(&self, circuit: &Circuit) -> Circuit {
+        let lowered = crate::angle::lowered_if_needed(circuit);
+        let circuit = &lowered;
         let n = circuit.num_qubits;
         // Cancel self-inverse pairs, shrink Hadamard barriers, and cancel
         // CNOT/CZ pairs across commuting gates — alternated to a combined
@@ -1116,7 +1117,7 @@ mod tests {
                     control: 0,
                     target: 2,
                 },
-                Gate::rz(0.31, 0),
+                Gate::rz_f64(0.31, 0).unwrap(),
                 Gate::cnot {
                     control: 0,
                     target: 1,
@@ -1920,8 +1921,8 @@ mod tests {
         let c = make_circuit(
             1,
             vec![
-                Gate::rz(std::f64::consts::PI / 4.0, 0),
-                Gate::rz(std::f64::consts::PI / 4.0, 0),
+                Gate::rz(crate::angle_expr::parse("pi / 4.0", 1).unwrap(), 0),
+                Gate::rz(crate::angle_expr::parse("pi / 4.0", 1).unwrap(), 0),
             ],
         );
         let r = CancelGates.run(&c);
@@ -2820,7 +2821,7 @@ mod tests {
                 },
                 Gate::t(0),
                 Gate::sdg(1),
-                Gate::rz(0.31, 0),
+                Gate::rz_f64(0.31, 0).unwrap(),
                 Gate::z(1),
                 Gate::cz {
                     control: 1,
@@ -3094,7 +3095,7 @@ mod tests {
                     target: 1,
                 },
                 Gate::t(0),
-                Gate::rz(0.19, 1),
+                Gate::rz_f64(0.19, 1).unwrap(),
                 Gate::cnot {
                     control: 0,
                     target: 2,
@@ -3232,7 +3233,7 @@ mod tests {
                     control2: 1,
                     target: 2,
                 },
-                Gate::rz(0.37, 1),
+                Gate::rz_f64(0.37, 1).unwrap(),
                 Gate::ccz {
                     control1: 2,
                     control2: 0,
@@ -3241,7 +3242,7 @@ mod tests {
             ],
         );
         let result = CancelGates.run(&c);
-        assert_eq!(result.gates, vec![Gate::rz(0.37, 1)]);
+        assert_eq!(result.gates, vec![Gate::rz_f64(0.37, 1).unwrap()]);
         assert!(circuits_equiv(&c, &result, 1e-10));
     }
 
@@ -3257,7 +3258,7 @@ mod tests {
                 Gate::z(q),
                 Gate::t(q),
                 Gate::tdg(q),
-                Gate::rz(0.37, q),
+                Gate::rz_f64(0.37, q).unwrap(),
             ]);
         }
         for a in 0..4 {

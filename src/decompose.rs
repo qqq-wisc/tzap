@@ -141,20 +141,49 @@ impl Pass for DecomposeRz {
     }
 
     fn run(&self, circuit: &Circuit) -> Circuit {
+        self.try_run(circuit).unwrap_or_else(|_| circuit.clone())
+    }
+}
+
+/// A synthesis failure; preserved expressions have no permitted numeric value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SynthesisError(pub String);
+impl std::fmt::Display for SynthesisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for SynthesisError {}
+impl DecomposeRz {
+    /// Explicit approximate synthesis. The epsilon applies to gridsynth's
+    /// numeric target, not to conversion error or the whole circuit.
+    pub fn try_run(&self, circuit: &Circuit) -> Result<Circuit, SynthesisError> {
         let epsilon = self.epsilon;
+        if !epsilon.is_finite() || epsilon <= 0.0 {
+            return Err(SynthesisError(
+                "Rz synthesis epsilon must be positive and finite".into(),
+            ));
+        }
         let _batch_guard = GRIDSYNTH_BATCH_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Keep gridsynth calls serial: the dependency has process-global state.
-        let expanded: Vec<Vec<Gate>> = circuit
+        let expanded: Result<Vec<Vec<Gate>>, SynthesisError> = circuit
             .gates
             .iter()
             .map(|gate| {
                 match gate {
                     Gate::rz(theta, q) => {
                         let q = *q;
-                        let chars = synthesize_rz(*theta, epsilon);
+                        if theta.quarter_turns().is_some() {
+                            return Ok(theta.rotation_gates(q));
+                        }
+                        let numeric = theta
+                            .to_f64_lossy()
+                            .map_err(|e| SynthesisError(e.to_string()))?;
+                        crate::angle_stats::synthesis();
+                        let chars = synthesize_rz(numeric, epsilon);
                         let mut gates = Vec::with_capacity(chars.len());
                         for g in chars {
                             match g {
@@ -163,27 +192,34 @@ impl Pass for DecomposeRz {
                                 'S' => gates.push(Gate::s(q)),
                                 'X' => gates.push(Gate::x(q)),
                                 'I' | 'W' => {} // identity / global phase, skip
-                                c => eprintln!("warning: unknown gridsynth gate '{c}'"),
+                                c => {
+                                    return Err(SynthesisError(format!(
+                                        "unknown gridsynth gate {c:?}"
+                                    )));
+                                }
                             }
                         }
-                        gates
+                        Ok(gates)
                     }
-                    other => vec![other.clone()],
+                    other => Ok(vec![other.clone()]),
                 }
             })
             .collect();
 
         let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
-        for gates in expanded {
+        for gates in expanded? {
             for g in gates {
                 output.apply(g);
             }
         }
-        output
+        Ok(output)
     }
 }
 
 fn synthesize_rz(theta: f64, epsilon: f64) -> Vec<char> {
+    // The dependency subtracts unsigned decimal exponents when configuring
+    // precision. A looser request can safely use the stricter bound of one.
+    let epsilon = epsilon.min(1.0);
     let mut config = config_from_theta_epsilon(theta, epsilon, 0, false, true);
     let result = gridsynth_gates(&mut config);
     result.gates.chars().collect()
@@ -195,7 +231,6 @@ fn synthesize_rz(theta: f64, epsilon: f64) -> Vec<char> {
 mod tests {
     use super::*;
     use crate::unitary::circuits_equiv;
-    use std::f64::consts::PI;
 
     // --- Toffoli decomposition tests ---
 
@@ -614,7 +649,10 @@ mod tests {
     #[test]
     fn rz_decomposes_into_clifford_t() {
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(PI / 5.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 5.0", 1).unwrap(),
+            0,
+        ));
         let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
         assert!(!dec.gates.is_empty());
@@ -631,8 +669,8 @@ mod tests {
         // rsgridsynth 0.2.0 cached these by coefficients alone and could reuse
         // a result with the wrong denominator exponent for the second angle.
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(0.02, 0));
-        c.apply(Gate::rz(0.03, 0));
+        c.apply(Gate::rz_f64(0.02, 0).unwrap());
+        c.apply(Gate::rz_f64(0.03, 0).unwrap());
 
         let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
@@ -656,12 +694,18 @@ mod tests {
     fn rz_mixed_circuit() {
         let mut c = Circuit::new(2);
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(PI / 3.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 3.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::cnot {
             control: 0,
             target: 1,
         });
-        c.apply(Gate::rz(PI / 7.0, 1));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 7.0", 1).unwrap(),
+            1,
+        ));
         let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
     }
@@ -682,7 +726,10 @@ mod tests {
     fn rz_preserves_measure_and_reset() {
         let mut c = Circuit::with_cbits(2, 1);
         c.apply(Gate::reset(0));
-        c.apply(Gate::rz(PI / 5.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 5.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::measure { qubit: 1, cbit: 0 });
         let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
         // No rz survives; reset and measure both still there.
@@ -700,7 +747,10 @@ mod tests {
     #[test]
     fn rz_coarser_epsilon_produces_fewer_or_equal_t_gates() {
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(PI / 5.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 5.0", 1).unwrap(),
+            0,
+        ));
         let fine = DecomposeRz { epsilon: 1e-4 }.run(&c);
         let coarse = DecomposeRz { epsilon: 1e-2 }.run(&c);
         let t_fine = fine

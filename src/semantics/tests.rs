@@ -600,7 +600,7 @@ fn nonunitary_and_unsupported_input_is_rejected() {
     for gate in [
         Gate::measure { qubit: 0, cbit: 0 },
         Gate::reset(0),
-        Gate::rz(0.1, 0),
+        Gate::rz_f64(0.1, 0).unwrap(),
     ] {
         assert_eq!(
             circuit_unitary(&gates(1, vec![gate]), Limits::default()),

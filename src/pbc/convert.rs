@@ -61,6 +61,21 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
 /// # Ok::<(), tzap::pbc::PbcError>(())
 /// ```
 pub fn to_pbc(circuit: &Circuit, max_weight: Option<NonZeroUsize>) -> Result<PbcCircuit, PbcError> {
+    // Validate the caller's indices before lowering can remove a zero Rz or
+    // expand one instruction. Certified angles are validated as one-qubit gates.
+    u32::try_from(circuit.num_qubits).map_err(|_| PbcError::TooManyQubits)?;
+    for (index, gate) in circuit.gates.iter().enumerate() {
+        let validation_gate = match gate {
+            Gate::rz(a, q) if a.quarter_turns().is_some() => Gate::z(*q),
+            _ => gate.clone(),
+        };
+        validate(circuit, &validation_gate).map_err(|cause| PbcError::InvalidInput {
+            index,
+            cause: Box::new(cause),
+        })?;
+    }
+    let lowered = crate::angle::lowered_if_needed(circuit);
+    let circuit = &lowered;
     if max_weight.is_some_and(|w| w.get() < 3)
         && circuit
             .gates

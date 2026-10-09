@@ -2,6 +2,7 @@
 
 from ._core import (
     Metrics,
+    NumericalReport,
     OptimizationError,
     OptimizationReport,
     OptimizationResult,
@@ -13,6 +14,7 @@ from ._native import __version__
 
 __all__ = [
     "Metrics",
+    "NumericalReport",
     "OptimizationError",
     "OptimizationReport",
     "OptimizationResult",

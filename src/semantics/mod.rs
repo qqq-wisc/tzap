@@ -186,6 +186,10 @@ fn gate_matrix(n: usize, gate: &Gate, index: usize) -> Result<Matrix, Error> {
             target,
             matches!(gate, Gate::ccx { .. }),
         ),
+        Gate::rz(ref angle, q) if angle.quarter_turns().is_some() => {
+            let k = angle.quarter_turns().unwrap();
+            single(n, q, [[one, zero.clone()], [zero, Scalar::omega(k)]])
+        }
         Gate::rz(..) | Gate::measure { .. } | Gate::reset(_) => {
             return Err(Error::UnsupportedOperation { index });
         }

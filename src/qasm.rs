@@ -32,6 +32,44 @@ fn subscript(part: &str) -> Option<(usize, usize)> {
     Some((open, close))
 }
 
+fn statements(source: &str) -> impl Iterator<Item = (usize, &str)> {
+    let (mut position, mut line) = (0, 1);
+    std::iter::from_fn(move || {
+        loop {
+            if position == source.len() {
+                return None;
+            }
+            let (start, start_line) = (position, line);
+            let (mut quoted, mut escaped) = (false, false);
+            let mut end = source.len();
+            while position < source.len() {
+                let c = source.as_bytes()[position];
+                position += 1;
+                if c == b'\n' {
+                    line += 1;
+                }
+                if !quoted && c == b';' {
+                    end = position - 1;
+                    break;
+                }
+                if c == b'"' && !escaped {
+                    quoted = !quoted;
+                }
+                escaped = quoted && c == b'\\' && !escaped;
+            }
+            let text = &source[start..end];
+            if !text.trim().is_empty() {
+                let leading_lines = text
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .filter(|c| *c == '\n')
+                    .count();
+                return Some((start_line + leading_lines, text.trim()));
+            }
+        }
+    })
+}
+
 /// Parse a circuit from OpenQASM 2.0 source. See the [module docs](self) for
 /// the supported subset. Unrecognized lines produce an `Err`.
 pub fn parse(qasm: &str) -> Result<Circuit, String> {
@@ -42,202 +80,194 @@ pub fn parse(qasm: &str) -> Result<Circuit, String> {
     let mut num_cbits: usize = 0;
     let mut gates = Vec::new();
     let mut seen_gate = false;
-    for (line_num, raw_line) in qasm.lines().enumerate() {
-        let line_num = line_num + 1;
-        for line in raw_line
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            // Group the statement prefixes by first byte. Every supported
-            // statement is distinguished by its first byte, so a `t q[0];` line
-            // tests one prefix instead of walking fifteen failing
-            // `strip_prefix` calls to reach its arm — on a file whose every
-            // line is a gate, that chain was most of the dispatch cost. Order
-            // within each group is the original chain's order, which matters
-            // wherever one prefix is a prefix of another.
-            let Some(&first) = line.as_bytes().first() else {
-                continue;
-            };
-            let candidates: &[&str] = match first {
-                b'/' | b'O' | b'i' | b'b' => {
-                    if line.starts_with("//")
-                        || line.starts_with("OPENQASM")
-                        || line.starts_with("include")
-                        || line.starts_with("barrier")
-                    {
-                        continue;
-                    }
-                    &[]
+    for (line_num, line) in statements(&qasm) {
+        // Group the statement prefixes by first byte. Every supported
+        // statement is distinguished by its first byte, so a `t q[0];` line
+        // tests one prefix instead of walking fifteen failing
+        // `strip_prefix` calls to reach its arm — on a file whose every
+        // line is a gate, that chain was most of the dispatch cost. Order
+        // within each group is the original chain's order, which matters
+        // wherever one prefix is a prefix of another.
+        let Some(&first) = line.as_bytes().first() else {
+            continue;
+        };
+        let candidates: &[&str] = match first {
+            b'/' | b'O' | b'i' | b'b' => {
+                if line.starts_with("//")
+                    || line.starts_with("OPENQASM")
+                    || line.starts_with("include")
+                    || line.starts_with("barrier")
+                {
+                    continue;
                 }
-                b'q' => &["qreg"],
-                b'c' => &["creg", "cx ", "ccz ", "ccx ", "cz "],
-                b'm' => &["measure "],
-                b'r' => &["reset ", "rz("],
-                b'h' => &["h "],
-                b'x' => &["x "],
-                b's' => &["s ", "sdg "],
-                b't' => &["tdg ", "t "],
-                b'z' => &["z "],
-                _ => &[],
-            };
-            let Some((keyword, rest)) = candidates
-                .iter()
-                .find_map(|&keyword| line.strip_prefix(keyword).map(|rest| (keyword, rest)))
-            else {
-                return Err(format!("line {line_num}: unsupported: {line}"));
-            };
-            match keyword {
-                "qreg" => {
-                    if seen_gate {
-                        return Err(format!("line {line_num}: qreg declaration after gate"));
-                    }
-                    // parse "qreg name[size]"
-                    let rest = rest.trim();
-                    if let (Some(bracket), Some(end)) = (rest.find('['), rest.find(']')) {
-                        let name = rest[..bracket].trim().to_string();
-                        let size: usize = rest[bracket + 1..end]
-                            .parse()
-                            .map_err(|e| format!("line {line_num}: bad qreg size: {e}"))?;
-                        registers.push((name, num_qubits, size));
-                        num_qubits += size;
-                        // Qubit indices are `u32` (see `circuit::Qubit`), so
-                        // this is where a declaration too wide to index has to
-                        // be rejected -- every later `as Qubit` is a cast on
-                        // an index this bound has already cleared.
-                        if num_qubits > Qubit::MAX as usize {
-                            return Err(format!(
-                                "line {line_num}: circuit declares {num_qubits} qubits, more than the {} supported",
-                                Qubit::MAX
-                            ));
-                        }
-                    }
-                }
-                "creg" => {
-                    if seen_gate {
-                        return Err(format!("line {line_num}: creg declaration after gate"));
-                    }
-                    let rest = rest.trim();
-                    if let (Some(bracket), Some(end)) = (rest.find('['), rest.find(']')) {
-                        let name = rest[..bracket].trim().to_string();
-                        let size: usize = rest[bracket + 1..end]
-                            .parse()
-                            .map_err(|e| format!("line {line_num}: bad creg size: {e}"))?;
-                        cregisters.push((name, num_cbits, size));
-                        num_cbits += size;
-                        // See the qreg case: `CBit` is `u32` too.
-                        if num_cbits > CBit::MAX as usize {
-                            return Err(format!(
-                                "line {line_num}: circuit declares {num_cbits} classical bits, more than the {} supported",
-                                CBit::MAX
-                            ));
-                        }
-                    }
-                }
-                "measure " => {
-                    seen_gate = true;
-                    for (qubit, cbit) in parse_measure(rest, &registers, &cregisters, line_num)? {
-                        gates.push(Gate::measure { qubit, cbit });
-                    }
-                }
-                "reset " => {
-                    seen_gate = true;
-                    for q in expand_qubit_operand(rest, &registers, line_num)? {
-                        gates.push(Gate::reset(q));
-                    }
-                }
-                "cx " => {
-                    seen_gate = true;
-                    let qubits = resolve_qubits(rest, &registers, line_num)?;
-                    require_arity("cx", &qubits, 2, line_num)?;
-                    gates.push(Gate::cnot {
-                        control: qubits[0],
-                        target: qubits[1],
-                    });
-                }
-                "ccz " => {
-                    seen_gate = true;
-                    let qubits = resolve_qubits(rest, &registers, line_num)?;
-                    require_arity("ccz", &qubits, 3, line_num)?;
-                    gates.push(Gate::ccz {
-                        control1: qubits[0],
-                        control2: qubits[1],
-                        target: qubits[2],
-                    });
-                }
-                "ccx " => {
-                    seen_gate = true;
-                    let qubits = resolve_qubits(rest, &registers, line_num)?;
-                    require_arity("ccx", &qubits, 3, line_num)?;
-                    gates.push(Gate::ccx {
-                        control1: qubits[0],
-                        control2: qubits[1],
-                        target: qubits[2],
-                    });
-                }
-                "cz " => {
-                    seen_gate = true;
-                    let qubits = resolve_qubits(rest, &registers, line_num)?;
-                    require_arity("cz", &qubits, 2, line_num)?;
-                    gates.push(Gate::cz {
-                        control: qubits[0],
-                        target: qubits[1],
-                    });
-                }
-                "h " => {
-                    seen_gate = true;
-                    gates.push(Gate::h(resolve_single_qubit(
-                        "h", rest, &registers, line_num,
-                    )?));
-                }
-                "x " => {
-                    seen_gate = true;
-                    gates.push(Gate::x(resolve_single_qubit(
-                        "x", rest, &registers, line_num,
-                    )?));
-                }
-                "s " => {
-                    seen_gate = true;
-                    gates.push(Gate::s(resolve_single_qubit(
-                        "s", rest, &registers, line_num,
-                    )?));
-                }
-                "tdg " => {
-                    seen_gate = true;
-                    gates.push(Gate::tdg(resolve_single_qubit(
-                        "tdg", rest, &registers, line_num,
-                    )?));
-                }
-                "z " => {
-                    seen_gate = true;
-                    gates.push(Gate::z(resolve_single_qubit(
-                        "z", rest, &registers, line_num,
-                    )?));
-                }
-                "sdg " => {
-                    seen_gate = true;
-                    gates.push(Gate::sdg(resolve_single_qubit(
-                        "sdg", rest, &registers, line_num,
-                    )?));
-                }
-                "t " => {
-                    seen_gate = true;
-                    gates.push(Gate::t(resolve_single_qubit(
-                        "t", rest, &registers, line_num,
-                    )?));
-                }
-                "rz(" => {
-                    seen_gate = true;
-                    let paren_end = find_matching_paren(rest).ok_or_else(|| {
-                        format!("line {line_num}: rz missing closing ')': {line}")
-                    })?;
-                    let theta = parse_angle(&rest[..paren_end], line_num)?;
-                    let qubit =
-                        resolve_single_qubit("rz", &rest[paren_end + 1..], &registers, line_num)?;
-                    gates.push(Gate::rz(theta, qubit));
-                }
-                _ => unreachable!("keyword came from the candidate list"),
+                &[]
             }
+            b'q' => &["qreg"],
+            b'c' => &["creg", "cx ", "ccz ", "ccx ", "cz "],
+            b'm' => &["measure "],
+            b'r' => &["reset ", "rz("],
+            b'h' => &["h "],
+            b'x' => &["x "],
+            b's' => &["s ", "sdg "],
+            b't' => &["tdg ", "t "],
+            b'z' => &["z "],
+            _ => &[],
+        };
+        let Some((keyword, rest)) = candidates
+            .iter()
+            .find_map(|&keyword| line.strip_prefix(keyword).map(|rest| (keyword, rest)))
+        else {
+            return Err(format!("line {line_num}: unsupported: {line}"));
+        };
+        match keyword {
+            "qreg" => {
+                if seen_gate {
+                    return Err(format!("line {line_num}: qreg declaration after gate"));
+                }
+                // parse "qreg name[size]"
+                let rest = rest.trim();
+                if let (Some(bracket), Some(end)) = (rest.find('['), rest.find(']')) {
+                    let name = rest[..bracket].trim().to_string();
+                    let size: usize = rest[bracket + 1..end]
+                        .parse()
+                        .map_err(|e| format!("line {line_num}: bad qreg size: {e}"))?;
+                    registers.push((name, num_qubits, size));
+                    num_qubits += size;
+                    // Qubit indices are `u32` (see `circuit::Qubit`), so
+                    // this is where a declaration too wide to index has to
+                    // be rejected -- every later `as Qubit` is a cast on
+                    // an index this bound has already cleared.
+                    if num_qubits > Qubit::MAX as usize {
+                        return Err(format!(
+                            "line {line_num}: circuit declares {num_qubits} qubits, more than the {} supported",
+                            Qubit::MAX
+                        ));
+                    }
+                }
+            }
+            "creg" => {
+                if seen_gate {
+                    return Err(format!("line {line_num}: creg declaration after gate"));
+                }
+                let rest = rest.trim();
+                if let (Some(bracket), Some(end)) = (rest.find('['), rest.find(']')) {
+                    let name = rest[..bracket].trim().to_string();
+                    let size: usize = rest[bracket + 1..end]
+                        .parse()
+                        .map_err(|e| format!("line {line_num}: bad creg size: {e}"))?;
+                    cregisters.push((name, num_cbits, size));
+                    num_cbits += size;
+                    // See the qreg case: `CBit` is `u32` too.
+                    if num_cbits > CBit::MAX as usize {
+                        return Err(format!(
+                            "line {line_num}: circuit declares {num_cbits} classical bits, more than the {} supported",
+                            CBit::MAX
+                        ));
+                    }
+                }
+            }
+            "measure " => {
+                seen_gate = true;
+                for (qubit, cbit) in parse_measure(rest, &registers, &cregisters, line_num)? {
+                    gates.push(Gate::measure { qubit, cbit });
+                }
+            }
+            "reset " => {
+                seen_gate = true;
+                for q in expand_qubit_operand(rest, &registers, line_num)? {
+                    gates.push(Gate::reset(q));
+                }
+            }
+            "cx " => {
+                seen_gate = true;
+                let qubits = resolve_qubits(rest, &registers, line_num)?;
+                require_arity("cx", &qubits, 2, line_num)?;
+                gates.push(Gate::cnot {
+                    control: qubits[0],
+                    target: qubits[1],
+                });
+            }
+            "ccz " => {
+                seen_gate = true;
+                let qubits = resolve_qubits(rest, &registers, line_num)?;
+                require_arity("ccz", &qubits, 3, line_num)?;
+                gates.push(Gate::ccz {
+                    control1: qubits[0],
+                    control2: qubits[1],
+                    target: qubits[2],
+                });
+            }
+            "ccx " => {
+                seen_gate = true;
+                let qubits = resolve_qubits(rest, &registers, line_num)?;
+                require_arity("ccx", &qubits, 3, line_num)?;
+                gates.push(Gate::ccx {
+                    control1: qubits[0],
+                    control2: qubits[1],
+                    target: qubits[2],
+                });
+            }
+            "cz " => {
+                seen_gate = true;
+                let qubits = resolve_qubits(rest, &registers, line_num)?;
+                require_arity("cz", &qubits, 2, line_num)?;
+                gates.push(Gate::cz {
+                    control: qubits[0],
+                    target: qubits[1],
+                });
+            }
+            "h " => {
+                seen_gate = true;
+                gates.push(Gate::h(resolve_single_qubit(
+                    "h", rest, &registers, line_num,
+                )?));
+            }
+            "x " => {
+                seen_gate = true;
+                gates.push(Gate::x(resolve_single_qubit(
+                    "x", rest, &registers, line_num,
+                )?));
+            }
+            "s " => {
+                seen_gate = true;
+                gates.push(Gate::s(resolve_single_qubit(
+                    "s", rest, &registers, line_num,
+                )?));
+            }
+            "tdg " => {
+                seen_gate = true;
+                gates.push(Gate::tdg(resolve_single_qubit(
+                    "tdg", rest, &registers, line_num,
+                )?));
+            }
+            "z " => {
+                seen_gate = true;
+                gates.push(Gate::z(resolve_single_qubit(
+                    "z", rest, &registers, line_num,
+                )?));
+            }
+            "sdg " => {
+                seen_gate = true;
+                gates.push(Gate::sdg(resolve_single_qubit(
+                    "sdg", rest, &registers, line_num,
+                )?));
+            }
+            "t " => {
+                seen_gate = true;
+                gates.push(Gate::t(resolve_single_qubit(
+                    "t", rest, &registers, line_num,
+                )?));
+            }
+            "rz(" => {
+                seen_gate = true;
+                let paren_end = find_matching_paren(rest)
+                    .ok_or_else(|| format!("line {line_num}: rz missing closing ')': {line}"))?;
+                let theta = parse_angle(&rest[..paren_end], line_num)?;
+                let qubit =
+                    resolve_single_qubit("rz", &rest[paren_end + 1..], &registers, line_num)?;
+                gates.push(Gate::rz(theta, qubit));
+            }
+            _ => unreachable!("keyword came from the candidate list"),
         }
     }
     let mut c = Circuit::with_cbits(num_qubits, num_cbits);
@@ -273,7 +303,16 @@ fn write_gate(s: &mut String, gate: &Gate) {
         Gate::z(q) => writeln!(s, "z q[{q}];"),
         Gate::t(q) => writeln!(s, "t q[{q}];"),
         Gate::tdg(q) => writeln!(s, "tdg q[{q}];"),
-        Gate::rz(theta, q) => writeln!(s, "rz({theta}) q[{q}];"),
+        Gate::rz(theta, q) => {
+            if let Some((pi, r)) = theta.components() {
+                if pi.numerator() != 0 && r.get() != 0.0 {
+                    writeln!(s, "rz({}*pi/{}) q[{q}];", pi.numerator(), pi.denominator()).unwrap();
+                    return writeln!(s, "rz({}) q[{q}];", crate::angle::real_token(r.get()))
+                        .unwrap();
+                }
+            }
+            writeln!(s, "rz({theta}) q[{q}];")
+        }
         Gate::cnot { control, target } => writeln!(s, "cx q[{control}],q[{target}];"),
         Gate::cz { control, target } => writeln!(s, "cz q[{control}],q[{target}];"),
         Gate::ccx {
@@ -383,189 +422,8 @@ fn strip_comments(s: &str) -> Cow<'_, str> {
     }
 }
 
-fn finite_angle(value: f64) -> Result<f64, String> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err("angle expression must evaluate to a finite number".to_owned())
-    }
-}
-
-/// Parse an angle expression with full arithmetic support.
-/// Handles: numbers, `pi`, `+`, `-`, `*`, `/`, unary `-`, and parentheses.
-fn parse_angle(s: &str, line_num: usize) -> Result<f64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err(format!("line {line_num}: empty angle expression"));
-    }
-    let tokens = tokenize_angle(s).map_err(|e| format!("line {line_num}: {e}"))?;
-    let mut pos = 0;
-    let val = parse_expr(&tokens, &mut pos).map_err(|e| format!("line {line_num}: {e}"))?;
-    if pos != tokens.len() {
-        return Err(format!(
-            "line {line_num}: unexpected token in angle expression"
-        ));
-    }
-    finite_angle(val).map_err(|e| format!("line {line_num}: {e}"))
-}
-
-#[derive(Debug, Clone)]
-enum Token {
-    Num(f64),
-    Pi,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    LParen,
-    RParen,
-}
-
-fn tokenize_angle(s: &str) -> Result<Vec<Token>, String> {
-    let mut tokens = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b' ' | b'\t' => i += 1,
-            b'+' => {
-                tokens.push(Token::Plus);
-                i += 1;
-            }
-            b'-' => {
-                tokens.push(Token::Minus);
-                i += 1;
-            }
-            b'*' => {
-                tokens.push(Token::Star);
-                i += 1;
-            }
-            b'/' => {
-                tokens.push(Token::Slash);
-                i += 1;
-            }
-            b'(' => {
-                tokens.push(Token::LParen);
-                i += 1;
-            }
-            b')' => {
-                tokens.push(Token::RParen);
-                i += 1;
-            }
-            b'p' if s[i..].starts_with("pi")
-                && (i + 2 >= bytes.len() || !bytes[i + 2].is_ascii_alphanumeric()) =>
-            {
-                tokens.push(Token::Pi);
-                i += 2;
-            }
-            b'0'..=b'9' | b'.' => {
-                let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                    i += 1;
-                }
-                // handle scientific notation e.g. 1e-10
-                if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
-                    i += 1;
-                    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-                        i += 1;
-                    }
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-                let num: f64 = s[start..i]
-                    .parse()
-                    .map_err(|e| format!("bad number: {e}"))?;
-                tokens.push(Token::Num(finite_angle(num)?));
-            }
-            _ => {
-                return Err(format!(
-                    "unexpected character '{}' in angle expression",
-                    s[i..].chars().next().unwrap()
-                ));
-            }
-        }
-    }
-    Ok(tokens)
-}
-
-// Recursive descent: expr = term (('+' | '-') term)*
-fn parse_expr(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
-    let mut val = parse_term(tokens, pos)?;
-    while *pos < tokens.len() {
-        match tokens[*pos] {
-            Token::Plus => {
-                *pos += 1;
-                val = finite_angle(val + parse_term(tokens, pos)?)?;
-            }
-            Token::Minus => {
-                *pos += 1;
-                val = finite_angle(val - parse_term(tokens, pos)?)?;
-            }
-            _ => break,
-        }
-    }
-    Ok(val)
-}
-
-// term = unary (('*' | '/') unary)*
-fn parse_term(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
-    let mut val = parse_unary(tokens, pos)?;
-    while *pos < tokens.len() {
-        match tokens[*pos] {
-            Token::Star => {
-                *pos += 1;
-                val = finite_angle(val * parse_unary(tokens, pos)?)?;
-            }
-            Token::Slash => {
-                *pos += 1;
-                val = finite_angle(val / parse_unary(tokens, pos)?)?;
-            }
-            _ => break,
-        }
-    }
-    Ok(val)
-}
-
-// unary = '-' unary | atom
-fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
-    if *pos < tokens.len() && matches!(tokens[*pos], Token::Minus) {
-        *pos += 1;
-        return Ok(-parse_unary(tokens, pos)?);
-    }
-    parse_atom(tokens, pos)
-}
-
-// atom = Num | Pi | '(' expr ')'
-fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
-    if *pos >= tokens.len() {
-        return Err("unexpected end of angle expression".to_string());
-    }
-    match &tokens[*pos] {
-        Token::Num(n) => {
-            let v = *n;
-            *pos += 1;
-            Ok(v)
-        }
-        Token::Pi => {
-            *pos += 1;
-            Ok(std::f64::consts::PI)
-        }
-        Token::LParen => {
-            *pos += 1;
-            let val = parse_expr(tokens, pos)?;
-            if *pos >= tokens.len() {
-                return Err("unclosed parenthesis in angle expression".to_string());
-            }
-            if let Token::RParen = tokens[*pos] {
-                *pos += 1;
-                Ok(val)
-            } else {
-                Err("expected ')' in angle expression".to_string())
-            }
-        }
-        _ => Err("unexpected token in angle expression".to_string()),
-    }
+fn parse_angle(s: &str, line_num: usize) -> Result<crate::angle::Angle, String> {
+    crate::angle_expr::parse(s, line_num)
 }
 
 /// Find the position of the closing `)` that matches depth 0,
@@ -773,12 +631,15 @@ mod tests {
     #[test]
     fn rz_roundtrip() {
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(PI / 4.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
         let qasm = serialize(&c);
         let c2 = parse(&qasm).unwrap();
         assert_eq!(c2.gates.len(), 1);
         if let Gate::rz(theta, 0) = &c2.gates[0] {
-            assert!((theta - PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz gate");
         }
@@ -1025,7 +886,10 @@ t q[0];
             ("0/1", 0.0),
         ] {
             let source = format!("OPENQASM 2.0;\nqreg q[1];\nrz({expression}) q[0];\n");
-            assert_eq!(parse(&source).unwrap().gates, vec![Gate::rz(expected, 0)]);
+            assert_eq!(
+                parse(&source).unwrap().gates,
+                vec![Gate::rz_f64(expected, 0).unwrap()]
+            );
         }
     }
 
@@ -1079,7 +943,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(pi) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1090,7 +954,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(pi/4) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1101,7 +965,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(2*pi) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 2.0 * PI).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 2.0 * PI).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1112,7 +976,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(3*pi/4) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 3.0 * PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 3.0 * PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1123,7 +987,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(-pi/2) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - (-PI / 2.0)).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - (-PI / 2.0)).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1134,7 +998,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(-pi) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - (-PI)).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - (-PI)).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1145,7 +1009,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(0.123456789) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 0.123456789).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 0.123456789).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1156,7 +1020,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(20*pi) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 20.0 * PI).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 20.0 * PI).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1167,7 +1031,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(pi*2) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 2.0 * PI).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 2.0 * PI).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1178,7 +1042,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz( pi / 4 ) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1189,7 +1053,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz( 3 * pi / 4 ) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 3.0 * PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 3.0 * PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1200,7 +1064,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(- pi / 4) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - (-PI / 4.0)).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - (-PI / 4.0)).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1211,7 +1075,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(0.5*pi) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 0.5 * PI).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - 0.5 * PI).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1222,7 +1086,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz((pi/4)) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1235,7 +1099,7 @@ t q[0];
         let c = parse(qasm).unwrap();
         let expected = 2.0 * 2.0 * (PI / 2.0) * (3.0 / 4.0 * PI);
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - expected).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - expected).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1246,7 +1110,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(pi/4 + pi/4) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI / 2.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 2.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1257,7 +1121,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(pi - pi/2) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI / 2.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 2.0).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1268,7 +1132,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(--pi) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - PI).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI).abs() < 1e-10);
         } else {
             panic!("expected rz");
         }
@@ -1279,7 +1143,7 @@ t q[0];
         let qasm = "OPENQASM 2.0;\nqreg q[1];\nrz(1e-3) q[0];\n";
         let c = parse(qasm).unwrap();
         if let Gate::rz(theta, 0) = &c.gates[0] {
-            assert!((theta - 1e-3).abs() < 1e-15);
+            assert!((theta.to_f64_lossy().unwrap() - 1e-3).abs() < 1e-15);
         } else {
             panic!("expected rz");
         }
@@ -2132,7 +1996,7 @@ measure q[1] -> c[1];
         assert_eq!(c.num_qubits, 3);
         // b[1] -> offset 1 + index 1 = 2
         if let Gate::rz(theta, 2) = &c.gates[0] {
-            assert!((theta - PI / 4.0).abs() < 1e-10);
+            assert!((theta.to_f64_lossy().unwrap() - PI / 4.0).abs() < 1e-10);
         } else {
             panic!("expected rz on qubit 2, got {:?}", c.gates[0]);
         }
@@ -2200,4 +2064,37 @@ measure q[1] -> c[1];
         assert!(err.contains("unknown register"));
         assert!(err.contains("nosuch"));
     }
+}
+
+/// Explicit numeric export for consumers without symbolic pi parameters.
+/// Fraction conversion is approximate and its error is not certified.
+pub struct NumericExport {
+    pub qasm: String,
+    pub uncertified_conversions: usize,
+}
+
+pub fn serialize_numeric_lossy(circuit: &Circuit) -> Result<NumericExport, String> {
+    let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+    let mut conversions = 0;
+    for (index, gate) in circuit.gates.iter().enumerate() {
+        match gate {
+            Gate::rz(angle, q) => {
+                if angle.quarter_turns().is_some() {
+                    angle.emit(&mut output, *q);
+                } else {
+                    let (pi, _) = angle.components().ok_or_else(|| format!("gate {index}: preserved angle expression cannot be exported numerically"))?;
+                    let numeric = angle
+                        .to_f64_lossy()
+                        .map_err(|e| format!("gate {index}: {e}"))?;
+                    conversions += usize::from(pi.numerator() != 0);
+                    output.apply(Gate::rz_f64(numeric, *q).map_err(|e| e.to_string())?);
+                }
+            }
+            _ => output.apply(gate.clone()),
+        }
+    }
+    Ok(NumericExport {
+        qasm: serialize(&output),
+        uncertified_conversions: conversions,
+    })
 }

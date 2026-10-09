@@ -790,6 +790,15 @@ fn main() {
     ));
     let bare_pbc = run.to_pbc && run.options.passes.as_ref().is_some_and(Vec::is_empty);
     let parsed = read_circuit(&ui, &run.input_path, bare_pbc);
+    let preserved = parsed
+        .circuit
+        .gates
+        .iter()
+        .filter(|g| matches!(g, Gate::rz(a, _) if a.is_preserved()))
+        .count();
+    if preserved != 0 {
+        ui.note(&format!("Warning: {preserved} angle expressions retained unchanged because exact representation or folding exceeded its limits"));
+    }
     // Said out loud only when the size decided it: a run nobody asked to
     // parallelize otherwise reaches the chunked progress box with no
     // explanation, and a slightly different gate count at the end.
@@ -835,6 +844,7 @@ fn main() {
             input: metrics,
             baseline: metrics,
             output: metrics,
+            numerical: tzap::angle_stats::NumericalReport::input(&parsed.circuit, &run.options),
         };
         (parsed.circuit.clone(), report)
     } else if run.to_pbc {
@@ -887,6 +897,12 @@ fn main() {
     } else {
         optimize_with(&parsed.circuit, &run.options, &observer).unwrap_or_else(|e| arg_error(e))
     };
+    if report.numerical.uncertified_syntheses != 0 {
+        ui.note(&format!(
+            "{} Rz syntheses used numeric targets; epsilon applies per rotation, and total conversion and circuit error are uncertified",
+            report.numerical.uncertified_syntheses
+        ));
+    }
     let pbc = finish(ui, &report, &result, &run, start);
 
     if json {

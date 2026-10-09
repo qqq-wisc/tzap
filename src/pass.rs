@@ -105,9 +105,9 @@ mod tests {
     #[test]
     fn count_rz_counts_only_rz_gates() {
         let mut circuit = Circuit::new(1);
-        circuit.apply(Gate::rz(0.25, 0));
+        circuit.apply(Gate::rz_f64(0.25, 0).unwrap());
         circuit.apply(Gate::t(0));
-        circuit.apply(Gate::rz(-0.5, 0));
+        circuit.apply(Gate::rz_f64(-0.5, 0).unwrap());
 
         assert_eq!(count_rz(&circuit), 2);
     }

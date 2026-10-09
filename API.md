@@ -35,9 +35,26 @@ To use `measure` gates, allocate classical bits with
 | Measure | `Gate::measure { qubit, cbit }` |
 | Reset | `Gate::reset(qubit)` |
 
-Operands are `Qubit` and `CBit`, both aliases for `u32` — a `Gate` is 16
-bytes, which matters on circuits of tens of millions of gates. Integer
-literals still work unannotated; a `usize` index needs `as u32`.
+Operands are `Qubit` and `CBit`, both aliases for `u32`. Integer literals
+still work unannotated; a `usize` index needs `as u32`.
+
+`Gate::rz` now takes a checked `Angle`, rather than an `f64`. This is a Rust
+source compatibility change. Explicit fractions retain mathematical pi;
+numeric inputs retain their exact finite binary64 value:
+
+```rust
+use tzap::{angle::Angle, circuit::Gate};
+let symbolic = Gate::rz(Angle::pi_fraction(1, 7)?, 0);
+let numeric = Gate::rz_f64(0.3, 0)?;
+assert!(Gate::rz_f64(f64::NAN, 0).is_err());
+# Ok::<(), tzap::angle::AngleError>(())
+```
+
+A numeric `PI/4` is not inferred to be an exact pi fraction. Default folding
+never adds rounding, snaps a small rotation to zero, or wraps a float modulo
+a floating approximation to pi. A merge that would round or overflow is
+skipped. Named T/S/Z gates retain exact discrete arithmetic. See
+[the migration notes](docs/angle-soundness-migration.md).
 
 ### QASM I/O
 
@@ -60,6 +77,19 @@ let qasm_string = circuit.to_qasm();
 
 The QASM parser accepts `ccz` as a native circuit gate. `DecomposeToffoli`
 lowers both `ccx` and `ccz` to Clifford+T.
+
+The parser recognizes contextual rational pi coefficients such as `0.1*pi`
+and `(1+2)*pi/8` exactly. Wholly numeric expressions use binary64 source
+evaluation, so `0.1+0.2` keeps its rounded input value. Supported non-affine
+pi expressions use recorded numeric fallback. Coefficient-limit expressions
+are preserved unchanged, excluded from folding, and warned about by the CLI
+and Python wrapper. Powers, calculator functions, and gate definitions remain
+outside the supported subset. Expressions may span lines.
+
+QASM output retains symbolic fractions. Mixed values serialize as adjacent
+pi and numeric Rz operations. `qasm::serialize_numeric_lossy` is an explicit
+approximate export; its result counts uncertified fraction conversions and it
+rejects preserved expressions.
 
 ## Optimizing
 
@@ -104,6 +134,23 @@ CCX/CCZ, CZ, or Rz decomposition.
 point), and `output`. Requested decompositions are opt-in middle stages:
 optimize the input circuit, decompose CCX/CCZ then CZ then Rz, and optimize
 again when a decomposition changed the circuit.
+
+`Report::numerical` records preserved expressions, numeric input fallback,
+skipped rounded/nonfinite/coefficient-limit folds, randomized matching, and
+uncertified synthesis calls. The guarantee starts at accepted angles, rather
+than ideal real source-expression semantics. `PhaseFoldRand` still uses
+unchecked randomized Boolean-function matches; its collision guarantee is
+separate from exact angle arithmetic. An explicit pipeline omitting that pass
+can use deterministic matching.
+
+Explicit `DecomposeRz` requests permit approximation. Its per-rotation epsilon
+belongs to the numeric target passed to gridsynth; total conversion error and
+whole-circuit error are uncertified. `DecomposeRz::try_run` and the optimization
+driver return a structured synthesis error for inputs that cannot be converted.
+The infallible `Pass` adapter conservatively returns the original circuit on a
+synthesis error; callers requiring synthesis must use `try_run` or the driver.
+Certified quarter-turns lower exactly before synthesis, SuperOpt, or PBC.
+Other fractions and numeric Rz remain outside SuperOpt's and PBC's exact domain.
 
 The post-decomposition MURM basis excludes every gate family requested for
 decomposition, including gates named in an explicit `superopt_gates` basis.

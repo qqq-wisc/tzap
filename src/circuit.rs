@@ -159,7 +159,7 @@ pub enum Gate {
     z(Qubit),
     t(Qubit),
     tdg(Qubit),
-    rz(f64, Qubit),
+    rz(crate::angle::Angle, Qubit),
     cnot {
         control: Qubit,
         target: Qubit,
@@ -258,6 +258,11 @@ impl Circuit {
 }
 
 impl Gate {
+    /// Construct a numeric Rz without accepting NaN or infinity.
+    pub fn rz_f64(value: f64, q: Qubit) -> Result<Self, crate::angle::AngleError> {
+        Ok(Self::rz(crate::angle::Angle::from_f64(value)?, q))
+    }
+
     /// This gate's kind, independent of its operands.
     pub fn kind(&self) -> GateKind {
         GateKind::of(self)
@@ -274,7 +279,7 @@ impl Gate {
             Gate::z(q) => Gate::z(f(*q)),
             Gate::t(q) => Gate::t(f(*q)),
             Gate::tdg(q) => Gate::tdg(f(*q)),
-            Gate::rz(theta, q) => Gate::rz(*theta, f(*q)),
+            Gate::rz(theta, q) => Gate::rz(theta.clone(), f(*q)),
             Gate::cnot { control, target } => Gate::cnot {
                 control: f(*control),
                 target: f(*target),
@@ -412,7 +417,7 @@ mod gate_set_tests {
             target: 2,
         });
         circuit.apply(Gate::h(0));
-        circuit.apply(Gate::rz(0.3, 1));
+        circuit.apply(Gate::rz_f64(0.3, 1).unwrap());
         circuit.apply(Gate::measure { qubit: 0, cbit: 0 });
         assert_eq!(
             circuit.gate_set().to_string(),
@@ -538,7 +543,6 @@ pub fn remap_subcircuit(gates: &[Gate], qubits: &[Qubit]) -> Circuit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::PI;
 
     #[test]
     fn bell_pair() {
@@ -575,11 +579,14 @@ mod tests {
         let mut c = Circuit::new(1);
         c.apply(Gate::t(0));
         c.apply(Gate::s(0));
-        c.apply(Gate::rz(PI / 4.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
         let s = format!("{c}");
         assert!(s.contains("t q0"));
         assert!(s.contains("s q0"));
-        assert!(s.contains("rz(0.7854) q0"));
+        assert!(s.contains("rz((1*pi/4)) q0"));
         println!("{c}");
     }
 
@@ -636,18 +643,27 @@ mod tests {
     fn qft_3qubit() {
         let mut c = Circuit::new(3);
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(PI / 2.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 2.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::cnot {
             control: 1,
             target: 0,
         });
-        c.apply(Gate::rz(PI / 4.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::cnot {
             control: 2,
             target: 0,
         });
         c.apply(Gate::h(1));
-        c.apply(Gate::rz(PI / 2.0, 1));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 2.0", 1).unwrap(),
+            1,
+        ));
         c.apply(Gate::cnot {
             control: 2,
             target: 1,

@@ -909,7 +909,7 @@ mod exact_tests {
     fn direct_rz_matrix_application_is_rejected() {
         let mut matrix = UnitaryMatrix::identity(1).unwrap();
         matrix
-            .apply_gate_left(&Gate::rz(TAU / 7.0, 0), &[0])
+            .apply_gate_left(&Gate::rz_f64(TAU / 7.0, 0).unwrap(), &[0])
             .unwrap();
     }
 }

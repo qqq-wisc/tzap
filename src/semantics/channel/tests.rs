@@ -425,7 +425,11 @@ fn reject_bad_initial_stores_operands_and_resource_limits() {
         );
     }
     assert_eq!(
-        circuit_channel(&circuit(1, 0, vec![Gate::rz(0.1, 0)]), &[], limits),
+        circuit_channel(
+            &circuit(1, 0, vec![Gate::rz_f64(0.1, 0).unwrap()]),
+            &[],
+            limits
+        ),
         Err(Error::UnsupportedOperation { index: 0 })
     );
     let huge = circuit(usize::MAX, 0, vec![]);
@@ -453,15 +457,16 @@ fn zero_qubit_empty_channels_preserve_classical_state() {
 }
 
 #[test]
-fn resets_are_rejected_and_post_measurement_gates_are_supported() {
+fn resets_and_post_measurement_gates_are_supported() {
     let limits = ChannelLimits::default();
-    for gates in [vec![Gate::reset(0)], vec![Gate::h(0), Gate::reset(0)]] {
-        let index = gates.len() - 1;
-        assert_eq!(
-            circuit_channel(&circuit(1, 0, gates), &[], limits),
-            Err(Error::UnsupportedOperation { index })
-        );
-    }
+    let reset = circuit_channel(&circuit(1, 0, vec![Gate::reset(0)]), &[], limits).unwrap();
+    let h_reset = circuit_channel(
+        &circuit(1, 0, vec![Gate::h(0), Gate::reset(0)]),
+        &[],
+        limits,
+    )
+    .unwrap();
+    reset.compare(&h_reset).unwrap(); // Both overwrite arbitrary input with |0>.
     // Gates after a measurement act on each post-measurement branch.
     for gate in [Gate::h(0), Gate::x(0), Gate::t(0), Gate::sdg(0)] {
         let c = circuit(1, 1, vec![measure(0, 0), gate]);
@@ -616,4 +621,67 @@ fn unitary_channels_agree_with_unitary_matrices() {
         }],
     );
     assert_eq!(check(&c, &[]).compare(&expected), Ok(()));
+}
+
+#[test]
+fn certified_rz_folders_preserve_exact_channels_through_measurement_and_reset() {
+    use crate::{
+        angle::Angle, cancel::CancelGates, cnot_min::CnotMin, pass::Pass,
+        phase_fold_pauli::PhaseFoldPauli, phase_fold_rand::PhaseFoldRand,
+    };
+    let rotation = |n, d, q| Gate::rz(Angle::pi_fraction(n, d).unwrap(), q);
+    let cases = [
+        circuit(
+            2,
+            1,
+            vec![
+                Gate::h(0),
+                rotation(1, 4, 0),
+                measure(0, 0),
+                Gate::x(0),
+                rotation(1, 4, 0),
+                Gate::h(1),
+            ],
+        ),
+        circuit(
+            2,
+            1,
+            vec![
+                Gate::h(0),
+                cx(0, 1),
+                rotation(1, 4, 0),
+                Gate::reset(0),
+                rotation(1, 4, 0),
+                rotation(1, 4, 1),
+                measure(1, 0),
+            ],
+        ),
+        circuit(
+            2,
+            1,
+            vec![
+                rotation(1, 4, 0),
+                Gate::h(0),
+                rotation(1, 2, 1),
+                measure(1, 0),
+                Gate::h(0),
+                rotation(1, 4, 0),
+                Gate::reset(1),
+            ],
+        ),
+    ];
+    for input in cases {
+        let before = gate_channel(&input, &[false]);
+        for pass in [
+            &CancelGates as &dyn Pass,
+            &PhaseFoldRand,
+            &PhaseFoldPauli,
+            &CnotMin::default(),
+        ] {
+            let output = pass.run(&input);
+            before
+                .compare(&gate_channel(&output, &[false]))
+                .unwrap_or_else(|e| panic!("{}: {e:?}", pass.name()));
+        }
+    }
 }

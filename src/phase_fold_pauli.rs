@@ -35,6 +35,7 @@
 //!   counts as blocked, which bounds the pass to linear time.
 
 use std::collections::hash_map::RandomState;
+#[cfg(test)]
 use std::f64::consts::PI;
 use std::hash::{BuildHasher, Hasher};
 
@@ -77,6 +78,8 @@ impl Pass for PhaseFoldPauli {
 /// Circuit rewrite up to global phase. Random fingerprints only select
 /// candidates; exact axis and commutation checks authorize every rewrite.
 pub fn phase_fold_pauli(circuit: &Circuit) -> Circuit {
+    let lowered = crate::angle::lowered_if_needed(circuit);
+    let circuit = &lowered;
     let labels: Vec<_> = (0..circuit.num_qubits)
         .map(|_| (random_label(), random_label()))
         .collect();
@@ -119,9 +122,6 @@ fn fold(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: usize, sliced
 fn well_formed(circuit: &Circuit) -> bool {
     let n = circuit.num_qubits;
     circuit.gates.iter().all(|g| {
-        if matches!(g, Gate::rz(theta, _) if !theta.is_finite()) {
-            return false;
-        }
         let (len, mut qubits) = qubit_operands(g);
         let qubits = &mut qubits[..len];
         qubits.sort_unstable();
@@ -254,23 +254,28 @@ impl Folder {
         let sign = row.sign();
         self.axis.clone_from(&row.words);
         let mut angle = angle;
+        let mut input_gates = 1;
         if let Some(id) = self.history.partner(hash, &self.axis) {
             // With P_i = s_i W and P_j = s_j W, commuting P_i through the
             // interval gives an angle s_i θ_i + s_j θ_j on W. At j, the
             // physical Z rotation needs that angle multiplied by s_j.
             let prior = self.history.rotation(id);
-            if let Some(merged) = Angle::merge(prior.angle, prior.sign * sign, angle) {
+            if let Some(merged) =
+                Angle::merge(prior.angle.clone(), prior.sign * sign, angle.clone())
+                && merged.0.emitted_gate_count() <= prior.input_gates + 1
+            {
+                input_gates = prior.input_gates + 1;
                 self.history.kill(id);
                 self.deleted.insert(prior.gate);
                 self.replacements.push(Replacement {
                     gate: idx,
                     qubit: q,
-                    angle: merged,
+                    angle: merged.clone(),
                 });
                 if merged.is_clifford() {
                     // S, S† or Z now sits here and changes every later
                     // axis; the identity leaves nothing.
-                    self.apply_clifford_angle(merged, q);
+                    self.apply_clifford_angle(merged.clone(), q);
                     return Some(());
                 }
                 // A non-Clifford merged rotation stays live and may itself
@@ -282,6 +287,7 @@ impl Folder {
             gate: idx,
             sign,
             angle,
+            input_gates,
         };
         self.history.record_rotation(rotation, hash, &self.axis)
     }
@@ -328,7 +334,7 @@ impl Folder {
     /// as `PhaseFoldRand` does, whether or not it folded.
     fn rewrite(self, circuit: &Circuit) -> Circuit {
         let exact_rz =
-            |g: &Gate| matches!(*g, Gate::rz(theta, _) if exact_eighths(theta).is_some());
+            |g: &Gate| matches!(g, Gate::rz(theta, _) if theta.quarter_turns().is_some());
         if self.replacements.is_empty() && !circuit.gates.iter().any(exact_rz) {
             return circuit.clone();
         }
@@ -384,13 +390,14 @@ struct Event {
     older: Option<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Rotation {
     /// Index of its gate in the input circuit.
     gate: usize,
     /// Its axis is `sign` times the stored unsigned axis.
     sign: i8,
     angle: Angle,
+    input_gates: usize,
 }
 
 impl History {
@@ -419,7 +426,10 @@ impl History {
     }
 
     fn rotation(&self, id: usize) -> Rotation {
-        self.events[id].rotation.expect("candidates are rotations")
+        self.events[id]
+            .rotation
+            .clone()
+            .expect("candidates are rotations")
     }
 
     /// Record a rotation as a merge candidate. `None` once axis storage is
@@ -920,112 +930,28 @@ impl Row {
     }
 }
 
-/// A rotation angle: an exact multiple of pi/4 plus an arbitrary
-/// floating-point residual. Keeping the two apart keeps Clifford+T folding
-/// exact even after many merges.
-#[derive(Clone, Copy)]
-struct Angle {
-    eighths: u8,
-    residual: f64,
-}
-
-/// Only turn an Rz into an exact multiple of pi/4 when its stored f64 value is
-/// itself that value. A tolerance here could erase a small but real rotation.
-fn exact_eighths(theta: f64) -> Option<u8> {
-    let q = PI / 4.0;
-    let k = (theta / q).round();
-    if k.abs() <= 1024.0 && theta == k * q {
-        Some((k as i32).rem_euclid(8) as u8)
-    } else {
-        None
-    }
-}
-
+#[derive(Clone)]
+struct Angle(crate::angle::Angle);
 impl Angle {
-    const fn exact(eighths: u8) -> Self {
-        Self {
-            eighths,
-            residual: 0.0,
-        }
-    }
-
-    /// The angle of a T, T† or Rz gate.
     fn of(gate: &Gate) -> Self {
-        match *gate {
-            Gate::t(_) => Self::exact(1),
-            Gate::tdg(_) => Self::exact(7),
-            Gate::rz(theta, _) => match exact_eighths(theta) {
-                Some(eighths) => Self::exact(eighths),
-                None => Self {
-                    eighths: 0,
-                    residual: theta,
-                },
-            },
-            _ => unreachable!("rotation gate"),
-        }
+        Self(crate::angle::Angle::of_gate(gate).expect("rotation gate"))
     }
-
-    /// `relative_sign · prior + current`, or `None` if the residual
-    /// overflows.
-    fn merge(prior: Self, relative_sign: i8, current: Self) -> Option<Self> {
-        let eighths = (i32::from(relative_sign) * i32::from(prior.eighths)
-            + i32::from(current.eighths))
-        .rem_euclid(8) as u8;
-        let residual = f64::from(relative_sign) * prior.residual + current.residual;
-        if !residual.is_finite() {
-            return None;
-        }
-        if residual == 0.0 {
-            return Some(Self::exact(eighths));
-        }
-        // Two residuals can sum to an exact multiple of pi/4.
-        Some(match exact_eighths(residual) {
-            Some(extra) => Self::exact((eighths + extra) & 7),
-            None => Self { eighths, residual },
-        })
+    fn merge(prior: Self, sign: i8, current: Self) -> Option<Self> {
+        prior.0.checked_add_signed(sign, &current.0).ok().map(Self)
     }
-
-    /// A multiple of pi/2: zero, or the angle of S, Z or S†.
-    fn is_clifford(self) -> bool {
-        self.residual == 0.0 && self.eighths & 1 == 0
+    fn is_clifford(&self) -> bool {
+        self.0.quarter_turns().is_some_and(|k| k & 1 == 0)
     }
-
-    /// The S, Z or S† gate this angle amounts to; `None` for any other angle.
-    fn clifford_gate(self, q: u32) -> Option<Gate> {
-        if self.residual != 0.0 {
-            return None;
-        }
-        match self.eighths {
-            2 => Some(Gate::s(q)),
-            4 => Some(Gate::z(q)),
-            6 => Some(Gate::sdg(q)),
+    fn clifford_gate(&self, q: u32) -> Option<Gate> {
+        match self.0.quarter_turns() {
+            Some(2) => Some(Gate::s(q)),
+            Some(4) => Some(Gate::z(q)),
+            Some(6) => Some(Gate::sdg(q)),
             _ => None,
         }
     }
-
-    fn emit(self, output: &mut Circuit, q: u32) {
-        if self.residual != 0.0 {
-            let theta = f64::from(self.eighths) * (PI / 4.0) + self.residual;
-            output.apply(Gate::rz(theta.rem_euclid(2.0 * PI), q));
-            return;
-        }
-        match self.eighths {
-            0 => {}
-            1 => output.apply(Gate::t(q)),
-            2 => output.apply(Gate::s(q)),
-            3 => {
-                output.apply(Gate::s(q));
-                output.apply(Gate::t(q));
-            }
-            4 => output.apply(Gate::z(q)),
-            5 => {
-                output.apply(Gate::z(q));
-                output.apply(Gate::t(q));
-            }
-            6 => output.apply(Gate::sdg(q)),
-            7 => output.apply(Gate::tdg(q)),
-            _ => unreachable!(),
-        }
+    fn emit(&self, output: &mut Circuit, q: u32) {
+        self.0.emit(output, q);
     }
 }
 
@@ -1116,20 +1042,23 @@ mod tests {
         let mut c = Circuit::new(2);
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(0.37, 1));
+        c.apply(Gate::rz_f64(0.37, 1).unwrap());
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(0.21, 0));
+        c.apply(Gate::rz_f64(0.21, 0).unwrap());
         let out = phase_fold_pauli(&c);
-        assert_eq!(count_t(&out), 0);
+        assert_eq!(count_t(&out), 1);
         assert_eq!(count_rz(&out), 2);
-        assert_eq!(out.gates.len(), c.gates.len() - 1);
+        assert_eq!(out.gates.len(), c.gates.len());
         assert!(circuits_equiv(&c, &out, 1e-10));
     }
 
     #[test]
     fn opposite_sign_rz_and_t_cancel() {
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(PI / 4.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::x(0));
         c.apply(Gate::t(0));
         let out = phase_fold_pauli(&c);
@@ -1140,8 +1069,14 @@ mod tests {
     #[test]
     fn rz_can_fold_to_clifford_and_change_the_frame() {
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(PI / 4.0, 0));
-        c.apply(Gate::rz(PI / 4.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::h(0));
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
@@ -1157,7 +1092,7 @@ mod tests {
         let mut c = Circuit::new(1);
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(0.3, 0));
+        c.apply(Gate::rz_f64(0.3, 0).unwrap());
         c.apply(Gate::h(0));
         c.apply(Gate::t(0));
         let out = phase_fold_pauli(&c);
@@ -1169,9 +1104,12 @@ mod tests {
         let mut c = Circuit::new(1);
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(0.0, 0));
+        c.apply(Gate::rz_f64(0.0, 0).unwrap());
         c.apply(Gate::h(0));
-        c.apply(Gate::rz(PI / 2.0, 0));
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 2.0", 1).unwrap(),
+            0,
+        ));
         c.apply(Gate::t(0));
         let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 0);
@@ -1181,11 +1119,14 @@ mod tests {
     #[test]
     fn near_quarter_rz_is_not_rounded_away() {
         let mut c = Circuit::new(1);
-        c.apply(Gate::rz(PI / 4.0 + 1e-10, 0));
-        c.apply(Gate::rz(PI / 4.0, 0));
+        c.apply(Gate::rz_f64(PI / 4.0 + 1e-10, 0).unwrap());
+        c.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
+            0,
+        ));
         let out = phase_fold_pauli(&c);
         assert_eq!(count_rz(&out), 1);
-        assert_eq!(count_t(&out), 0);
+        assert_eq!(count_t(&out), 1);
         assert!(circuits_equiv(&c, &out, 1e-12));
     }
 
@@ -1196,16 +1137,16 @@ mod tests {
             control: 0,
             target: 64,
         };
-        c.apply(Gate::rz(0.3, 64));
+        c.apply(Gate::rz_f64(0.25, 64).unwrap());
         c.apply(cx.clone());
-        c.apply(Gate::rz(0.2, 64));
+        c.apply(Gate::rz_f64(0.2, 64).unwrap());
         c.apply(cx);
-        c.apply(Gate::rz(0.4, 64));
+        c.apply(Gate::rz_f64(0.5, 64).unwrap());
         let out = phase_fold_pauli(&c);
         assert_eq!(count_rz(&out), 2);
         assert_eq!(out.gates.len(), 4);
         assert!(
-            matches!(out.gates.last(), Some(Gate::rz(theta, 64)) if (*theta - 0.7).abs() < 1e-12)
+            matches!(out.gates.last(), Some(Gate::rz(theta, 64)) if (theta.to_f64_lossy().unwrap() - 0.75).abs() < 1e-12)
         );
     }
 
@@ -1363,8 +1304,8 @@ mod tests {
                     4 => Gate::sdg(q),
                     5..=6 => Gate::t(q),
                     7 => Gate::tdg(q),
-                    8..=10 => Gate::rz((rng.up_to(17) as f64 - 8.0) / 13.0, q),
-                    11 => Gate::rz((rng.up_to(9) as f64 - 4.0) * (PI / 4.0), q),
+                    8..=10 => Gate::rz_f64((rng.up_to(17) as f64 - 8.0) / 13.0, q).unwrap(),
+                    11 => Gate::rz_f64((rng.up_to(9) as f64 - 4.0) * (PI / 4.0), q).unwrap(),
                     12 | 13 => Gate::cnot {
                         control: q,
                         target: other,

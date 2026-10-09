@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -24,12 +25,31 @@ class Metrics:
 
 
 @dataclass(frozen=True)
+class NumericalReport:
+    """No added rounding in folding; input interpretation and synthesis differ."""
+
+    preserved_expressions: int
+    numerical_fallbacks: int
+    skipped_rounded_folds: int
+    skipped_nonfinite_folds: int
+    skipped_coefficient_limit_folds: int
+    uncertified_syntheses: int
+    randomized_matching: bool
+    input_policy: str = "accepted_angles"
+    folding: str = "no_added_rounding"
+    synthesis_error_scope: str = (
+        "numeric_target_per_rotation; total_conversion_and_circuit_error_uncertified"
+    )
+
+
+@dataclass(frozen=True)
 class OptimizationReport:
     """Input/baseline metrics and metrics after the staged optimization."""
 
     input: Metrics
     baseline: Metrics
     output: Metrics
+    numerical: NumericalReport
 
 
 @dataclass(frozen=True)
@@ -94,5 +114,12 @@ def optimize_qasm(
         input=_metrics(raw_report[0]),
         baseline=_metrics(raw_report[1]),
         output=_metrics(raw_report[2]),
+        numerical=NumericalReport(*raw_report[3]),
     )
+    if report.numerical.preserved_expressions:
+        warnings.warn(
+            f"tzap retained {report.numerical.preserved_expressions} angle expressions unchanged because exact representation or folding exceeded its limits",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return OptimizationResult(optimized, report)

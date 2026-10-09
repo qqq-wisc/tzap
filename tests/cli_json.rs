@@ -68,6 +68,7 @@ fn assert_schema(report: &Json, context: &str) {
             "input",
             "output",
             "options",
+            "numerical",
             "metrics",
             "reduction_percent",
             "stages",
@@ -91,6 +92,27 @@ fn assert_schema(report: &Json, context: &str) {
     report.at("output/stdout").as_bool();
     report.at("output/gate_set").strings();
     report.at("seconds").as_f64();
+
+    let numerical = report.get("numerical");
+    assert_eq!(numerical.at("input_policy").as_str(), "accepted_angles");
+    assert_eq!(numerical.at("folding").as_str(), "no_added_rounding");
+    for field in [
+        "preserved_expressions",
+        "numerical_fallbacks",
+        "skipped_rounded_folds",
+        "skipped_nonfinite_folds",
+        "skipped_coefficient_limit_folds",
+        "uncertified_syntheses",
+    ] {
+        numerical.get(field).as_usize();
+    }
+    numerical.get("randomized_matching").as_bool();
+    assert!(
+        numerical
+            .get("synthesis_error_scope")
+            .as_str()
+            .contains("uncertified")
+    );
 
     let options = report.get("options");
     assert_eq!(
@@ -738,4 +760,48 @@ fn the_report_names_the_cache_directory() {
         .run()
         .ok("TZAP_CACHE_DIR --json");
     assert_eq!(Json::parse(&run.stdout).get("cache_dir").as_str(), path);
+}
+
+#[test]
+fn preserved_expression_warns_and_reports_its_input_policy() {
+    let source = "OPENQASM 2.0; qreg q[1]; rz(pi/9223372036854775808) q[0];";
+    let run = Tzap::new(&["-", "--passes", "PhaseFoldRand", "--json"])
+        .stdin(source)
+        .run()
+        .ok("preserved input");
+    assert!(
+        run.stderr
+            .contains("Warning: 1 angle expressions retained unchanged")
+    );
+    let report = Json::parse(&run.stdout);
+    assert_eq!(report.at("numerical/preserved_expressions").as_usize(), 1);
+    let run = Tzap::new(&["-", "--passes", "PhaseFoldRand", "--json", "-q"])
+        .stdin(source)
+        .run()
+        .ok("quiet preserved input");
+    assert!(run.stderr.is_empty());
+    assert_eq!(
+        Json::parse(&run.stdout)
+            .at("numerical/preserved_expressions")
+            .as_usize(),
+        1
+    );
+}
+
+#[test]
+fn explicit_synthesis_reports_uncertified_error_in_both_streams() {
+    let run = Tzap::new(&["-", "--passes", "DecomposeRz", "--json"])
+        .stdin("qreg q[1]; rz(pi/7) q[0];")
+        .run()
+        .ok("explicit approximate synthesis");
+    assert!(run.stderr.contains("1 Rz syntheses used numeric targets"));
+    assert!(run.stderr.contains("circuit error are uncertified"));
+    let report = Json::parse(&run.stdout);
+    assert_eq!(report.at("numerical/uncertified_syntheses").as_usize(), 1);
+    assert!(
+        report
+            .at("numerical/synthesis_error_scope")
+            .as_str()
+            .contains("uncertified")
+    );
 }

@@ -467,6 +467,9 @@ impl SuperOpt {
     /// For every gate, in order: (1) windows touching a measurement or reset
     /// die; (2) every live window touching the gate is extended, re-closed,
     /// and analyzed; (3) the gate anchors a fresh window of its own.
+    /// This analyzer preserves input instruction indices. Use
+    /// `angle::lower_exact_rotations` first to admit certified quarter-turn Rz,
+    /// or use the `Pass` adapter, which performs that preprocessing.
     pub fn run(&self, circuit: &Circuit) -> Result<SuperOptResult, SuperOptError> {
         if self.window_gates == 0 {
             return Err(SuperOptError::ZeroWindowGates);
@@ -722,7 +725,8 @@ impl Pass for SuperOpt {
     }
 
     fn run(&self, circuit: &Circuit) -> Circuit {
-        match SuperOpt::run(self, circuit) {
+        let lowered = crate::angle::lowered_if_needed(circuit);
+        match SuperOpt::run(self, &lowered) {
             Ok(result) => result.circuit,
             Err(error) => panic!("SuperOpt failed: {error}"),
         }

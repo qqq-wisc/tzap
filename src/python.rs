@@ -19,7 +19,8 @@ create_exception!(_native, QasmError, TzapError);
 create_exception!(_native, OptimizationError, TzapError);
 
 type RawMetrics = (usize, usize, usize, usize, usize);
-type RawReport = (RawMetrics, RawMetrics, RawMetrics);
+type RawNumerical = (usize, usize, usize, usize, usize, usize, bool);
+type RawReport = (RawMetrics, RawMetrics, RawMetrics, RawNumerical);
 
 fn raw_metrics(metrics: Metrics) -> RawMetrics {
     (
@@ -36,6 +37,15 @@ fn raw_report(report: Report) -> RawReport {
         raw_metrics(report.input),
         raw_metrics(report.baseline),
         raw_metrics(report.output),
+        (
+            report.numerical.preserved_expressions,
+            report.numerical.numerical_fallbacks,
+            report.numerical.skipped_rounded_folds,
+            report.numerical.skipped_nonfinite_folds,
+            report.numerical.skipped_coefficient_limit_folds,
+            report.numerical.uncertified_syntheses,
+            report.numerical.randomized_matching,
+        ),
     )
 }
 

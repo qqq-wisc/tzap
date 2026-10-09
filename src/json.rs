@@ -381,6 +381,18 @@ pub(crate) fn render(
             ]),
         ),
         ("options", options_value(options, run)),
+        ("numerical", Value::Object(vec![
+            ("input_policy", Value::str("accepted_angles")),
+            ("folding", Value::str("no_added_rounding")),
+            ("preserved_expressions", Value::Int(report.numerical.preserved_expressions)),
+            ("numerical_fallbacks", Value::Int(report.numerical.numerical_fallbacks)),
+            ("skipped_rounded_folds", Value::Int(report.numerical.skipped_rounded_folds)),
+            ("skipped_nonfinite_folds", Value::Int(report.numerical.skipped_nonfinite_folds)),
+            ("skipped_coefficient_limit_folds", Value::Int(report.numerical.skipped_coefficient_limit_folds)),
+            ("randomized_matching", Value::Bool(report.numerical.randomized_matching)),
+            ("uncertified_syntheses", Value::Int(report.numerical.uncertified_syntheses)),
+            ("synthesis_error_scope", Value::str("numeric_target_per_rotation; total_conversion_and_circuit_error_uncertified")),
+        ])),
         (
             "metrics",
             Value::Object(vec![

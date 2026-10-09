@@ -52,6 +52,7 @@ def test_public_version_is_semver_and_matches_native_module():
 def test_public_all_exports_resolve():
     expected = {
         "Metrics",
+        "NumericalReport",
         "OptimizationError",
         "OptimizationReport",
         "OptimizationResult",
@@ -287,7 +288,8 @@ def test_comments_and_angle_expressions_are_accepted():
     result = tzap.optimize_qasm(circuit, passes=["CancelGates"])
 
     assert result.report.input.rz == 1
-    assert "rz(" in result.qasm
+    assert "s q[0];" in result.qasm
+    assert result.report.output.rz == 0
 
 
 def test_invalid_qasm_raises_specific_exception():
@@ -371,3 +373,31 @@ def test_non_string_qasm_is_rejected_by_binding_type_check():
 def test_non_string_pass_item_is_rejected_by_binding_type_check():
     with pytest.raises(TypeError):
         tzap.optimize_qasm(QASM, passes=["CancelGates", 123])
+
+
+def test_numerical_contract_and_preserved_expression_warning():
+    source = make_qasm("rz(pi/9223372036854775808) q[0];")
+    with pytest.warns(RuntimeWarning, match="retained 1 angle"):
+        result = tzap.optimize_qasm(source, level="O1")
+    assert "pi/9223372036854775808" in result.qasm
+    assert result.report.numerical.preserved_expressions == 1
+    assert result.report.numerical.input_policy == "accepted_angles"
+    assert result.report.numerical.randomized_matching
+
+
+def test_no_float_pi_inference_or_rounded_folding():
+    source = make_qasm("rz(1e16) q[0]; rz(1) q[0]; rz(-1e16) q[0];")
+    result = tzap.optimize_qasm(source, passes=["PhaseFoldRand"])
+    assert result.report.output.rz == 3
+    assert result.report.numerical.skipped_rounded_folds == 2
+    result = tzap.optimize_qasm(make_qasm(f"rz({math.pi / 4!r}) q[0];"), level="O1")
+    assert result.report.output.rz == 1
+    assert result.report.output.t == 0
+
+
+def test_explicit_synthesis_reports_uncertified_total_error():
+    result = tzap.optimize_qasm(
+        make_qasm("rz(pi/7) q[0];"), passes=["DecomposeRz"], rz_epsilon=1e-5
+    )
+    assert result.report.numerical.uncertified_syntheses == 1
+    assert "uncertified" in result.report.numerical.synthesis_error_scope

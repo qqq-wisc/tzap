@@ -47,7 +47,7 @@
 //! can consequently never make a circuit longer, which is what lets it sit in
 //! a fixpoint loop without oscillating.
 
-use std::f64::consts::PI;
+use crate::angle::Angle;
 
 use rustc_hash::FxHashMap;
 
@@ -93,12 +93,6 @@ pub const MAX_CHUNK_QUBITS: usize = 128;
 /// synthesis always loses to the original anyway; see the `term_cap_sweep`
 /// timing test).
 pub const MAX_CHUNK_TERMS: usize = 512;
-
-/// Rotations closer to a multiple of 2π than this are dropped as identity,
-/// and angles within it of a multiple of π/4 are emitted as the corresponding
-/// Clifford+T gate rather than as an `rz`. Matches the tolerance the phase
-/// folding passes use, so a rotation that survives one survives the other.
-const ANGLE_TOL: f64 = 1e-9;
 
 /// Replaces CNOT-dihedral blocks with re-synthesized equivalents that use
 /// fewer two-qubit gates. See the module documentation.
@@ -189,7 +183,7 @@ struct Chunk {
     /// Rotation angle per parity. A parity is never zero (the qubit parities
     /// stay a basis, see [`Chunk::renormalize`]), so no entry here is a pure
     /// global phase.
-    terms: FxHashMap<Parity, f64>,
+    terms: FxHashMap<Parity, Angle>,
     /// The gates this block was built from, kept so [`Chunk::flush`] can fall
     /// back to them when synthesis does no better.
     original: Vec<Gate>,
@@ -199,6 +193,7 @@ struct Chunk {
     /// synthesis leaves exactly the output that finishing and rejecting it
     /// would have.
     bounded: bool,
+    arithmetic_failed: bool,
     /// Buffers handed to synthesis and taken back afterwards, so that a pass
     /// over a circuit with millions of blocks allocates once rather than once
     /// per block. Purely a cache: their contents never carry across a flush.
@@ -239,6 +234,7 @@ impl Chunk {
             terms: FxHashMap::default(),
             original: Vec::new(),
             bounded: true,
+            arithmetic_failed: false,
             scratch: Scratch::default(),
         }
     }
@@ -278,16 +274,16 @@ impl Chunk {
     /// block having been flushed first), or it is wider than the qubit cap
     /// allows any block to be.
     fn feed<'g>(&mut self, gate: &'g Gate, output: &mut Circuit) -> Option<&'g Gate> {
-        let (rotation, operands): (Option<f64>, &[Qubit]) = match gate {
-            Gate::t(q) => (Some(PI / 4.0), std::slice::from_ref(q)),
-            Gate::tdg(q) => (Some(-PI / 4.0), std::slice::from_ref(q)),
-            Gate::s(q) => (Some(PI / 2.0), std::slice::from_ref(q)),
-            Gate::sdg(q) => (Some(-PI / 2.0), std::slice::from_ref(q)),
-            Gate::z(q) => (Some(PI), std::slice::from_ref(q)),
-            Gate::rz(theta, q) => (Some(*theta), std::slice::from_ref(q)),
+        let (rotation, operands): (Option<Angle>, &[Qubit]) = match gate {
+            Gate::t(q) => (Some(Angle::turns(1)), std::slice::from_ref(q)),
+            Gate::tdg(q) => (Some(Angle::turns(7)), std::slice::from_ref(q)),
+            Gate::s(q) => (Some(Angle::turns(2)), std::slice::from_ref(q)),
+            Gate::sdg(q) => (Some(Angle::turns(6)), std::slice::from_ref(q)),
+            Gate::z(q) => (Some(Angle::turns(4)), std::slice::from_ref(q)),
+            Gate::rz(theta, q) => (Some(theta.clone()), std::slice::from_ref(q)),
             Gate::x(q) => (None, std::slice::from_ref(q)),
             // A degenerate two-qubit gate (control == target) is not
-            // well-formed, but the corpora contain them, and interpreting one
+            // well-formed, but callers can construct one, and interpreting it
             // would zero a qubit's parity -- destroying the basis this pass's
             // whole representation rests on, and with it the invertibility
             // `linear_synth` needs. Treat it the way an uninterpretable gate
@@ -357,9 +353,9 @@ impl Chunk {
                 let (c, t) = (self.index_of(*control), self.index_of(*target));
                 let (pc, pt) = (self.parity[c], self.parity[t]);
                 let (kc, kt) = (self.consts[c], self.consts[t]);
-                self.add_term(pc, kc, PI / 2.0);
-                self.add_term(pt, kt, PI / 2.0);
-                self.add_term(pc ^ pt, kc ^ kt, -PI / 2.0);
+                self.add_term(pc, kc, Angle::turns(2));
+                self.add_term(pt, kt, Angle::turns(2));
+                self.add_term(pc ^ pt, kc ^ kt, Angle::turns(6));
             }
             _ => unreachable!("non-rotation gate kinds are exhausted above"),
         }
@@ -373,9 +369,28 @@ impl Chunk {
     /// A rotation sitting on the complement of `p` is the same as one on `p`
     /// with the opposite angle, plus a global phase — which is dropped, since
     /// everything downstream compares circuits up to global phase.
-    fn add_term(&mut self, p: Parity, k: bool, angle: f64) {
-        let signed = if k { -angle } else { angle };
-        *self.terms.entry(p).or_insert(0.0) += signed;
+    fn add_term(&mut self, p: Parity, k: bool, angle: Angle) {
+        if self.arithmetic_failed {
+            return;
+        }
+        let signed = if k { angle.checked_neg() } else { Ok(angle) };
+        let Ok(signed) = signed else {
+            self.arithmetic_failed = true;
+            return;
+        };
+        let next = if let Some(prior) = self.terms.get(&p) {
+            prior.checked_add_signed(1, &signed)
+        } else if signed.is_preserved() {
+            Err(crate::angle::AngleError::PreservedExpression)
+        } else {
+            Ok(signed)
+        };
+        match next {
+            Ok(value) => {
+                self.terms.insert(p, value);
+            }
+            Err(_) => self.arithmetic_failed = true,
+        }
     }
 
     /// Emit the block into `output` and start a fresh one.
@@ -409,14 +424,15 @@ impl Chunk {
         // needs more room than this -- and the buffer is reused, so this
         // reserve is a no-op after the first few blocks.
         budget.gates.reserve(old_all.saturating_add(1));
-        let complete = synthesize(
-            &self.parity,
-            &self.consts,
-            &self.terms,
-            &self.qubits,
-            &mut budget,
-            &mut self.scratch,
-        );
+        let complete = !self.arithmetic_failed
+            && synthesize(
+                &self.parity,
+                &self.consts,
+                &self.terms,
+                &self.qubits,
+                &mut budget,
+                &mut self.scratch,
+            );
         let (new_2q, new_all) = (budget.two_q, budget.gates.len());
         let keep = complete && new_all <= old_all && (new_2q, new_all) < (old_2q, old_all);
         let mut buffer = budget.gates;
@@ -445,6 +461,7 @@ impl Chunk {
         self.parity.clear();
         self.consts.clear();
         self.terms.clear();
+        self.arithmetic_failed = false;
         self.original.clear();
     }
 }
@@ -533,7 +550,7 @@ fn count_2q(gates: &[Gate]) -> usize {
 fn synthesize(
     parity: &[Parity],
     consts: &[bool],
-    terms: &FxHashMap<Parity, f64>,
+    terms: &FxHashMap<Parity, Angle>,
     qubits: &[Qubit],
     budget: &mut Budget,
     scratch: &mut Scratch,
@@ -543,8 +560,8 @@ fn synthesize(
     phases.extend(
         terms
             .iter()
-            .filter(|&(_, &a)| !angle_is_zero(a))
-            .map(|(&p, &a)| (p, a)),
+            .filter(|(_, a)| !a.is_zero())
+            .map(|(&p, a)| (p, a.clone())),
     );
     // Iteration order of a hash map is not deterministic across runs; the
     // synthesized circuit must be.
@@ -585,7 +602,7 @@ struct Pt {
 }
 
 /// A set of parities with the angle each carries, as [`gray_synth`] splits it.
-type ParitySet = Vec<(Parity, f64)>;
+type ParitySet = Vec<(Parity, Angle)>;
 
 /// Retired [`Pt::vectors`] buffers. The recursion splits one parity set into
 /// two and drops the parent, so without a pool every node would allocate;
@@ -676,7 +693,7 @@ fn gray_synth(
             // Out of columns: the node's parities are all equal, so there is
             // at most one, and it is sitting on `target` right now.
             if let (Some(t), 1) = (node.target, node.vectors.len())
-                && !emit_rotation(budget, qubits[t], node.vectors[0].1)
+                && !emit_rotation(budget, qubits[t], node.vectors[0].1.clone())
             {
                 return false;
             }
@@ -725,7 +742,7 @@ fn gray_synth(
 ///
 /// `candidates` is non-empty, so there is always a column to return. Ties go
 /// to the highest column, which is what the ascending scan leaves behind.
-fn best_column(candidates: Parity, vectors: &[(Parity, f64)]) -> usize {
+fn best_column(candidates: Parity, vectors: &[(Parity, Angle)]) -> usize {
     let mut best = 0;
     let mut best_score = usize::MIN;
     let mut rest = candidates;
@@ -744,10 +761,10 @@ fn best_column(candidates: Parity, vectors: &[(Parity, f64)]) -> usize {
 
 /// Split `vectors` on `col` into the parities that clear it and the ones that
 /// carry it, in that order, reusing buffers from `pool`.
-fn split_on(pool: &mut Pool, vectors: &[(Parity, f64)], col: usize) -> (ParitySet, ParitySet) {
+fn split_on(pool: &mut Pool, vectors: &[(Parity, Angle)], col: usize) -> (ParitySet, ParitySet) {
     let mut zeros = pool.pop().unwrap_or_default();
     let mut ones = pool.pop().unwrap_or_default();
-    for &entry in vectors {
+    for entry in vectors.iter().cloned() {
         match entry.0 >> col & 1 == 1 {
             true => ones.push(entry),
             false => zeros.push(entry),
@@ -871,37 +888,9 @@ fn invert(rows: &[Parity], n: usize) -> Option<Vec<Parity>> {
     invert_into(rows, n, &mut a, &mut inv).then_some(inv)
 }
 
-fn angle_is_zero(angle: f64) -> bool {
-    let n = angle.rem_euclid(2.0 * PI);
-    n < ANGLE_TOL || (2.0 * PI - n) < ANGLE_TOL
-}
-
-/// Append `angle` on `qubit`, as Clifford+T gates when it is a multiple of
-/// pi/4 and an `rz` otherwise.
-/// Returns `false` when `budget` ran out, on the same terms as
-/// [`gray_synth`].
 #[must_use]
-fn emit_rotation(budget: &mut Budget, qubit: Qubit, angle: f64) -> bool {
-    let n = angle.rem_euclid(2.0 * PI);
-    if angle_is_zero(n) {
-        return true;
-    }
-    let quarter = PI / 4.0;
-    let k = (n / quarter).round();
-    if (n - k * quarter).abs() >= ANGLE_TOL {
-        return budget.push(Gate::rz(n, qubit));
-    }
-    match k as u32 % 8 {
-        0 => true,
-        1 => budget.push(Gate::t(qubit)),
-        2 => budget.push(Gate::s(qubit)),
-        3 => budget.push(Gate::s(qubit)) && budget.push(Gate::t(qubit)),
-        4 => budget.push(Gate::z(qubit)),
-        5 => budget.push(Gate::z(qubit)) && budget.push(Gate::t(qubit)),
-        6 => budget.push(Gate::sdg(qubit)),
-        7 => budget.push(Gate::tdg(qubit)),
-        _ => unreachable!(),
-    }
+fn emit_rotation(budget: &mut Budget, qubit: Qubit, angle: Angle) -> bool {
+    angle.try_emit(qubit, &mut |gate| budget.push(gate))
 }
 
 #[cfg(test)]
@@ -1134,7 +1123,8 @@ mod tests {
             if wanted.is_empty() {
                 continue;
             }
-            let phases: Vec<(Parity, f64)> = wanted.iter().map(|&p| (p, PI / 4.0)).collect();
+            let phases: Vec<(Parity, Angle)> =
+                wanted.iter().map(|&p| (p, Angle::turns(1))).collect();
             let qubits: Vec<Qubit> = (0..n as Qubit).collect();
             let mut state: Vec<Parity> = (0..n).map(|i| 1u128 << i).collect();
             let mut b = unbounded();
@@ -1346,12 +1336,12 @@ mod tests {
     #[test]
     fn rz_rotations_survive() {
         let mut c = Circuit::new(2);
-        c.apply(Gate::rz(0.37, 0));
+        c.apply(Gate::rz_f64(0.37, 0).unwrap());
         c.apply(Gate::cnot {
             control: 0,
             target: 1,
         });
-        c.apply(Gate::rz(-1.2, 1));
+        c.apply(Gate::rz_f64(-1.2, 1).unwrap());
         let out = cnot_min(&c);
         assert!(circuits_equiv(&c, &out, TOL));
     }
@@ -1434,7 +1424,7 @@ mod tests {
                     3 => c.apply(Gate::s(q)),
                     4 => c.apply(Gate::x(q)),
                     5 => c.apply(Gate::sdg(q)),
-                    6 => c.apply(Gate::rz(0.1 + 0.3 * (rng.next(7) as f64), q)),
+                    6 => c.apply(Gate::rz_f64(0.1 + 0.3 * (rng.next(7) as f64), q).unwrap()),
                     7 if n > 2 => c.apply(Gate::ccz {
                         control1: 0,
                         control2: 1,
@@ -1571,9 +1561,9 @@ mod tests {
         // basis, so they cost two.
         let expected_len = [0, 1, 1, 2, 1, 2, 1, 1];
         for k in 0..8u32 {
-            let angle = f64::from(k) * PI / 4.0;
+            let angle = Angle::pi_fraction(k as i64, 4).unwrap();
             let mut budget = unbounded();
-            assert!(emit_rotation(&mut budget, 0, angle), "k={k}");
+            assert!(emit_rotation(&mut budget, 0, angle.clone()), "k={k}");
             assert_eq!(budget.gates.len(), expected_len[k as usize], "k={k}");
             assert!(
                 !budget.gates.iter().any(|g| matches!(g, Gate::rz(..))),
@@ -1634,7 +1624,11 @@ mod tests {
     #[test]
     fn non_quarter_turn_angles_stay_rz() {
         let mut budget = unbounded();
-        assert!(emit_rotation(&mut budget, 0, 0.37));
+        assert!(emit_rotation(
+            &mut budget,
+            0,
+            Angle::from_f64(0.37).unwrap()
+        ));
         assert!(matches!(budget.gates.as_slice(), [Gate::rz(..)]));
     }
 
@@ -1652,7 +1646,7 @@ mod tests {
                     2 => c.apply(Gate::s(q)),
                     3 => c.apply(Gate::h(q)),
                     4 => c.apply(Gate::x(q)),
-                    5 => c.apply(Gate::rz(0.1 + 0.3 * (rng.next(7) as f64), q)),
+                    5 => c.apply(Gate::rz_f64(0.1 + 0.3 * (rng.next(7) as f64), q).unwrap()),
                     6 if n > 1 => {
                         let t = (q + 1 + rng.qubit(n - 1)) % n as Qubit;
                         c.apply(Gate::cz {

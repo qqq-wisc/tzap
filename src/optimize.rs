@@ -472,6 +472,8 @@ pub struct Report {
     pub baseline: Metrics,
     /// The optimized circuit.
     pub output: Metrics,
+    /// Accepted-angle arithmetic, separate from randomized matching and synthesis.
+    pub numerical: crate::angle_stats::NumericalReport,
 }
 
 /// Anything that can go wrong in [`optimize`].
@@ -479,11 +481,13 @@ pub struct Report {
 pub enum Error {
     /// The MURM backing [`PassName::SuperOpt`] could not be built.
     SuperOpt(SuperOptError),
+    Synthesis(crate::decompose::SynthesisError),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Error::Synthesis(error) => write!(f, "Rz synthesis failed: {error}"),
             Error::SuperOpt(error) => write!(f, "failed to initialize SuperOpt: {error}"),
         }
     }
@@ -863,9 +867,11 @@ fn run_map_reduce(
     if tracking {
         observer.chunks_start(total, baseline);
     }
+    let numerical_counters = crate::angle_stats::current();
     let optimized: Vec<Result<Circuit, Error>> = chunks
         .par_iter()
         .map(|chunk| {
+            let _numerical_scope = crate::angle_stats::Scope::install(numerical_counters.clone());
             // Walked only when someone is watching: two passes over the chunk
             // that a `Silent` run has no use for.
             let before = tracking.then(|| Metrics::of(chunk));
@@ -919,9 +925,19 @@ fn run_explicit_pass(
     match name {
         PassName::DecomposeToffoli => map_pass!(DecomposeToffoli),
         PassName::DecomposeCz => map_pass!(DecomposeCz),
-        PassName::DecomposeRz => map_pass!(DecomposeRz {
-            epsilon: options.rz_epsilon,
-        }),
+        PassName::DecomposeRz => run_map_reduce(
+            circuit,
+            options.parallel,
+            num_chunks,
+            observer,
+            |chunk, _| {
+                DecomposeRz {
+                    epsilon: options.rz_epsilon,
+                }
+                .try_run(chunk)
+                .map_err(Error::Synthesis)
+            },
+        ),
         PassName::CancelGates => map_pass!(CancelGates),
         PassName::PhaseFoldRand => map_pass!(PhaseFoldRand),
         PassName::PhaseFoldPauli => map_pass!(PhaseFoldPauli),
@@ -1164,6 +1180,8 @@ pub fn optimize_with(
     options: &Options,
     observer: &dyn Observer,
 ) -> Result<(Circuit, Report), Error> {
+    let counters = std::sync::Arc::new(crate::angle_stats::Counters::default());
+    let _scope = crate::angle_stats::Scope::install(Some(counters.clone()));
     let input = Metrics::of(circuit);
     let num_chunks = num_par_chunks();
 
@@ -1187,6 +1205,7 @@ pub fn optimize_with(
             input,
             baseline: input,
             output: Metrics::of(&result),
+            numerical: crate::angle_stats::NumericalReport::collected(circuit, options, &counters),
         };
         return Ok((result, report));
     }
@@ -1248,7 +1267,18 @@ pub fn optimize_with(
     for (requested, kinds, stage, pass) in decompositions {
         if requested && !result.gate_set().intersection(kinds).is_empty() {
             observer.stage_start(stage);
-            result = run_logged(pass, &result, observer);
+            if stage == StageKind::DecomposeRz {
+                let start = Instant::now();
+                let synthesized = DecomposeRz {
+                    epsilon: options.rz_epsilon,
+                }
+                .try_run(&result)
+                .map_err(Error::Synthesis)?;
+                observer.pass_done(pass.name(), &result, &synthesized, start.elapsed());
+                result = synthesized;
+            } else {
+                result = run_logged(pass, &result, observer);
+            }
             decomposed = true;
         }
     }
@@ -1268,6 +1298,7 @@ pub fn optimize_with(
         input,
         baseline: input,
         output: Metrics::of(&result),
+        numerical: crate::angle_stats::NumericalReport::collected(circuit, options, &counters),
     };
     Ok((result, report))
 }
@@ -1501,7 +1532,7 @@ mod tests {
                 target: 1,
             });
         }
-        c.apply(Gate::rz(0.37, 2));
+        c.apply(Gate::rz_f64(0.37, 2).unwrap());
 
         for level in [Level::O2, Level::O3, Level::Osuper] {
             let options = Options {
@@ -1629,7 +1660,7 @@ mod tests {
         for native_mask in 0u8..8 {
             let mut input = Circuit::new(3);
             input.apply(Gate::h(0));
-            input.apply(Gate::rz(0.37, 2));
+            input.apply(Gate::rz_f64(0.37, 2).unwrap());
             if native_mask & 1 != 0 {
                 input.apply(Gate::cz {
                     control: 0,
@@ -1688,7 +1719,7 @@ mod tests {
             control: 0,
             target: 2,
         });
-        circuit.apply(Gate::rz(0.37, 2));
+        circuit.apply(Gate::rz_f64(0.37, 2).unwrap());
         if mask & 1 != 0 {
             circuit.apply(Gate::cz {
                 control: 0,
@@ -2073,7 +2104,9 @@ mod tests {
                             4 => input.apply(Gate::sdg(q)),
                             5 => input.apply(Gate::t(q)),
                             6 => input.apply(Gate::tdg(q)),
-                            7 => input.apply(Gate::rz((next(&mut seed) % 13 + 1) as f64 / 17.0, q)),
+                            7 => input.apply(
+                                Gate::rz_f64((next(&mut seed) % 13 + 1) as f64 / 17.0, q).unwrap(),
+                            ),
                             8 => input.apply(Gate::cnot {
                                 control: q,
                                 target: (q + 1) % 3,

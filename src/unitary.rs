@@ -237,7 +237,15 @@ pub(crate) fn circuit_unitary(circuit: &Circuit) -> Vec<Vec<C>> {
             Gate::z(q) => mat.apply_single(gate_matrix_z(), *q as usize, n),
             Gate::t(q) => mat.apply_single(gate_matrix_t(), *q as usize, n),
             Gate::tdg(q) => mat.apply_single(gate_matrix_tdg(), *q as usize, n),
-            Gate::rz(theta, q) => mat.apply_single(gate_matrix_rz(*theta), *q as usize, n),
+            Gate::rz(theta, q) => mat.apply_single(
+                gate_matrix_rz(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *q as usize,
+                n,
+            ),
             Gate::cnot { control, target } => {
                 mat.apply_cnot(*control as usize, *target as usize, n)
             }
@@ -376,7 +384,10 @@ mod tests {
         let mut a = Circuit::new(1);
         a.apply(Gate::s(0));
         let mut b = Circuit::new(1);
-        b.apply(Gate::rz(PI / 2.0, 0));
+        b.apply(Gate::rz(
+            crate::angle_expr::parse("pi / 2.0", 1).unwrap(),
+            0,
+        ));
         assert!(circuits_equiv(&a, &b, 1e-10));
     }
 
@@ -709,7 +720,7 @@ mod tests {
         let mut a = Circuit::new(1);
         a.apply(Gate::z(0));
         let mut b = Circuit::new(1);
-        b.apply(Gate::rz(PI, 0));
+        b.apply(Gate::rz(crate::angle_expr::parse("pi", 1).unwrap(), 0));
         assert!(circuits_equiv(&a, &b, 1e-10));
     }
 
@@ -718,7 +729,10 @@ mod tests {
         let mut a = Circuit::new(1);
         a.apply(Gate::sdg(0));
         let mut b = Circuit::new(1);
-        b.apply(Gate::rz(-PI / 2.0, 0));
+        b.apply(Gate::rz(
+            crate::angle_expr::parse("-pi / 2.0", 1).unwrap(),
+            0,
+        ));
         assert!(circuits_equiv(&a, &b, 1e-10));
     }
 
@@ -1058,7 +1072,10 @@ mod tests {
         a.apply(Gate::z(0));
         a.apply(Gate::t(0));
         let mut b = Circuit::new(1);
-        b.apply(Gate::rz(5.0 * PI / 4.0, 0));
+        b.apply(Gate::rz(
+            crate::angle_expr::parse("5.0 * pi / 4.0", 1).unwrap(),
+            0,
+        ));
         assert!(circuits_equiv(&a, &b, 1e-10));
     }
 

@@ -1094,11 +1094,10 @@ fn rz_windows_are_rejected_without_matrix_lookup() {
         vec![0.37],
         vec![0.37, -0.37],
         vec![std::f64::consts::FRAC_PI_4; 2],
-        vec![f64::NAN],
     ] {
         let mut circuit = Circuit::new(1);
         for angle in angles {
-            circuit.apply(Gate::rz(angle, 0));
+            circuit.apply(Gate::rz_f64(angle, 0).unwrap());
         }
         let result = SuperOpt::analyzer(1, circuit.gates.len())
             .with_murm(Arc::clone(&murm))
@@ -2091,7 +2090,7 @@ fn randomized_production_config_rewrites_are_sound() {
                 4 => Gate::z(q),
                 5 => Gate::t(q),
                 6 => Gate::tdg(q),
-                7 => Gate::rz((gate_index + 1) as f64 / 13.0, q),
+                7 => Gate::rz_f64((gate_index + 1) as f64 / 13.0, q).unwrap(),
                 8 | 9 => Gate::cnot {
                     control: q,
                     target: q2,
@@ -2242,7 +2241,7 @@ fn every_supported_unitary_gate_matches_naive_matrix() {
     circuit.apply(Gate::z(0));
     circuit.apply(Gate::t(0));
     circuit.apply(Gate::tdg(0));
-    circuit.apply(Gate::rz(0.29, 0));
+    circuit.apply(Gate::rz_f64(0.29, 0).unwrap());
     circuit.apply(Gate::cnot {
         control: 0,
         target: 1,
@@ -2284,7 +2283,7 @@ fn randomized_results_match_naive_anchored_scan() {
                 4 => Gate::z(q),
                 5 => Gate::t(q),
                 6 => Gate::tdg(q),
-                7 => Gate::rz(rng.next(100) as f64 / 17.0, q),
+                7 => Gate::rz_f64(rng.next(100) as f64 / 17.0, q).unwrap(),
                 8 => Gate::cnot {
                     control: q,
                     target: q2,
@@ -2470,7 +2469,7 @@ fn fuzz_subcircuit_rewrites_change_circuit_and_preserve_unitary() {
                 4 => Gate::z(q),
                 5 => Gate::t(q),
                 6 => Gate::tdg(q),
-                7 => Gate::rz((gate_index + 1) as f64 / 13.0, q),
+                7 => Gate::rz_f64((gate_index + 1) as f64 / 13.0, q).unwrap(),
                 8 | 9 => Gate::cnot {
                     control: q,
                     target: q2,
@@ -2583,7 +2582,7 @@ fn warm_store_reproduces_cold_run() {
 fn incremental_skips_unchanged_circuit_entirely() {
     let mut circuit = Circuit::new(1);
     circuit.apply(Gate::h(0));
-    circuit.apply(Gate::rz(0.3, 0));
+    circuit.apply(Gate::rz_f64(0.3, 0).unwrap());
     circuit.apply(Gate::h(0));
 
     let pass = SuperOpt::analyzer(1, 3)
@@ -2605,7 +2604,7 @@ fn incremental_finds_rewrites_exposed_by_deletion() {
     // makes adjacent must be re-anchored or the new HH cancellation is lost.
     let mut before = Circuit::new(1);
     before.apply(Gate::h(0));
-    before.apply(Gate::rz(0.3, 0));
+    before.apply(Gate::rz_f64(0.3, 0).unwrap());
     before.apply(Gate::h(0));
     let mut after = Circuit::new(1);
     after.apply(Gate::h(0));
@@ -2647,7 +2646,7 @@ fn incremental_matches_full_sweeps_on_random_circuits() {
                 4 => Gate::z(q),
                 5 => Gate::t(q),
                 6 => Gate::tdg(q),
-                7 => Gate::rz(rng.next(100) as f64 / 17.0, q),
+                7 => Gate::rz_f64(rng.next(100) as f64 / 17.0, q).unwrap(),
                 8 => Gate::cnot {
                     control: q,
                     target: q2,

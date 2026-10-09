@@ -1,5 +1,9 @@
 #![doc = include_str!("../API.md")]
 
+pub mod angle;
+mod angle_expr;
+pub mod angle_stats;
+
 pub mod cancel;
 pub mod circuit;
 pub mod cnot_min;

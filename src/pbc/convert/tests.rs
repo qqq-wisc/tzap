@@ -559,7 +559,10 @@ fn mid_circuit_measurements_match_exact_channels() {
 fn invalid_inputs_report_instruction_index() {
     let cases = [
         (Gate::h(2), PbcError::QubitOutOfRange(2)),
-        (Gate::rz(0.0, 0), PbcError::UnsupportedGate(GateKind::Rz)),
+        (
+            Gate::rz_f64(0.1, 0).unwrap(),
+            PbcError::UnsupportedGate(GateKind::Rz),
+        ),
         (
             Gate::measure { qubit: 0, cbit: 0 },
             PbcError::ClassicalBitOutOfRange(0),
@@ -665,7 +668,11 @@ fn long_native_stream_has_fixed_cost_per_gate() {
 #[test]
 fn errors_display_their_instruction_and_expose_their_cause() {
     use std::error::Error;
-    let err = to_pbc(&input(1, vec![Gate::h(0), Gate::rz(0.5, 0)]), None).unwrap_err();
+    let err = to_pbc(
+        &input(1, vec![Gate::h(0), Gate::rz_f64(0.5, 0).unwrap()]),
+        None,
+    )
+    .unwrap_err();
     assert_eq!(
         err.to_string(),
         "input gate 1: unsupported PBC input gate: Rz"

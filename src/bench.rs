@@ -67,7 +67,7 @@ mod tests {
                         target: other,
                     });
                 }
-                6..=7 => c.apply(Gate::rz(0.1 * rng.range(60) as f64, q)),
+                6..=7 => c.apply(Gate::rz_f64(0.1 * rng.range(60) as f64, q).unwrap()),
                 8..=9 => {
                     let mut qs = [q, 0, 0];
                     qs[1] = other_qubit(rng, q, num_qubits);
@@ -171,7 +171,7 @@ mod tests {
                 18 => c.apply(Gate::s(q)),
                 19 => c.apply(Gate::sdg(q)),
                 20 => c.apply(Gate::z(q)),
-                21..=23 => c.apply(Gate::rz(0.05 * rng.range(80) as f64, q)),
+                21..=23 => c.apply(Gate::rz_f64(0.05 * rng.range(80) as f64, q).unwrap()),
                 _ => unreachable!(),
             }
         }
@@ -189,7 +189,7 @@ mod tests {
                     let target = (q + 1) % width;
                     c.apply(Gate::cnot { control: q, target });
                 }
-                6..=7 => c.apply(Gate::rz(0.123 * (i as f64), q)),
+                6..=7 => c.apply(Gate::rz_f64(0.123 * (i as f64), q).unwrap()),
                 8..=9 => {
                     let c1 = q;
                     let c2 = (q + 1) % width;

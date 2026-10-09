@@ -274,7 +274,9 @@ pub(crate) fn circuit_channel(
                 splits += 1;
                 destinations.insert(*cbit);
             }
-            Gate::reset(_) | Gate::rz(..) => return Err(Error::UnsupportedOperation { index }),
+            Gate::rz(angle, _) if angle.quarter_turns().is_some() => (),
+            Gate::reset(_) => splits += 1,
+            Gate::rz(..) => return Err(Error::UnsupportedOperation { index }),
             _ => (),
         }
     }
@@ -303,6 +305,15 @@ pub(crate) fn circuit_channel(
                     operators[bit].set(col, col, Scalar::integer(1));
                 }
                 branches = split(branches, operators, Some(cbit), false);
+            }
+            Gate::reset(qubit) => {
+                let mut operators = [Matrix::zero(dim), Matrix::zero(dim)];
+                let mask = 1 << (circuit.num_qubits - 1 - qubit as usize);
+                for col in 0..dim {
+                    let bit = usize::from(col & mask != 0);
+                    operators[bit].set(col & !mask, col, Scalar::integer(1));
+                }
+                branches = split(branches, operators, None, false);
             }
             _ => apply(
                 &mut branches,
