@@ -37,10 +37,11 @@ jobs:
       - run: cargo test
       # Extended PBC fuzzers default to hundreds of cases for manual runs.
       # Sample each width once in CI so the exact mid-circuit channel checks
-      # fit the job limit; regular tests cover larger seeded sets.
-      - name: Run release-only tests and PBC fuzz samples
+      # fit the job limit; also bound the numerical stress fuzzer's case count.
+      - name: Run release-only tests and fuzz samples
         env:
           PBC_FUZZ_CASES: "4"
+          NUMERICAL_FUZZ_CASES: "128"
         run: cargo test --release -- --ignored
 
   # The release wheel matrix covers Windows and macOS, but nothing else in CI

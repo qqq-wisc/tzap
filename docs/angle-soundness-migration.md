@@ -179,3 +179,44 @@ all 121 parser tests.
 All 334 Python tests pass locally. Ruff lint and formatting, Rust formatting,
 native Python stub checking, and diff whitespace checks pass. These are local
 results; the cross-platform CI matrix has not run on this branch.
+
+### Numerical stress fuzzer
+
+`tests/numerical_fuzz.rs` generates seeded circuits on one to four qubits with
+X, CNOT, CZ, Toffoli, CCZ, named phases, and adversarial Rz angles. It checks
+CancelGates, both phase folders, CnotMin, serial/parallel fixpoint pipelines,
+repeated reverse pass order, and QASM round trips. Cases include arbitrary finite
+float bit patterns, subnormals, near-quarter angles, signed cancellation,
+overflowing sums, rational coefficient limits, mixed pi/residual angles, and
+preserved expressions. Failure diagnostics include the seed, case number,
+pipeline, and input/output QASM.
+
+The independent oracle enumerates every computational-basis input, tracking the
+output permutation and exact relative phases with test-only big rationals.
+Float values are decoded from their IEEE bits. Pi coefficients are compared
+modulo exact `2*pi`; preserved expressions remain formal parameters. Checking
+relative phases proves equivalence on arbitrary superpositions up to global
+phase, rather than merely comparing basis probabilities. Hadamards, measurement,
+reset, and approximate synthesis are outside this oracle's domain and retain
+their separate existing tests.
+
+Normal tests run 32 fixed cases and assert that each arithmetic failure category
+is exercised. The ignored release stress test defaults to 2,048 cases; CI samples
+128. Increase its size with:
+
+```sh
+NUMERICAL_FUZZ_CASES=10000 cargo test --release --test numerical_fuzz stress -- --ignored --nocapture
+```
+
+Replay a failing case using its reported decimal seed and case number:
+
+```sh
+NUMERICAL_FUZZ_SEED=123 NUMERICAL_FUZZ_START=17 NUMERICAL_FUZZ_CASES=1 \
+  cargo test --release --test numerical_fuzz stress -- --ignored --nocapture
+```
+
+The seed determines generated inputs. PhaseFoldRand's internal matching remains
+randomized; this fuzzer does not establish absence of fingerprint collisions.
+Local validation passed the 32-case bounded test, 2,048 stress cases with the
+default seed, 10,000 cases with seed zero starting at case 2,000, and a single-case
+replay. The existing 12 angle regression tests also pass.
