@@ -4,6 +4,8 @@
 //! `cz`, `measure`, `reset`, `qreg`, and `creg`. Classical conditionals
 //! (`if`), custom gate definitions (`gate`), barriers, and `include` files
 //! other than `qelib1.inc` (which is ignored) are not supported.
+//! Rz angle expressions must remain finite, and multi-qubit gates must use
+//! distinct qubit operands.
 
 use std::borrow::Cow;
 
@@ -30,19 +32,10 @@ fn subscript(part: &str) -> Option<(usize, usize)> {
     Some((open, close))
 }
 
-/// Offset of a `//` line comment. `str::find` on a two-byte needle builds a
-/// substring searcher for every line of the file.
-fn line_comment(line: &str) -> Option<usize> {
-    let bytes = line.as_bytes();
-    (1..bytes.len())
-        .find(|&i| bytes[i] == b'/' && bytes[i - 1] == b'/')
-        .map(|i| i - 1)
-}
-
 /// Parse a circuit from OpenQASM 2.0 source. See the [module docs](self) for
 /// the supported subset. Unrecognized lines produce an `Err`.
 pub fn parse(qasm: &str) -> Result<Circuit, String> {
-    let qasm = strip_block_comments(qasm);
+    let qasm = strip_comments(qasm);
     let mut registers: Vec<(String, usize, usize)> = Vec::new(); // (name, offset, size)
     let mut cregisters: Vec<(String, usize, usize)> = Vec::new();
     let mut num_qubits: usize = 0;
@@ -56,11 +49,6 @@ pub fn parse(qasm: &str) -> Result<Circuit, String> {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
-            // strip inline comments
-            let line = match line_comment(line) {
-                Some(pos) => line[..pos].trim(),
-                None => line,
-            };
             // Group the statement prefixes by first byte. Every supported
             // statement is distinguished by its first byte, so a `t q[0];` line
             // tests one prefix instead of walking fifteen failing
@@ -314,15 +302,21 @@ fn require_arity(
     expected: usize,
     line_num: usize,
 ) -> Result<(), String> {
-    if qubits.len() == expected {
-        Ok(())
-    } else {
+    if qubits.len() != expected {
         let noun = if expected == 1 { "operand" } else { "operands" };
-        Err(format!(
+        return Err(format!(
             "line {line_num}: {gate} expects {expected} qubit {noun}, got {}",
             qubits.len()
-        ))
+        ));
     }
+    for (i, q) in qubits.iter().enumerate() {
+        if qubits[..i].contains(q) {
+            return Err(format!(
+                "line {line_num}: {gate} expects distinct qubit operands, qubit {q} is repeated"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a single-qubit gate's operand, rejecting anything but exactly one
@@ -340,40 +334,61 @@ fn resolve_single_qubit(
     Ok(qubits[0])
 }
 
-/// Borrows when the source has no block comment at all — the overwhelmingly
-/// common case, where copying the whole file (tens of megabytes on the larger
-/// benchmarks) bought nothing.
-fn strip_block_comments(s: &str) -> Cow<'_, str> {
-    if !s.contains("/*") {
+/// Remove comments before splitting statements, respecting strings and the
+/// precedence of line/block comments. Keep whitespace between tokens and
+/// preserve newlines for diagnostics. Comment-free sources stay borrowed.
+fn strip_comments(s: &str) -> Cow<'_, str> {
+    if !s.contains("/*") && !s.contains("//") {
         return Cow::Borrowed(s);
     }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        match rest[start + 2..].find("*/") {
-            Some(end) => {
-                // preserve newlines so line numbers stay correct
-                for c in rest[start..start + 2 + end + 2].chars() {
-                    if c == '\n' {
-                        out.push('\n');
-                    }
-                }
-                rest = &rest[start + 2 + end + 2..];
-            }
-            None => {
-                // unclosed block comment — treat rest as comment
-                for c in rest[start..].chars() {
-                    if c == '\n' {
-                        out.push('\n');
-                    }
-                }
-                return Cow::Owned(out);
-            }
+    let bytes = s.as_bytes();
+    let mut out: Option<String> = None;
+    let (mut i, mut copied_until, mut quoted) = (0, 0, false);
+    while i < bytes.len() {
+        if quoted && bytes[i] == b'\\' {
+            i += 2;
+            continue;
         }
+        if bytes[i] == b'"' {
+            quoted = !quoted;
+        }
+        if quoted
+            || bytes[i] != b'/'
+            || i + 1 == bytes.len()
+            || !matches!(bytes[i + 1], b'/' | b'*')
+        {
+            i += 1;
+            continue;
+        }
+        let end = if bytes[i + 1] == b'/' {
+            s[i + 2..].find('\n').map_or(s.len(), |j| i + 2 + j)
+        } else {
+            // Preserve the existing handling of an unclosed block comment:
+            // everything through EOF is a comment.
+            s[i + 2..].find("*/").map_or(s.len(), |j| i + 2 + j + 2)
+        };
+        let out = out.get_or_insert_with(|| String::with_capacity(s.len()));
+        out.push_str(&s[copied_until..i]);
+        out.push(' ');
+        out.extend(s[i..end].chars().filter(|&c| c == '\n'));
+        copied_until = end;
+        i = end;
     }
-    out.push_str(rest);
-    Cow::Owned(out)
+    match out {
+        Some(mut out) => {
+            out.push_str(&s[copied_until..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(s),
+    }
+}
+
+fn finite_angle(value: f64) -> Result<f64, String> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err("angle expression must evaluate to a finite number".to_owned())
+    }
 }
 
 /// Parse an angle expression with full arithmetic support.
@@ -391,7 +406,7 @@ fn parse_angle(s: &str, line_num: usize) -> Result<f64, String> {
             "line {line_num}: unexpected token in angle expression"
         ));
     }
-    Ok(val)
+    finite_angle(val).map_err(|e| format!("line {line_num}: {e}"))
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +476,7 @@ fn tokenize_angle(s: &str) -> Result<Vec<Token>, String> {
                 let num: f64 = s[start..i]
                     .parse()
                     .map_err(|e| format!("bad number: {e}"))?;
-                tokens.push(Token::Num(num));
+                tokens.push(Token::Num(finite_angle(num)?));
             }
             _ => {
                 return Err(format!(
@@ -481,11 +496,11 @@ fn parse_expr(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
         match tokens[*pos] {
             Token::Plus => {
                 *pos += 1;
-                val += parse_term(tokens, pos)?;
+                val = finite_angle(val + parse_term(tokens, pos)?)?;
             }
             Token::Minus => {
                 *pos += 1;
-                val -= parse_term(tokens, pos)?;
+                val = finite_angle(val - parse_term(tokens, pos)?)?;
             }
             _ => break,
         }
@@ -500,11 +515,11 @@ fn parse_term(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
         match tokens[*pos] {
             Token::Star => {
                 *pos += 1;
-                val *= parse_unary(tokens, pos)?;
+                val = finite_angle(val * parse_unary(tokens, pos)?)?;
             }
             Token::Slash => {
                 *pos += 1;
-                val /= parse_unary(tokens, pos)?;
+                val = finite_angle(val / parse_unary(tokens, pos)?)?;
             }
             _ => break,
         }
@@ -788,6 +803,69 @@ mod tests {
     // --- comment parsing tests ---
 
     #[test]
+    fn semicolons_in_line_comments_never_execute_gates() {
+        for body in [
+            "// ignored; x q[0];\nh q[0];",
+            "h q[0]; // ignored; x q[0];",
+            "// ignored; x q[0];\nh q[0]; // ignored; t q[0];",
+            "// unicode λ; x q[0];\nh q[0];",
+        ] {
+            let c = parse(&format!("OPENQASM 2.0;\nqreg q[1];\n{body}")).unwrap();
+            assert_eq!(c.gates, vec![Gate::h(0)], "{body}");
+        }
+    }
+
+    #[test]
+    fn block_comment_markers_inside_line_comments_do_not_erase_gates() {
+        for body in [
+            "// /*\nh q[0];\n// */",
+            "// /* unclosed\nh q[0];",
+            "// */ /* ; x q[0];\nh q[0];",
+        ] {
+            let c = parse(&format!("OPENQASM 2.0;\nqreg q[1];\n{body}")).unwrap();
+            assert_eq!(c.gates, vec![Gate::h(0)], "{body}");
+        }
+    }
+
+    #[test]
+    fn line_comment_markers_inside_block_comments_do_not_hide_the_end() {
+        let c = parse("OPENQASM 2.0;\nqreg q[1];\n/* // ; x q[0]; */ h q[0];").unwrap();
+        assert_eq!(c.gates, vec![Gate::h(0)]);
+    }
+
+    #[test]
+    fn comment_markers_inside_strings_are_preserved() {
+        let source = "include \"directory//file/*name*/.inc\"; // /* ignored; x q[0];\nh q[0];";
+        assert_eq!(
+            strip_comments(source),
+            "include \"directory//file/*name*/.inc\";  \nh q[0];"
+        );
+        assert!(matches!(
+            strip_comments("include \"directory//file.inc\";"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn block_comments_separate_tokens_instead_of_joining_them() {
+        for gate in ["r/* comment */z(1) q[0];", "rz(1/* comment */2) q[0];"] {
+            let source = format!("OPENQASM 2.0;\nqreg q[1];\n{gate}");
+            assert!(parse(&source).is_err(), "joined tokens in {gate}");
+        }
+        let c = parse("OPENQASM 2.0;\nqreg q[1];\nh/* comment */q[0];").unwrap();
+        assert_eq!(c.gates, vec![Gate::h(0)]);
+    }
+
+    #[test]
+    fn mixed_comments_preserve_error_line_numbers() {
+        let source =
+            "OPENQASM 2.0;\r\nqreg q[1];\r\n// /* ; x q[0];\r\n/* skip\nthis */\nrz(1/0) q[0];\n";
+        let err = parse(source).unwrap_err();
+        assert!(err.contains("line 6"), "{err}");
+        assert!(err.contains("finite"), "{err}");
+    }
+
+    #[test]
     fn line_comment_only() {
         let qasm =
             "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n// just a comment\nqreg q[1];\nh q[0];\n";
@@ -912,6 +990,89 @@ t q[0];
     }
 
     // --- pi expression tests ---
+
+    #[test]
+    fn nonfinite_angles_and_intermediate_results_are_rejected() {
+        for expression in [
+            "1/0",
+            "0/0",
+            "-1/0",
+            "1e309",
+            "-1e309",
+            "1e308*2",
+            "1e308+1e308",
+            "-1e308-1e308",
+            "1/(1/0)",
+            "1/(1e308*2)",
+            "1e309/1e309",
+            "0*(1/0)",
+        ] {
+            let source = format!("OPENQASM 2.0;\nqreg q[1];\nrz({expression}) q[0];\n");
+            let err = parse(&source).unwrap_err();
+            assert!(err.contains("line 3"), "{expression}: {err}");
+            assert!(err.contains("finite"), "{expression}: {err}");
+        }
+    }
+
+    #[test]
+    fn finite_extreme_angles_and_valid_division_are_accepted() {
+        for (expression, expected) in [
+            ("0", 0.0),
+            ("1e308", 1e308),
+            ("-1e308", -1e308),
+            ("1e-300", 1e-300),
+            ("1e308/1e308", 1.0),
+            ("0/1", 0.0),
+        ] {
+            let source = format!("OPENQASM 2.0;\nqreg q[1];\nrz({expression}) q[0];\n");
+            assert_eq!(parse(&source).unwrap().gates, vec![Gate::rz(expected, 0)]);
+        }
+    }
+
+    #[test]
+    fn multi_qubit_gates_require_distinct_operands() {
+        for gate in ["cx", "cz"] {
+            for a in 0..3 {
+                for b in 0..3 {
+                    let source = format!("OPENQASM 2.0;\nqreg q[3];\n{gate} q[{a}],q[{b}];\n");
+                    let result = parse(&source);
+                    if a == b {
+                        let err = result.unwrap_err();
+                        assert!(
+                            err.contains("line 3")
+                                && err.contains(gate)
+                                && err.contains("distinct"),
+                            "{err}"
+                        );
+                    } else {
+                        assert!(result.is_ok(), "{source}");
+                    }
+                }
+            }
+        }
+        for gate in ["ccx", "ccz"] {
+            for a in 0..3 {
+                for b in 0..3 {
+                    for c in 0..3 {
+                        let source =
+                            format!("OPENQASM 2.0;\nqreg q[3];\n{gate} q[{a}],q[{b}],q[{c}];\n");
+                        let result = parse(&source);
+                        if a == b || a == c || b == c {
+                            let err = result.unwrap_err();
+                            assert!(
+                                err.contains("line 3")
+                                    && err.contains(gate)
+                                    && err.contains("distinct"),
+                                "{err}"
+                            );
+                        } else {
+                            assert!(result.is_ok(), "{source}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn rz_pi() {

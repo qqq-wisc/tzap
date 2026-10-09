@@ -108,6 +108,47 @@ fn qasm_error(dir: &Path, name: &str, contents: &str) -> String {
 }
 
 #[test]
+fn nonfinite_rz_angles_fail_before_optimization() {
+    let dir = tempfile::tempdir().unwrap();
+    for expression in ["1/0", "0/0", "1e309", "1e308*2", "1/(1/0)"] {
+        let stderr = qasm_error(
+            dir.path(),
+            "nonfinite_rz.qasm",
+            &format!("OPENQASM 2.0;\nqreg q[1];\nrz({expression}) q[0];\n"),
+        );
+        assert!(
+            stderr.contains("line 3") && stderr.contains("finite"),
+            "{expression}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn repeated_gate_operands_fail_before_optimization() {
+    let dir = tempfile::tempdir().unwrap();
+    for gate in [
+        "cx q[0],q[0]",
+        "cz q[0],q[0]",
+        "ccx q[0],q[0],q[1]",
+        "ccx q[0],q[1],q[0]",
+        "ccx q[1],q[0],q[0]",
+        "ccz q[0],q[0],q[1]",
+        "ccz q[0],q[1],q[0]",
+        "ccz q[1],q[0],q[0]",
+    ] {
+        let stderr = qasm_error(
+            dir.path(),
+            "repeated_operands.qasm",
+            &format!("OPENQASM 2.0;\nqreg q[2];\n{gate};\n"),
+        );
+        assert!(
+            stderr.contains("line 3") && stderr.contains("distinct"),
+            "{gate}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn qreg_after_gate_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let stderr = qasm_error(
