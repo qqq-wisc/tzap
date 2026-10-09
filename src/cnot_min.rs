@@ -1846,8 +1846,8 @@ mod tests {
 
     #[test]
     fn degenerate_two_qubit_gates_pass_through_untouched() {
-        // `cx q,q` is ill-formed but appears in the Feynman corpus
-        // (cycle_17_3). Interpreting it would zero a parity and leave the
+        // `cx q,q` is ill-formed but appeared in the removed Feynman
+        // benchmark cycle_17_3. Interpreting it would zero a parity and leave the
         // block's linear map singular, so it must be copied through verbatim
         // and act as a block boundary.
         for degenerate in [
