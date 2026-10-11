@@ -1,7 +1,7 @@
 //! Per-run arithmetic diagnostics, propagated explicitly into rayon workers.
 use crate::{
     angle::AngleError,
-    circuit::{Circuit, Gate},
+    circuit::Circuit,
     optimize::{Options, PassName},
 };
 use std::{
@@ -73,7 +73,7 @@ impl NumericalReport {
             ..Self::default()
         };
         for gate in &circuit.gates {
-            if let Gate::rz(a, _) = gate {
+            if let Some(a) = gate.angle() {
                 result.preserved_expressions += usize::from(a.is_preserved());
                 result.numerical_fallbacks += usize::from(a.used_numeric_fallback());
             }

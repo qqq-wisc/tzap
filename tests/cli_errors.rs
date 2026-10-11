@@ -204,9 +204,9 @@ fn unsupported_gate_is_rejected() {
     let stderr = qasm_error(
         dir.path(),
         "unsupported.qasm",
-        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\ny q[0];\n",
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\nunknown q[0];\n",
     );
-    assert!(stderr.contains("unsupported: y"), "got: {stderr}");
+    assert!(stderr.contains("unsupported: unknown"), "got: {stderr}");
 }
 
 #[test]

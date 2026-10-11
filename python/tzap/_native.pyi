@@ -17,6 +17,7 @@ def _optimize_qasm(
     level: str = "O3",
     passes: list[str] | None = None,
     fixpoint: bool = False,
+    decompose_rotations: bool = False,
     decompose_rz: bool = False,
     decompose_cz: bool = False,
     decompose_ccx: bool = False,

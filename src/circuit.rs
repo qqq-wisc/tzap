@@ -25,10 +25,23 @@ pub enum GateKind {
     Ccz,
     Measure,
     Reset,
+    P,
+    Y,
+    Sx,
+    Rx,
+    Ry,
+    Swap,
+    Cy,
+    Cp,
+    Crx,
+    Cry,
+    Crz,
+    Ch,
+    Cswap,
 }
 
 impl GateKind {
-    pub const ALL: [GateKind; 14] = [
+    pub const ALL: [GateKind; 27] = [
         Self::H,
         Self::X,
         Self::Z,
@@ -43,6 +56,19 @@ impl GateKind {
         Self::Ccz,
         Self::Measure,
         Self::Reset,
+        Self::P,
+        Self::Y,
+        Self::Sx,
+        Self::Rx,
+        Self::Ry,
+        Self::Swap,
+        Self::Cy,
+        Self::Cp,
+        Self::Crx,
+        Self::Cry,
+        Self::Crz,
+        Self::Ch,
+        Self::Cswap,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -61,6 +87,19 @@ impl GateKind {
             Self::Ccz => "ccz",
             Self::Measure => "measure",
             Self::Reset => "reset",
+            Self::P => "p",
+            Self::Y => "y",
+            Self::Sx => "sx",
+            Self::Rx => "rx",
+            Self::Ry => "ry",
+            Self::Swap => "swap",
+            Self::Cy => "cy",
+            Self::Cp => "cp",
+            Self::Crx => "crx",
+            Self::Cry => "cry",
+            Self::Crz => "crz",
+            Self::Ch => "ch",
+            Self::Cswap => "cswap",
         }
     }
 
@@ -71,13 +110,13 @@ impl GateKind {
 
 /// Compact set of [`GateKind`] values with stable canonical iteration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct GateSet(u16);
+pub struct GateSet(u32);
 
 impl GateSet {
     pub const EMPTY: Self = Self(0);
 
     /// Construct a set from already-validated bits in a constant context.
-    pub(crate) const fn from_bits_const(bits: u16) -> Self {
+    pub(crate) const fn from_bits_const(bits: u32) -> Self {
         Self(bits)
     }
 
@@ -121,11 +160,11 @@ impl GateSet {
         self.0 & !other.0 == 0
     }
 
-    pub const fn bits(self) -> u16 {
+    pub const fn bits(self) -> u32 {
         self.0
     }
 
-    pub fn from_bits(bits: u16) -> Option<Self> {
+    pub fn from_bits(bits: u32) -> Option<Self> {
         (bits & !((1 << GateKind::ALL.len()) - 1) == 0).then_some(Self(bits))
     }
 
@@ -150,7 +189,7 @@ impl fmt::Display for GateSet {
 ///
 /// Variants are lowercase to mirror their QASM gate names.
 #[allow(non_camel_case_types)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Gate {
     x(Qubit),
     h(Qubit),
@@ -183,8 +222,210 @@ pub enum Gate {
         cbit: CBit,
     },
     reset(Qubit),
+    /// Phase gate: diag(1, exp(i * lambda)). Angles are in radians.
+    p(crate::angle::Angle, Qubit),
+    /// Pauli Y: [[0, -i], [i, 0]].
+    y(Qubit),
+    /// Principal square root of X: H S H.
+    sx(Qubit),
+    /// X rotation: exp(-i * theta * X / 2), with theta in radians.
+    rx(crate::angle::Angle, Qubit),
+    /// Y rotation: exp(-i * theta * Y / 2), with theta in radians.
+    ry(crate::angle::Angle, Qubit),
+    /// Exchange the states of two distinct qubits.
+    swap(Qubit, Qubit),
+    /// Apply Y to target when control is 1.
+    cy {
+        control: Qubit,
+        target: Qubit,
+    },
+    /// Controlled phase: diag(1, 1, 1, exp(i * lambda)), in radians.
+    cp {
+        lambda: crate::angle::Angle,
+        control: Qubit,
+        target: Qubit,
+    },
+    /// Controlled exp(-i * theta * X / 2), with theta in radians.
+    crx {
+        theta: crate::angle::Angle,
+        control: Qubit,
+        target: Qubit,
+    },
+    /// Controlled exp(-i * theta * Y / 2), with theta in radians.
+    cry {
+        theta: crate::angle::Angle,
+        control: Qubit,
+        target: Qubit,
+    },
+    /// Controlled exp(-i * theta * Z / 2), with theta in radians.
+    crz {
+        theta: crate::angle::Angle,
+        control: Qubit,
+        target: Qubit,
+    },
+    /// Apply H to target when control is 1.
+    ch {
+        control: Qubit,
+        target: Qubit,
+    },
+    /// Exchange first and second when control is 1. All operands are distinct.
+    cswap {
+        control: Qubit,
+        first: Qubit,
+        second: Qubit,
+    },
 }
 
+// Controlled parameter equality must retain the relative phase of a 2π turn.
+impl PartialEq for Gate {
+    fn eq(&self, rhs: &Self) -> bool {
+        match (self, rhs) {
+            (Self::x(a), Self::x(b)) => a == b,
+            (Self::h(a), Self::h(b)) => a == b,
+            (Self::s(a), Self::s(b)) => a == b,
+            (Self::sdg(a), Self::sdg(b)) => a == b,
+            (Self::z(a), Self::z(b)) => a == b,
+            (Self::t(a), Self::t(b)) => a == b,
+            (Self::tdg(a), Self::tdg(b)) => a == b,
+            (Self::y(a), Self::y(b)) => a == b,
+            (Self::sx(a), Self::sx(b)) => a == b,
+            (Self::reset(a), Self::reset(b)) => a == b,
+            (Self::rz(a, q), Self::rz(b, r)) => q == r && a == b,
+            (Self::p(a, q), Self::p(b, r)) => q == r && a == b,
+            (Self::rx(a, q), Self::rx(b, r)) => q == r && a == b,
+            (Self::ry(a, q), Self::ry(b, r)) => q == r && a == b,
+            (
+                Self::cnot {
+                    control: a,
+                    target: b,
+                },
+                Self::cnot {
+                    control: c,
+                    target: d,
+                },
+            ) => a == c && b == d,
+            (
+                Self::cz {
+                    control: a,
+                    target: b,
+                },
+                Self::cz {
+                    control: c,
+                    target: d,
+                },
+            ) => a == c && b == d,
+            (
+                Self::cy {
+                    control: a,
+                    target: b,
+                },
+                Self::cy {
+                    control: c,
+                    target: d,
+                },
+            ) => a == c && b == d,
+            (
+                Self::ch {
+                    control: a,
+                    target: b,
+                },
+                Self::ch {
+                    control: c,
+                    target: d,
+                },
+            ) => a == c && b == d,
+            (
+                Self::ccx {
+                    control1: a,
+                    control2: b,
+                    target: c,
+                },
+                Self::ccx {
+                    control1: d,
+                    control2: e,
+                    target: f,
+                },
+            ) => a == d && b == e && c == f,
+            (
+                Self::ccz {
+                    control1: a,
+                    control2: b,
+                    target: c,
+                },
+                Self::ccz {
+                    control1: d,
+                    control2: e,
+                    target: f,
+                },
+            ) => a == d && b == e && c == f,
+            (
+                Self::cp {
+                    lambda: a,
+                    control: b,
+                    target: c,
+                },
+                Self::cp {
+                    lambda: d,
+                    control: e,
+                    target: f,
+                },
+            ) => a.literal_eq(d) && b == e && c == f,
+            (
+                Self::crx {
+                    theta: a,
+                    control: b,
+                    target: c,
+                },
+                Self::crx {
+                    theta: d,
+                    control: e,
+                    target: f,
+                },
+            ) => a.literal_eq(d) && b == e && c == f,
+            (
+                Self::cry {
+                    theta: a,
+                    control: b,
+                    target: c,
+                },
+                Self::cry {
+                    theta: d,
+                    control: e,
+                    target: f,
+                },
+            ) => a.literal_eq(d) && b == e && c == f,
+            (
+                Self::crz {
+                    theta: a,
+                    control: b,
+                    target: c,
+                },
+                Self::crz {
+                    theta: d,
+                    control: e,
+                    target: f,
+                },
+            ) => a.literal_eq(d) && b == e && c == f,
+            (Self::swap(a, b), Self::swap(c, d)) => a == c && b == d,
+            (
+                Self::cswap {
+                    control: a,
+                    first: b,
+                    second: c,
+                },
+                Self::cswap {
+                    control: d,
+                    first: e,
+                    second: f,
+                },
+            ) => a == d && b == e && c == f,
+            (Self::measure { qubit: a, cbit: b }, Self::measure { qubit: c, cbit: d }) => {
+                a == c && b == d
+            }
+            _ => false,
+        }
+    }
+}
 /// An ordered sequence of [`Gate`]s over a fixed number of qubits.
 ///
 /// Gate metadata is derived from `gates` rather than cached beside it. This
@@ -218,6 +459,16 @@ impl Circuit {
         }
     }
 
+    pub(crate) fn empty_like(&self) -> Self {
+        Self::with_cbits(self.num_qubits, self.num_cbits)
+    }
+    #[cfg(test)]
+    pub(crate) fn replacing_gates(&self, gates: Vec<Gate>) -> Self {
+        Self {
+            gates,
+            ..self.empty_like()
+        }
+    }
     /// Append `gate`.
     pub fn apply(&mut self, gate: Gate) {
         self.gates.push(gate);
@@ -258,7 +509,27 @@ impl Circuit {
 }
 
 impl Gate {
-    /// Construct a numeric Rz without accepting NaN or infinity.
+    /// Borrow the checked parameter of a phase or rotation gate.
+    pub fn angle(&self) -> Option<&crate::angle::Angle> {
+        match self {
+            Self::rz(a, _) | Self::p(a, _) | Self::rx(a, _) | Self::ry(a, _) => Some(a),
+            Self::cp { lambda: a, .. }
+            | Self::crx { theta: a, .. }
+            | Self::cry { theta: a, .. }
+            | Self::crz { theta: a, .. } => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn p_f64(theta: f64, q: Qubit) -> Result<Self, crate::angle::AngleError> {
+        Ok(Self::p(crate::angle::Angle::from_f64(theta)?, q))
+    }
+    pub fn rx_f64(theta: f64, q: Qubit) -> Result<Self, crate::angle::AngleError> {
+        Ok(Self::rx(crate::angle::Angle::from_f64(theta)?, q))
+    }
+    pub fn ry_f64(theta: f64, q: Qubit) -> Result<Self, crate::angle::AngleError> {
+        Ok(Self::ry(crate::angle::Angle::from_f64(theta)?, q))
+    }
     pub fn rz_f64(value: f64, q: Qubit) -> Result<Self, crate::angle::AngleError> {
         Ok(Self::rz(crate::angle::Angle::from_f64(value)?, q))
     }
@@ -280,6 +551,65 @@ impl Gate {
             Gate::t(q) => Gate::t(f(*q)),
             Gate::tdg(q) => Gate::tdg(f(*q)),
             Gate::rz(theta, q) => Gate::rz(theta.clone(), f(*q)),
+            Gate::p(theta, q) => Gate::p(theta.clone(), f(*q)),
+            Gate::y(q) => Gate::y(f(*q)),
+            Gate::sx(q) => Gate::sx(f(*q)),
+            Gate::rx(theta, q) => Gate::rx(theta.clone(), f(*q)),
+            Gate::ry(theta, q) => Gate::ry(theta.clone(), f(*q)),
+            Gate::swap(a, b) => Gate::swap(f(*a), f(*b)),
+            Gate::cy { control, target } => Gate::cy {
+                control: f(*control),
+                target: f(*target),
+            },
+            Gate::cp {
+                lambda,
+                control,
+                target,
+            } => Gate::cp {
+                lambda: lambda.clone(),
+                control: f(*control),
+                target: f(*target),
+            },
+            Gate::crx {
+                theta,
+                control,
+                target,
+            } => Gate::crx {
+                theta: theta.clone(),
+                control: f(*control),
+                target: f(*target),
+            },
+            Gate::cry {
+                theta,
+                control,
+                target,
+            } => Gate::cry {
+                theta: theta.clone(),
+                control: f(*control),
+                target: f(*target),
+            },
+            Gate::crz {
+                theta,
+                control,
+                target,
+            } => Gate::crz {
+                theta: theta.clone(),
+                control: f(*control),
+                target: f(*target),
+            },
+            Gate::ch { control, target } => Gate::ch {
+                control: f(*control),
+                target: f(*target),
+            },
+            Gate::cswap {
+                control,
+                first,
+                second,
+            } => Gate::cswap {
+                control: f(*control),
+                first: f(*first),
+                second: f(*second),
+            },
             Gate::cnot { control, target } => Gate::cnot {
                 control: f(*control),
                 target: f(*target),
@@ -334,6 +664,24 @@ pub(crate) fn canonical_triple<T: Copy + Ord>(a: T, b: T, c: T) -> (T, T, T) {
 }
 
 impl GateKind {
+    /// Whether the exact Clifford+T matrix engine can interpret this kind.
+    /// Parametric rotations remain boundaries even at special numeric angles.
+    pub(crate) const fn has_exact_matrix(self) -> bool {
+        !matches!(
+            self,
+            Self::Rz
+                | Self::P
+                | Self::Rx
+                | Self::Ry
+                | Self::Cp
+                | Self::Crx
+                | Self::Cry
+                | Self::Crz
+                | Self::Measure
+                | Self::Reset
+        )
+    }
+
     pub const fn of(gate: &Gate) -> Self {
         match gate {
             Gate::h(_) => Self::H,
@@ -350,6 +698,19 @@ impl GateKind {
             Gate::ccz { .. } => Self::Ccz,
             Gate::measure { .. } => Self::Measure,
             Gate::reset(_) => Self::Reset,
+            Gate::p(..) => Self::P,
+            Gate::y(_) => Self::Y,
+            Gate::sx(_) => Self::Sx,
+            Gate::rx(..) => Self::Rx,
+            Gate::ry(..) => Self::Ry,
+            Gate::swap(..) => Self::Swap,
+            Gate::cy { .. } => Self::Cy,
+            Gate::cp { .. } => Self::Cp,
+            Gate::crx { .. } => Self::Crx,
+            Gate::cry { .. } => Self::Cry,
+            Gate::crz { .. } => Self::Crz,
+            Gate::ch { .. } => Self::Ch,
+            Gate::cswap { .. } => Self::Cswap,
         }
     }
 }
@@ -365,6 +726,39 @@ impl fmt::Display for Gate {
             Gate::t(q) => write!(f, "t q{q}"),
             Gate::tdg(q) => write!(f, "tdg q{q}"),
             Gate::rz(theta, q) => write!(f, "rz({theta:.4}) q{q}"),
+            Gate::p(theta, q) => write!(f, "p({theta:.4}) q{q}"),
+            Gate::y(q) => write!(f, "y q{q}"),
+            Gate::sx(q) => write!(f, "sx q{q}"),
+            Gate::rx(theta, q) => write!(f, "rx({theta:.4}) q{q}"),
+            Gate::ry(theta, q) => write!(f, "ry({theta:.4}) q{q}"),
+            Gate::swap(a, b) => write!(f, "swap q{a}, q{b}"),
+            Gate::cy { control, target } => write!(f, "cy q{control}, q{target}"),
+            Gate::cp {
+                lambda,
+                control,
+                target,
+            } => write!(f, "cp({lambda:.4}) q{control}, q{target}"),
+            Gate::crx {
+                theta,
+                control,
+                target,
+            } => write!(f, "crx({theta:.4}) q{control}, q{target}"),
+            Gate::cry {
+                theta,
+                control,
+                target,
+            } => write!(f, "cry({theta:.4}) q{control}, q{target}"),
+            Gate::crz {
+                theta,
+                control,
+                target,
+            } => write!(f, "crz({theta:.4}) q{control}, q{target}"),
+            Gate::ch { control, target } => write!(f, "ch q{control}, q{target}"),
+            Gate::cswap {
+                control,
+                first,
+                second,
+            } => write!(f, "cswap q{control}, q{first}, q{second}"),
             Gate::cnot { control, target } => write!(f, "cnot q{control}, q{target}"),
             Gate::cz { control, target } => write!(f, "cz q{control}, q{target}"),
             Gate::ccx {
@@ -471,10 +865,29 @@ pub fn qubit_operands(gate: &Gate) -> (usize, [Qubit; 3]) {
         | Gate::t(q)
         | Gate::tdg(q)
         | Gate::rz(_, q)
+        | Gate::p(_, q)
+        | Gate::y(q)
+        | Gate::sx(q)
+        | Gate::rx(_, q)
+        | Gate::ry(_, q)
         | Gate::reset(q) => (1, [*q, 0, 0]),
-        Gate::cnot { control, target } | Gate::cz { control, target } => {
-            (2, [*control, *target, 0])
+        Gate::swap(control, target)
+        | Gate::cnot { control, target }
+        | Gate::cz { control, target }
+        | Gate::cy { control, target }
+        | Gate::ch { control, target }
+        | Gate::cp {
+            control, target, ..
         }
+        | Gate::crx {
+            control, target, ..
+        }
+        | Gate::cry {
+            control, target, ..
+        }
+        | Gate::crz {
+            control, target, ..
+        } => (2, [*control, *target, 0]),
         Gate::ccx {
             control1,
             control2,
@@ -485,6 +898,11 @@ pub fn qubit_operands(gate: &Gate) -> (usize, [Qubit; 3]) {
             control2,
             target,
         } => (3, [*control1, *control2, *target]),
+        Gate::cswap {
+            control,
+            first,
+            second,
+        } => (3, [*control, *first, *second]),
         Gate::measure { qubit, .. } => (1, [*qubit, 0, 0]),
     }
 }
@@ -492,31 +910,8 @@ pub fn qubit_operands(gate: &Gate) -> (usize, [Qubit; 3]) {
 /// Return the qubits a gate acts on. See [`qubit_operands`] for an
 /// allocation-free equivalent.
 pub fn qubits_of(gate: &Gate) -> Vec<Qubit> {
-    match gate {
-        Gate::x(q)
-        | Gate::h(q)
-        | Gate::s(q)
-        | Gate::sdg(q)
-        | Gate::z(q)
-        | Gate::t(q)
-        | Gate::tdg(q)
-        | Gate::rz(_, q)
-        | Gate::reset(q) => vec![*q],
-        Gate::cnot { control, target } | Gate::cz { control, target } => {
-            vec![*control, *target]
-        }
-        Gate::ccx {
-            control1,
-            control2,
-            target,
-        }
-        | Gate::ccz {
-            control1,
-            control2,
-            target,
-        } => vec![*control1, *control2, *target],
-        Gate::measure { qubit, .. } => vec![*qubit],
-    }
+    let (count, operands) = qubit_operands(gate);
+    operands[..count].to_vec()
 }
 
 /// Remap a gate's qubits through a lookup table: qubit i becomes its index in `qubits`.

@@ -12,6 +12,7 @@ from qiskit.dagcircuit import DAGCircuit
 from qiskit.transpiler import PassManager, TransformationPass
 from qiskit.transpiler.exceptions import TranspilerError
 
+from ._angles import angle_radians
 from ._core import optimize_qasm
 
 _ARITIES = {
@@ -23,6 +24,19 @@ _ARITIES = {
     "t": 1,
     "tdg": 1,
     "rz": 1,
+    "rx": 1,
+    "ry": 1,
+    "p": 1,
+    "y": 1,
+    "sx": 1,
+    "swap": 2,
+    "cy": 2,
+    "ch": 2,
+    "cp": 2,
+    "crx": 2,
+    "cry": 2,
+    "crz": 2,
+    "cswap": 3,
     "cx": 2,
     "cz": 2,
     "ccx": 3,
@@ -62,8 +76,7 @@ def _dag_to_qasm(dag: DAGCircuit) -> str:
         if name not in _ARITIES:
             raise TranspilerError(
                 f"tzap does not support Qiskit operation {name!r}; transpile to the "
-                "basis [x, h, s, sdg, z, t, tdg, rz, cx, cz, ccx, ccz, "
-                "measure, reset] before running TzapPass"
+                f"basis {list(_ARITIES)} before running TzapPass"
             )
         if getattr(operation, "condition", None) is not None:
             raise TranspilerError(
@@ -76,16 +89,16 @@ def _dag_to_qasm(dag: DAGCircuit) -> str:
 
         qubits = [qubit_indices[bit] for bit in node.qargs]
         operands = ",".join(f"q[{index}]" for index in qubits)
-        if name == "rz":
+        if name in ("rz", "rx", "ry", "p", "cp", "crx", "cry", "crz"):
             try:
                 angle = float(operation.params[0])
             except (IndexError, TypeError, ValueError) as error:
                 raise TranspilerError(
-                    "tzap requires rz angles to be bound real numbers"
+                    f"tzap requires {name} angles to be bound real numbers"
                 ) from error
             if not math.isfinite(angle):
-                raise TranspilerError("tzap requires finite rz angles")
-            lines.append(f"rz({angle!r}) {operands};")
+                raise TranspilerError(f"tzap requires finite {name} angles")
+            lines.append(f"{name}({angle!r}) {operands};")
         elif name == "measure":
             if len(node.cargs) != 1:
                 raise TranspilerError("measure must target exactly one classical bit")
@@ -118,10 +131,12 @@ def _rebuild_on_original_bits(
             continue
 
         name, operands = statement.split(" ", 1)
-        if name.startswith("rz("):
-            close = name.rfind(")")
-            angle = float(name[3:close])
-            flat.rz(angle, _indices(operands)[0])
+        if "(" in name:
+            gate_name, angle_text = name.split("(", 1)
+            gate_name = {"u1": "p", "cu1": "cp"}.get(gate_name, gate_name)
+            getattr(flat, gate_name)(
+                angle_radians(angle_text[:-1]), *_indices(operands)
+            )
         elif name == "reset":
             flat.reset(_indices(operands)[0])
         else:
@@ -162,6 +177,7 @@ class TzapPass(TransformationPass):
         level: str = "O3",
         passes: Iterable[str] | None = None,
         fixpoint: bool = False,
+        decompose_rotations: bool = False,
         decompose_rz: bool = False,
         decompose_cz: bool = False,
         decompose_ccx: bool = False,
@@ -177,6 +193,7 @@ class TzapPass(TransformationPass):
             "level": level,
             "passes": None if passes is None else tuple(passes),
             "fixpoint": fixpoint,
+            "decompose_rotations": decompose_rotations,
             "decompose_rz": decompose_rz,
             "decompose_cz": decompose_cz,
             "decompose_ccx": decompose_ccx,

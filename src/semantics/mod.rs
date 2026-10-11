@@ -154,6 +154,81 @@ fn gate_matrix(n: usize, gate: &Gate, index: usize) -> Result<Matrix, Error> {
     let one = Scalar::integer(1);
     Ok(match *gate {
         Gate::x(q) => pauli(n, q, Pauli::X),
+        Gate::y(q) => pauli(n, q, Pauli::Y),
+        Gate::cy { control, target } | Gate::ch { control, target } => {
+            let entries = if matches!(gate, Gate::cy { .. }) {
+                [
+                    [zero.clone(), Scalar::i().neg()],
+                    [Scalar::i(), zero.clone()],
+                ]
+            } else {
+                let h = Scalar::inv_sqrt_two();
+                [[h.clone(), h.clone()], [h.clone(), h.neg()]]
+            };
+            let (c, t) = (
+                1 << (n - 1 - control as usize),
+                1 << (n - 1 - target as usize),
+            );
+            let mut matrix = Matrix::zero(1 << n);
+            for col in 0..matrix.dim {
+                if col & c == 0 {
+                    matrix.set(col, col, one.clone());
+                } else {
+                    let column_bit = usize::from(col & t != 0);
+                    let base = col & !t;
+                    matrix.set(base, col, entries[0][column_bit].clone());
+                    matrix.set(base | t, col, entries[1][column_bit].clone());
+                }
+            }
+            matrix
+        }
+        Gate::cswap {
+            control,
+            first,
+            second,
+        } => {
+            let (c, a, b) = (
+                1 << (n - 1 - control as usize),
+                1 << (n - 1 - first as usize),
+                1 << (n - 1 - second as usize),
+            );
+            let mut matrix = Matrix::zero(1 << n);
+            for col in 0..matrix.dim {
+                let row = if col & c != 0 && (col & a != 0) != (col & b != 0) {
+                    col ^ a ^ b
+                } else {
+                    col
+                };
+                matrix.set(row, col, one.clone());
+            }
+            matrix
+        }
+        Gate::sx(q) => {
+            let diagonal = one.add(&Scalar::i()).half();
+            let off_diagonal = one.add(&Scalar::i().neg()).half();
+            single(
+                n,
+                q,
+                [
+                    [diagonal.clone(), off_diagonal.clone()],
+                    [off_diagonal, diagonal],
+                ],
+            )
+        }
+        Gate::swap(a, b) => {
+            let a = 1 << (n - 1 - a as usize);
+            let b = 1 << (n - 1 - b as usize);
+            let mut result = Matrix::zero(1 << n);
+            for col in 0..result.dim {
+                let row = if (col & a != 0) != (col & b != 0) {
+                    col ^ a ^ b
+                } else {
+                    col
+                };
+                result.set(row, col, Scalar::integer(1));
+            }
+            result
+        }
         Gate::z(q) => pauli(n, q, Pauli::Z),
         Gate::h(q) => {
             let a = Scalar::inv_sqrt_two();
@@ -190,7 +265,16 @@ fn gate_matrix(n: usize, gate: &Gate, index: usize) -> Result<Matrix, Error> {
             let k = angle.quarter_turns().unwrap();
             single(n, q, [[one, zero.clone()], [zero, Scalar::omega(k)]])
         }
-        Gate::rz(..) | Gate::measure { .. } | Gate::reset(_) => {
+        Gate::rz(..)
+        | Gate::p(..)
+        | Gate::rx(..)
+        | Gate::ry(..)
+        | Gate::cp { .. }
+        | Gate::crx { .. }
+        | Gate::cry { .. }
+        | Gate::crz { .. }
+        | Gate::measure { .. }
+        | Gate::reset(_) => {
             return Err(Error::UnsupportedOperation { index });
         }
     })

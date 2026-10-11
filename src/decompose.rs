@@ -1,7 +1,7 @@
 //! Gate-decomposition passes:
 //!   * `DecomposeToffoli` — rewrites every `ccx` and `ccz` into Clifford+T.
 //!   * `DecomposeCz` — rewrites every `cz` into `H · CNOT · H`.
-//!   * `DecomposeRz` — synthesizes each `rz(θ)` into Clifford+T via
+//!   * `DecomposeRotations` — lowers phase and ordinary/controlled rotations via
 //!     gridsynth (`rsgridsynth`).
 
 use std::sync::Mutex;
@@ -118,26 +118,28 @@ impl Pass for DecomposeCz {
 
 // --- Rz decomposition via gridsynth -----------------------------------------
 
-/// Synthesizes each `rz(θ)` into Clifford+T via gridsynth (`rsgridsynth`).
-pub struct DecomposeRz {
+/// Synthesizes phase and ordinary/controlled axis rotations into Clifford+T.
+pub struct DecomposeRotations {
     /// Approximation precision; smaller is more accurate but produces a
     /// larger decomposition. Defaults to `1e-10`.
     pub epsilon: f64,
 }
 
+pub type DecomposeRz = DecomposeRotations;
+
 // rsgridsynth stores working precision in process-global state. Serialize
 // configuration and synthesis so one call cannot change another's precision.
 static GRIDSYNTH_BATCH_LOCK: Mutex<()> = Mutex::new(());
 
-impl Default for DecomposeRz {
+impl Default for DecomposeRotations {
     fn default() -> Self {
         Self { epsilon: 1e-10 }
     }
 }
 
-impl Pass for DecomposeRz {
+impl Pass for DecomposeRotations {
     fn name(&self) -> &str {
-        "Rz → Clifford+T decomposition"
+        "Rotations → Clifford+T decomposition"
     }
 
     fn run(&self, circuit: &Circuit) -> Circuit {
@@ -154,7 +156,7 @@ impl std::fmt::Display for SynthesisError {
     }
 }
 impl std::error::Error for SynthesisError {}
-impl DecomposeRz {
+impl DecomposeRotations {
     /// Explicit approximate synthesis. The epsilon applies to gridsynth's
     /// numeric target, not to conversion error or the whole circuit.
     pub fn try_run(&self, circuit: &Circuit) -> Result<Circuit, SynthesisError> {
@@ -173,35 +175,24 @@ impl DecomposeRz {
             .gates
             .iter()
             .map(|gate| {
-                match gate {
-                    Gate::rz(theta, q) => {
-                        let q = *q;
-                        if theta.quarter_turns().is_some() {
-                            return Ok(theta.rotation_gates(q));
-                        }
-                        let numeric = theta
-                            .to_f64_lossy()
-                            .map_err(|e| SynthesisError(e.to_string()))?;
-                        crate::angle_stats::synthesis();
-                        let chars = synthesize_rz(numeric, epsilon);
-                        let mut gates = Vec::with_capacity(chars.len());
-                        for g in chars {
-                            match g {
-                                'H' => gates.push(Gate::h(q)),
-                                'T' => gates.push(Gate::t(q)),
-                                'S' => gates.push(Gate::s(q)),
-                                'X' => gates.push(Gate::x(q)),
-                                'I' | 'W' => {} // identity / global phase, skip
-                                c => {
-                                    return Err(SynthesisError(format!(
-                                        "unknown gridsynth gate {c:?}"
-                                    )));
-                                }
-                            }
-                        }
-                        Ok(gates)
+                if let Some(terms) = expand_controlled_rotation(gate)? {
+                    let count = terms
+                        .iter()
+                        .filter(|g| matches!(g, Gate::rz(..) | Gate::p(..)))
+                        .count();
+                    let term_epsilon = epsilon / count as f64;
+                    if term_epsilon == 0.0 {
+                        return Err(SynthesisError(
+                            "rotation synthesis epsilon underflows when split across terms".into(),
+                        ));
                     }
-                    other => Ok(vec![other.clone()]),
+                    terms
+                        .iter()
+                        .map(|g| synthesize_single_rotation(g, term_epsilon))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|groups| groups.into_iter().flatten().collect())
+                } else {
+                    synthesize_single_rotation(gate, epsilon)
                 }
             })
             .collect();
@@ -216,13 +207,128 @@ impl DecomposeRz {
     }
 }
 
+/// Expand controlled rotations exactly before projective single-qubit synthesis.
+/// Half-angles retain the literal 4π period of controlled RX/RY/RZ.
+pub(crate) fn expand_controlled_rotation(gate: &Gate) -> Result<Option<Vec<Gate>>, SynthesisError> {
+    let (theta, control, target) = match gate {
+        Gate::cp {
+            lambda,
+            control,
+            target,
+        } => (lambda, *control, *target),
+        Gate::crx {
+            theta,
+            control,
+            target,
+        }
+        | Gate::cry {
+            theta,
+            control,
+            target,
+        }
+        | Gate::crz {
+            theta,
+            control,
+            target,
+        } => (theta, *control, *target),
+        _ => return Ok(None),
+    };
+    let half = theta
+        .checked_half()
+        .map_err(|e| SynthesisError(e.to_string()))?;
+    let negative = half
+        .literal_neg()
+        .map_err(|e| SynthesisError(e.to_string()))?;
+    let mut terms = Vec::with_capacity(9);
+    if matches!(gate, Gate::cp { .. }) {
+        terms.push(Gate::p(half.clone(), control));
+    }
+    if matches!(gate, Gate::cry { .. }) {
+        terms.push(Gate::sdg(target));
+    }
+    if matches!(gate, Gate::crx { .. } | Gate::cry { .. }) {
+        terms.push(Gate::h(target));
+    }
+    let cx = Gate::cnot { control, target };
+    terms.extend([
+        Gate::rz(half, target),
+        cx.clone(),
+        Gate::rz(negative, target),
+        cx,
+    ]);
+    if matches!(gate, Gate::crx { .. } | Gate::cry { .. }) {
+        terms.push(Gate::h(target));
+    }
+    if matches!(gate, Gate::cry { .. }) {
+        terms.push(Gate::s(target));
+    }
+    Ok(Some(terms))
+}
+
+fn synthesize_single_rotation(gate: &Gate, epsilon: f64) -> Result<Vec<Gate>, SynthesisError> {
+    let (theta, q) = match gate {
+        Gate::rz(a, q) | Gate::p(a, q) | Gate::rx(a, q) | Gate::ry(a, q) => (a, *q),
+        _ => return Ok(vec![gate.clone()]),
+    };
+    let mut gates = Vec::new();
+    if matches!(gate, Gate::ry(..)) {
+        gates.push(Gate::sdg(q));
+    }
+    if matches!(gate, Gate::rx(..) | Gate::ry(..)) {
+        gates.push(Gate::h(q));
+    }
+    if theta.quarter_turns().is_some() {
+        gates.extend(theta.rotation_gates(q));
+    } else {
+        let numeric = theta
+            .to_f64_lossy()
+            .map_err(|e| SynthesisError(e.to_string()))?;
+        crate::angle_stats::synthesis();
+        for c in synthesize_rz(numeric, epsilon) {
+            match c {
+                'H' => gates.push(Gate::h(q)),
+                'T' => gates.push(Gate::t(q)),
+                'S' => gates.push(Gate::s(q)),
+                'X' => gates.push(Gate::x(q)),
+                'I' | 'W' => {}
+                _ => return Err(SynthesisError(format!("unknown gridsynth gate {c:?}"))),
+            }
+        }
+    }
+    if matches!(gate, Gate::rx(..) | Gate::ry(..)) {
+        gates.push(Gate::h(q));
+    }
+    if matches!(gate, Gate::ry(..)) {
+        gates.push(Gate::s(q));
+    }
+    Ok(gates)
+}
+
 fn synthesize_rz(theta: f64, epsilon: f64) -> Vec<char> {
     // The dependency subtracts unsigned decimal exponents when configuring
     // precision. A looser request can safely use the stricter bound of one.
     let epsilon = epsilon.min(1.0);
-    let mut config = config_from_theta_epsilon(theta, epsilon, 0, false, true);
+    let mut config =
+        config_from_theta_epsilon(bounded_synthesis_angle(theta), epsilon, 0, false, true);
     let result = gridsynth_gates(&mut config);
     result.gates.chars().collect()
+}
+
+fn bounded_synthesis_angle(theta: f64) -> f64 {
+    // Preserve ordinary synthesis, including literal 2pi and 4pi rotations.
+    // Beyond this modest interval the dependency's fixed working precision
+    // cannot reliably reduce large arguments, and its decimal conversion can
+    // change the phase of a binary64 angle by an arbitrarily large amount.
+    if theta.abs() <= 2.0 * std::f64::consts::TAU {
+        return theta;
+    }
+    // These are the same eigenphases used by the native Rz reference matrix.
+    // Unlike remainder with a rounded 2pi, native sin_cos performs argument
+    // reduction before atan2 returns a bounded phase in [-pi, pi]. This occurs
+    // only after controlled gates have expanded into unconditional rotations;
+    // any discarded synthesis phase therefore remains whole-circuit global.
+    let (sin, cos) = (theta / 2.0).sin_cos();
+    2.0 * sin.atan2(cos)
 }
 
 // --- Tests ------------------------------------------------------------------
@@ -231,6 +337,7 @@ fn synthesize_rz(theta: f64, epsilon: f64) -> Vec<char> {
 mod tests {
     use super::*;
     use crate::unitary::circuits_equiv;
+    use std::f64::consts::PI;
 
     // --- Toffoli decomposition tests ---
 
@@ -601,7 +708,7 @@ mod tests {
             target: 2,
         });
         let toffoli = DecomposeToffoli.run(&c);
-        let rz = DecomposeRz::default().run(&c);
+        let rz = DecomposeRotations::default().run(&c);
         assert!(matches!(
             toffoli.gates.as_slice(),
             [Gate::cz {
@@ -653,7 +760,7 @@ mod tests {
             crate::angle_expr::parse("pi / 5.0", 1).unwrap(),
             0,
         ));
-        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
+        let dec = DecomposeRotations { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
         assert!(!dec.gates.is_empty());
         for g in &dec.gates {
@@ -672,7 +779,7 @@ mod tests {
         c.apply(Gate::rz_f64(0.02, 0).unwrap());
         c.apply(Gate::rz_f64(0.03, 0).unwrap());
 
-        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
+        let dec = DecomposeRotations { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
         assert!(circuits_equiv(&c, &dec, 2e-3));
     }
@@ -686,7 +793,7 @@ mod tests {
             target: 1,
         });
         c.apply(Gate::t(0));
-        let dec = DecomposeRz::default().run(&c);
+        let dec = DecomposeRotations::default().run(&c);
         assert_eq!(dec.gates.len(), 3);
     }
 
@@ -706,20 +813,20 @@ mod tests {
             crate::angle_expr::parse("pi / 7.0", 1).unwrap(),
             1,
         ));
-        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
+        let dec = DecomposeRotations { epsilon: 1e-3 }.run(&c);
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
     }
 
     #[test]
     fn rz_empty_circuit() {
         let c = Circuit::new(1);
-        let dec = DecomposeRz::default().run(&c);
+        let dec = DecomposeRotations::default().run(&c);
         assert_eq!(dec.gates.len(), 0);
     }
 
     #[test]
     fn rz_default_epsilon_is_1e_10() {
-        assert_eq!(DecomposeRz::default().epsilon, 1e-10);
+        assert_eq!(DecomposeRotations::default().epsilon, 1e-10);
     }
 
     #[test]
@@ -731,7 +838,7 @@ mod tests {
             0,
         ));
         c.apply(Gate::measure { qubit: 1, cbit: 0 });
-        let dec = DecomposeRz { epsilon: 1e-3 }.run(&c);
+        let dec = DecomposeRotations { epsilon: 1e-3 }.run(&c);
         // No rz survives; reset and measure both still there.
         assert!(!dec.gates.iter().any(|g| matches!(g, Gate::rz(..))));
         assert!(dec.gates.iter().any(|g| matches!(g, Gate::reset(0))));
@@ -751,8 +858,8 @@ mod tests {
             crate::angle_expr::parse("pi / 5.0", 1).unwrap(),
             0,
         ));
-        let fine = DecomposeRz { epsilon: 1e-4 }.run(&c);
-        let coarse = DecomposeRz { epsilon: 1e-2 }.run(&c);
+        let fine = DecomposeRotations { epsilon: 1e-4 }.run(&c);
+        let coarse = DecomposeRotations { epsilon: 1e-2 }.run(&c);
         let t_fine = fine
             .gates
             .iter()
@@ -767,5 +874,273 @@ mod tests {
             t_coarse <= t_fine,
             "coarser epsilon should not require more T gates ({t_coarse} > {t_fine})"
         );
+    }
+
+    fn spectral_error(input: &Circuit, output: &Circuit) -> f64 {
+        use crate::unitary::{C, circuit_unitary};
+        let (a, b) = (circuit_unitary(input), circuit_unitary(output));
+        let n = a.len();
+        let overlap = a
+            .iter()
+            .flatten()
+            .zip(b.iter().flatten())
+            .fold(C::ZERO, |sum, (&a, &b)| sum + a.conj() * b);
+        assert!(overlap.norm_sq().is_finite() && overlap.norm_sq() > 0.0);
+        let phase = overlap * (1.0 / overlap.norm_sq().sqrt());
+        let diff = (0..n)
+            .map(|row| {
+                (0..n)
+                    .map(|col| b[row][col] - phase * a[row][col])
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let gram = (0..n)
+            .map(|i| {
+                (0..n)
+                    .map(|j| {
+                        (0..n).fold(C::ZERO, |sum, row| sum + diff[row][i].conj() * diff[row][j])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut maximum: f64 = 0.0;
+        for seed in 0..n {
+            let mut vector = vec![C::ZERO; n];
+            vector[seed] = C::ONE;
+            for _ in 0..64 {
+                let next = gram
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .zip(&vector)
+                            .fold(C::ZERO, |sum, (&entry, &v)| sum + entry * v)
+                    })
+                    .collect::<Vec<_>>();
+                let norm = next.iter().map(|entry| entry.norm_sq()).sum::<f64>().sqrt();
+                assert!(norm.is_finite());
+                if norm == 0.0 {
+                    break;
+                }
+                vector = next.into_iter().map(|entry| entry * (1.0 / norm)).collect();
+            }
+            let error = diff
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .zip(&vector)
+                        .fold(C::ZERO, |sum, (&entry, &v)| sum + entry * v)
+                        .norm_sq()
+                })
+                .sum::<f64>()
+                .sqrt();
+            maximum = maximum.max(error);
+        }
+        maximum
+    }
+
+    #[test]
+    fn bounded_synthesis_preserves_ordinary_angles_and_large_native_eigenphases() {
+        let limit = 2.0 * std::f64::consts::TAU;
+        for theta in [-limit, -7.31, -PI, -0.0, 0.0, PI, 7.31, limit] {
+            assert_eq!(bounded_synthesis_angle(theta).to_bits(), theta.to_bits());
+        }
+        for theta in [
+            f64::from_bits(limit.to_bits() + 1),
+            1e16,
+            1e20,
+            1e30,
+            f64::MAX,
+        ] {
+            for theta in [theta, -theta] {
+                let reduced = bounded_synthesis_angle(theta);
+                assert!(reduced.is_finite() && reduced.abs() <= std::f64::consts::TAU);
+                let (old_sin, old_cos) = (theta / 2.0).sin_cos();
+                let (new_sin, new_cos) = (reduced / 2.0).sin_cos();
+                assert!((new_sin - old_sin).abs() < 1e-15);
+                assert!((new_cos - old_cos).abs() < 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn large_and_extreme_native_rotations_preserve_per_gate_synthesis_precision() {
+        let epsilon = 1e-3;
+        let template = Circuit::new(2);
+        let mut checked = 0;
+        for magnitude in [
+            1e16,
+            1e20,
+            1e30,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            2.0 * PI,
+            4.0 * PI,
+        ] {
+            for theta in [magnitude, -magnitude] {
+                for (control, target) in [(0, 1), (1, 0)] {
+                    for gate in [
+                        Gate::p_f64(theta, target).unwrap(),
+                        Gate::rz_f64(theta, target).unwrap(),
+                        Gate::rx_f64(theta, target).unwrap(),
+                        Gate::ry_f64(theta, target).unwrap(),
+                        Gate::cp {
+                            lambda: crate::angle::Angle::from_f64(theta).unwrap(),
+                            control,
+                            target,
+                        },
+                        Gate::crx {
+                            theta: crate::angle::Angle::from_f64(theta).unwrap(),
+                            control,
+                            target,
+                        },
+                        Gate::cry {
+                            theta: crate::angle::Angle::from_f64(theta).unwrap(),
+                            control,
+                            target,
+                        },
+                        Gate::crz {
+                            theta: crate::angle::Angle::from_f64(theta).unwrap(),
+                            control,
+                            target,
+                        },
+                    ] {
+                        let input = template.replacing_gates(vec![
+                            Gate::h(control),
+                            Gate::h(target),
+                            Gate::cnot { control, target },
+                            gate.clone(),
+                            Gate::t(control),
+                        ]);
+                        if matches!(
+                            gate,
+                            Gate::cp { .. }
+                                | Gate::crx { .. }
+                                | Gate::cry { .. }
+                                | Gate::crz { .. }
+                        ) && theta.abs() == f64::from_bits(1)
+                        {
+                            assert!(DecomposeRotations { epsilon }.try_run(&input).is_err());
+                            continue;
+                        }
+                        let output = DecomposeRotations { epsilon }.try_run(&input).unwrap();
+                        assert!(
+                            output
+                                .gates
+                                .iter()
+                                .all(|gate| gate.kind().has_exact_matrix())
+                        );
+                        assert_eq!(
+                            (input.num_qubits, input.num_cbits),
+                            (output.num_qubits, output.num_cbits)
+                        );
+                        let error = spectral_error(&input, &output);
+                        assert!(
+                            error.is_finite() && error <= epsilon + 1e-12,
+                            "gate={gate:?}, error={error}, epsilon={epsilon}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 240);
+    }
+
+    #[test]
+    fn controlled_rotations_and_phases_synthesize_with_per_gate_error_bound() {
+        let epsilon = 1e-3;
+        for theta in [-2.0 * PI, -0.73, 0.0, PI / 2.0, 2.0 * PI, 7.31] {
+            for (control, target) in [(0, 1), (1, 0)] {
+                for gate in [
+                    Gate::p_f64(theta, target).unwrap(),
+                    Gate::cp {
+                        lambda: crate::angle::Angle::from_f64(theta).unwrap(),
+                        control,
+                        target,
+                    },
+                    Gate::crx {
+                        theta: crate::angle::Angle::from_f64(theta).unwrap(),
+                        control,
+                        target,
+                    },
+                    Gate::cry {
+                        theta: crate::angle::Angle::from_f64(theta).unwrap(),
+                        control,
+                        target,
+                    },
+                    Gate::crz {
+                        theta: crate::angle::Angle::from_f64(theta).unwrap(),
+                        control,
+                        target,
+                    },
+                ] {
+                    let input = {
+                        let mut constructed = Circuit::with_cbits(2, 0);
+                        constructed.gates =
+                            vec![Gate::h(control), Gate::h(target), gate, Gate::t(control)];
+                        constructed
+                    };
+                    let output = DecomposeRotations { epsilon }.run(&input);
+                    assert!(output.gates.iter().all(|g| matches!(
+                        g,
+                        Gate::h(_)
+                            | Gate::x(_)
+                            | Gate::s(_)
+                            | Gate::sdg(_)
+                            | Gate::t(_)
+                            | Gate::tdg(_)
+                            | Gate::cnot { .. }
+                    )));
+                    assert!(
+                        circuits_equiv(&input, &output, epsilon),
+                        "theta={theta}, control={control}, input={input}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotations_all_axes_angles_and_wires_preserve_semantics() {
+        let epsilon = 1e-3;
+        for theta in [-2.0 * PI, -PI / 2.0, -0.73, 0.0, PI / 5.0, 2.0 * PI, 7.31] {
+            for q in 0..2 {
+                for gate in [
+                    Gate::rz_f64(theta, q).unwrap(),
+                    Gate::rx_f64(theta, q).unwrap(),
+                    Gate::ry_f64(theta, q).unwrap(),
+                ] {
+                    let mut input = Circuit::new(2);
+                    input.gates = vec![
+                        Gate::h(0),
+                        Gate::cnot {
+                            control: 0,
+                            target: 1,
+                        },
+                        gate,
+                        Gate::t(1),
+                    ];
+                    let output = DecomposeRotations { epsilon }.run(&input);
+                    assert!(!output.gates.iter().any(|g| matches!(
+                        g,
+                        Gate::rz(..) | Gate::rx(..) | Gate::ry(..) | Gate::p(..)
+                    )));
+                    assert!(output.gates.iter().all(|g| matches!(
+                        g,
+                        Gate::h(_)
+                            | Gate::s(_)
+                            | Gate::sdg(_)
+                            | Gate::t(_)
+                            | Gate::x(_)
+                            | Gate::cnot { .. }
+                    )));
+                    assert!(
+                        circuits_equiv(&input, &output, 2.0 * epsilon),
+                        "theta={theta}, q={q}, input={input}"
+                    );
+                }
+            }
+        }
     }
 }

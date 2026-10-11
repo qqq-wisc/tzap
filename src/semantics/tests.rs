@@ -5,10 +5,183 @@ use crate::pbc::PauliAngle;
 mod pairs;
 
 fn gates(n: usize, gates: Vec<Gate>) -> Circuit {
-    Circuit {
-        num_qubits: n,
-        num_cbits: 0,
-        gates,
+    Circuit::with_cbits(n, 0).replacing_gates(gates)
+}
+
+#[test]
+fn native_fixed_gates_have_exact_literal_semantics() {
+    let eval = |n, gs| circuit_unitary(&gates(n, gs), Limits::default()).unwrap();
+    let y = eval(1, vec![Gate::y(0)]);
+    assert_eq!(y.get(0, 0), &Scalar::zero());
+    assert_eq!(y.get(0, 1), &Scalar::i().neg());
+    assert_eq!(y.get(1, 0), &Scalar::i());
+    assert_eq!(y.get(1, 1), &Scalar::zero());
+    let sx = eval(1, vec![Gate::sx(0)]);
+    assert_eq!(sx.get(0, 0), &Scalar::integer(1).add(&Scalar::i()).half());
+    assert_eq!(
+        sx.get(0, 1),
+        &Scalar::integer(1).add(&Scalar::i().neg()).half()
+    );
+    assert_eq!(sx.get(1, 0), sx.get(0, 1));
+    assert_eq!(sx.get(1, 1), sx.get(0, 0));
+    for n in 1..=3 {
+        for q in 0..n as u32 {
+            for (gate, expansion) in [
+                (Gate::y(q), vec![Gate::sdg(q), Gate::x(q), Gate::s(q)]),
+                (Gate::sx(q), vec![Gate::h(q), Gate::s(q), Gate::h(q)]),
+            ] {
+                let mut native = vec![Gate::h(0), Gate::t(q)];
+                let mut expanded = native.clone();
+                native.push(gate);
+                expanded.extend(expansion);
+                assert_eq!(eval(n, native), eval(n, expanded));
+            }
+        }
+        for a in 0..n as u32 {
+            for b in 0..n as u32 {
+                if a == b {
+                    continue;
+                }
+                let cx = |control, target| Gate::cnot { control, target };
+                assert_eq!(
+                    eval(n, vec![Gate::h(a), Gate::t(b), Gate::swap(a, b)]),
+                    eval(
+                        n,
+                        vec![Gate::h(a), Gate::t(b), cx(a, b), cx(b, a), cx(a, b)]
+                    ),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_exact_oracle_rejects_invalid_operands_and_arbitrary_angles() {
+    for gate in [Gate::y(2), Gate::sx(2), Gate::swap(0, 2), Gate::swap(1, 1)] {
+        assert_eq!(
+            circuit_unitary(&gates(2, vec![gate]), Limits::default()),
+            Err(Error::InvalidOperand { index: 0 })
+        );
+    }
+    // f64 angles are not rounded into the exact Clifford+T scalar domain.
+    for gate in [
+        Gate::p_f64(0.37, 0).unwrap(),
+        Gate::rx_f64(0.0, 0).unwrap(),
+        Gate::ry_f64(std::f64::consts::PI, 0).unwrap(),
+    ] {
+        assert_eq!(
+            circuit_unitary(&gates(1, vec![gate]), Limits::default()),
+            Err(Error::UnsupportedOperation { index: 0 })
+        );
+    }
+}
+
+#[test]
+fn fixed_controlled_exact_reference_matches_decompositions() {
+    let eval = |n, gs| circuit_unitary(&gates(n, gs), Limits::default()).unwrap();
+    for (control, target) in [(0, 1), (1, 0), (0, 2), (2, 1)] {
+        let cx = Gate::cnot { control, target };
+        let ch = vec![
+            Gate::cz { control, target },
+            Gate::sdg(target),
+            Gate::h(target),
+            Gate::t(target),
+            Gate::h(target),
+            Gate::s(target),
+            cx.clone(),
+            Gate::sdg(target),
+            Gate::h(target),
+            Gate::tdg(target),
+            Gate::h(target),
+            Gate::s(target),
+            cx.clone(),
+        ];
+        for (gate, terms) in [
+            (
+                Gate::cy { control, target },
+                vec![Gate::sdg(target), cx, Gate::s(target)],
+            ),
+            (Gate::ch { control, target }, ch),
+        ] {
+            assert_eq!(eval(3, vec![gate.clone()]), eval(3, terms));
+            assert_eq!(eval(3, vec![gate.clone(), gate]), eval(3, vec![]));
+        }
+        let second = 3 - control - target;
+        let gate = Gate::cswap {
+            control,
+            first: target,
+            second,
+        };
+        let cx = Gate::cnot {
+            control: target,
+            target: second,
+        };
+        assert_eq!(
+            eval(3, vec![gate]),
+            eval(
+                3,
+                vec![
+                    cx.clone(),
+                    Gate::ccx {
+                        control1: control,
+                        control2: second,
+                        target
+                    },
+                    cx
+                ]
+            )
+        );
+    }
+}
+
+#[test]
+fn controlled_exact_reference_rejects_invalid_operands_and_parametric_gates() {
+    for gate in [
+        Gate::cy {
+            control: 0,
+            target: 0,
+        },
+        Gate::ch {
+            control: 0,
+            target: 3,
+        },
+        Gate::cswap {
+            control: 0,
+            first: 1,
+            second: 1,
+        },
+    ] {
+        assert_eq!(
+            circuit_unitary(&gates(3, vec![gate]), Limits::default()),
+            Err(Error::InvalidOperand { index: 0 })
+        );
+    }
+    for gate in [
+        Gate::cp {
+            lambda: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+        Gate::crx {
+            theta: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+        Gate::cry {
+            theta: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+        Gate::crz {
+            theta: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+    ] {
+        assert_eq!(
+            circuit_unitary(&gates(2, vec![gate]), Limits::default()),
+            Err(Error::UnsupportedOperation { index: 0 })
+        );
     }
 }
 
@@ -502,6 +675,8 @@ fn gate_oracle_matches_existing_independent_numeric_interpreter() {
     for q in 0..3 {
         cases.extend([
             Gate::x(q),
+            Gate::y(q),
+            Gate::sx(q),
             Gate::z(q),
             Gate::h(q),
             Gate::s(q),
@@ -514,6 +689,7 @@ fn gate_oracle_matches_existing_independent_numeric_interpreter() {
         for b in 0..3 {
             if a != b {
                 cases.extend([
+                    Gate::swap(a, b),
                     Gate::cnot {
                         control: a,
                         target: b,

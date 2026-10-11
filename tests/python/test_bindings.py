@@ -219,6 +219,20 @@ def test_decompose_rz_removes_all_rz_gates():
     assert "rz(" not in result.qasm
 
 
+@pytest.mark.parametrize("option", ["decompose_rotations", "decompose_rz"])
+def test_rotation_options_lower_all_axes(option):
+    circuit = make_qasm("rx(-0.73) q[0]; ry(1.39) q[0]; rz(0.37) q[0];")
+    result = tzap.optimize_qasm(circuit, level="O1", rz_epsilon=1e-3, **{option: True})
+    assert not any(axis + "(" in result.qasm for axis in ("rz", "rx", "ry"))
+
+
+@pytest.mark.parametrize("pass_name", ["DecomposeRotations", "DecomposeRz"])
+def test_rotation_pass_names_lower_all_axes(pass_name):
+    circuit = make_qasm("rx(-0.73) q[0]; ry(1.39) q[0]; rz(0.37) q[0];")
+    result = tzap.optimize_qasm(circuit, passes=[pass_name], rz_epsilon=1e-3)
+    assert not any(axis + "(" in result.qasm for axis in ("rz", "rx", "ry"))
+
+
 def test_custom_pipeline_fixpoint_is_accepted():
     circuit = make_qasm("h q[0]; x q[0]; h q[0]; z q[0];")
 
@@ -294,13 +308,13 @@ def test_comments_and_angle_expressions_are_accepted():
 
 def test_invalid_qasm_raises_specific_exception():
     with pytest.raises(tzap.QasmError, match="unsupported"):
-        tzap.optimize_qasm("OPENQASM 2.0; qreg q[1]; y q[0];", level="O1")
+        tzap.optimize_qasm("OPENQASM 2.0; qreg q[1]; unknown q[0];", level="O1")
 
 
 @pytest.mark.parametrize(
     ("source", "message"),
     [
-        ("OPENQASM 2.0; qreg q[1]; y q[0];", "unsupported"),
+        ("OPENQASM 2.0; qreg q[1]; unknown q[0];", "unsupported"),
         ("OPENQASM 2.0; qreg q[1]; h q[2];", "out of range"),
         ("OPENQASM 2.0; qreg q[1]; cx q[0];", "expects 2"),
         ("OPENQASM 2.0; qreg q[1]; rz() q[0];", "angle"),

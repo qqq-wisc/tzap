@@ -277,6 +277,15 @@ pub(crate) fn circuit_channel(
             Gate::rz(angle, _) if angle.quarter_turns().is_some() => (),
             Gate::reset(_) => splits += 1,
             Gate::rz(..) => return Err(Error::UnsupportedOperation { index }),
+            Gate::p(..)
+            | Gate::rx(..)
+            | Gate::ry(..)
+            | Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. } => {
+                return Err(Error::UnsupportedOperation { index });
+            }
             _ => (),
         }
     }

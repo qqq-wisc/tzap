@@ -11,7 +11,7 @@
 //! `sqrt(2)` are removed exactly after each Hadamard. Equality and deterministic
 //! 64-bit fingerprints canonicalize the eight possible Clifford+T global
 //! phases, and every fingerprint hit is confirmed by exact matrix comparison.
-//! Rz gates are window barriers and never reach this code.
+//! Parametric gates are window barriers and never reach this code.
 
 use crate::circuit::{Gate, Qubit};
 
@@ -224,6 +224,44 @@ impl UnitaryMatrix {
         Ok(())
     }
 
+    fn apply_controlled_h_left(
+        &mut self,
+        control: usize,
+        target: usize,
+    ) -> Result<(), CoefficientOverflow> {
+        self.denominator_exponent = self
+            .denominator_exponent
+            .checked_add(1)
+            .ok_or(CoefficientOverflow)?;
+        for row0 in 0..self.dim {
+            if row0 & target != 0 {
+                continue;
+            }
+            let (top, bottom) = self.row_pair_mut(row0, row0 | target);
+            for (a, b) in top.iter_mut().zip(bottom) {
+                let (x, y) = (*a, *b);
+                if row0 & control != 0 {
+                    (*a, *b) = (
+                        x.checked_add(y).ok_or(CoefficientOverflow)?,
+                        x.checked_sub(y).ok_or(CoefficientOverflow)?,
+                    );
+                } else {
+                    // Inactive rows are unchanged, so rescale their numerator
+                    // by sqrt(2) = omega - omega^3 for the shared denominator.
+                    (*a, *b) = (
+                        x.times_omega(1)
+                            .checked_sub(x.times_omega(3))
+                            .ok_or(CoefficientOverflow)?,
+                        y.times_omega(1)
+                            .checked_sub(y.times_omega(3))
+                            .ok_or(CoefficientOverflow)?,
+                    );
+                }
+            }
+        }
+        self.normalize_denominator()
+    }
+
     /// Multiply target-one rows by a power of `omega`.
     fn apply_phase_left(&mut self, bit: usize, power: u8) {
         for row in 0..self.dim {
@@ -260,9 +298,10 @@ impl UnitaryMatrix {
         gate: &Gate,
         support: &[Qubit],
     ) -> Result<(), CoefficientOverflow> {
+        let num_qubits = self.num_qubits;
         let bit = |q: &Qubit| {
             let local = support.binary_search(q).expect("gate qubit is in support");
-            qubit_bit(self.num_qubits, local)
+            qubit_bit(num_qubits, local)
         };
         match gate {
             Gate::x(q) => self.apply_controlled_x_left(0, bit(q)),
@@ -272,7 +311,62 @@ impl UnitaryMatrix {
             Gate::z(q) => self.apply_phase_flip_left(bit(q)),
             Gate::t(q) => self.apply_phase_left(bit(q), 1),
             Gate::tdg(q) => self.apply_phase_left(bit(q), 7),
-            Gate::rz(..) => unreachable!("Rz windows are rejected before matrix construction"),
+            Gate::y(q) => {
+                // S X S-dagger gives literal Y, including its signs.
+                self.apply_phase_left(bit(q), 6);
+                self.apply_controlled_x_left(0, bit(q));
+                self.apply_phase_left(bit(q), 2);
+            }
+            Gate::sx(q) => {
+                self.apply_h_left(bit(q))?;
+                self.apply_phase_left(bit(q), 2);
+                return self.apply_h_left(bit(q));
+            }
+            Gate::swap(a, b) => {
+                let (a, b) = (bit(a), bit(b));
+                for row in 0..self.dim {
+                    if row & a == 0 && row & b != 0 {
+                        let other = row ^ a ^ b;
+                        for column in 0..self.dim {
+                            self.data
+                                .swap(row * self.dim + column, other * self.dim + column);
+                        }
+                    }
+                }
+            }
+            Gate::cy { control, target } => {
+                self.apply_phase_left(bit(target), 6);
+                self.apply_controlled_x_left(bit(control), bit(target));
+                self.apply_phase_left(bit(target), 2);
+            }
+            Gate::ch { control, target } => {
+                return self.apply_controlled_h_left(bit(control), bit(target));
+            }
+            Gate::cswap {
+                control,
+                first,
+                second,
+            } => {
+                let (control, a, b) = (bit(control), bit(first), bit(second));
+                for row in 0..self.dim {
+                    if row & control != 0 && row & a == 0 && row & b != 0 {
+                        let other = row ^ a ^ b;
+                        for col in 0..self.dim {
+                            self.data.swap(row * self.dim + col, other * self.dim + col);
+                        }
+                    }
+                }
+            }
+            Gate::rz(..)
+            | Gate::p(..)
+            | Gate::rx(..)
+            | Gate::ry(..)
+            | Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. } => {
+                unreachable!("parametric windows are rejected before matrix construction")
+            }
             Gate::cnot { control, target } => {
                 self.apply_controlled_x_left(bit(control), bit(target))
             }
@@ -416,6 +510,132 @@ mod exact_tests {
             circuit.apply(gate.clone());
         }
         circuit
+    }
+
+    #[test]
+    fn native_fixed_gates_have_exact_literal_semantics_on_every_support() {
+        for n in 1..=4 {
+            for q in 0..n as Qubit {
+                for (gate, expansion) in [
+                    (Gate::y(q), vec![Gate::sdg(q), Gate::x(q), Gate::s(q)]),
+                    (Gate::sx(q), vec![Gate::h(q), Gate::s(q), Gate::h(q)]),
+                ] {
+                    let mut native = circuit(n, &[Gate::h(0), Gate::t(q)]);
+                    let mut expanded = native.clone();
+                    native.gates.push(gate);
+                    expanded.gates.extend(expansion);
+                    assert_exactly_equal(&exact_matrix(&native), &exact_matrix(&expanded));
+                    assert_matches_floating_oracle(&native);
+                }
+                assert_exactly_equal(
+                    &exact_matrix(&circuit(n, &[Gate::y(q), Gate::y(q)])),
+                    &exact_matrix(&Circuit::new(n)),
+                );
+                assert_exactly_equal(
+                    &exact_matrix(&circuit(n, &[Gate::sx(q), Gate::sx(q)])),
+                    &exact_matrix(&circuit(n, &[Gate::x(q)])),
+                );
+            }
+            for a in 0..n as Qubit {
+                for b in 0..n as Qubit {
+                    if a == b {
+                        continue;
+                    }
+                    let cx = |control, target| Gate::cnot { control, target };
+                    let native = circuit(n, &[Gate::h(a), Gate::t(b), Gate::swap(a, b)]);
+                    let expanded =
+                        circuit(n, &[Gate::h(a), Gate::t(b), cx(a, b), cx(b, a), cx(a, b)]);
+                    assert_exactly_equal(&exact_matrix(&native), &exact_matrix(&expanded));
+                    assert_matches_floating_oracle(&native);
+                    assert_exactly_equal(
+                        &exact_matrix(&circuit(n, &[Gate::swap(a, b), Gate::swap(b, a)])),
+                        &exact_matrix(&Circuit::new(n)),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_controlled_gates_match_exact_decompositions_and_are_involutions() {
+        for n in 2..=4 {
+            for control in 0..n as Qubit {
+                for target in 0..n as Qubit {
+                    if control == target {
+                        continue;
+                    }
+                    let cx = Gate::cnot { control, target };
+                    let ch_terms = vec![
+                        Gate::cz { control, target },
+                        Gate::sdg(target),
+                        Gate::h(target),
+                        Gate::t(target),
+                        Gate::h(target),
+                        Gate::s(target),
+                        cx.clone(),
+                        Gate::sdg(target),
+                        Gate::h(target),
+                        Gate::tdg(target),
+                        Gate::h(target),
+                        Gate::s(target),
+                        cx.clone(),
+                    ];
+                    for (gate, terms) in [
+                        (
+                            Gate::cy { control, target },
+                            vec![Gate::sdg(target), cx, Gate::s(target)],
+                        ),
+                        (Gate::ch { control, target }, ch_terms),
+                    ] {
+                        let native = circuit(n, &[gate.clone()]);
+                        assert_exactly_equal(
+                            &exact_matrix(&native),
+                            &exact_matrix(&circuit(n, &terms)),
+                        );
+                        assert_matches_floating_oracle(&native);
+                        assert_exactly_equal(
+                            &exact_matrix(&circuit(n, &[gate.clone(), gate])),
+                            &exact_matrix(&Circuit::new(n)),
+                        );
+                    }
+                    for second in 0..n as Qubit {
+                        if second == control || second == target {
+                            continue;
+                        }
+                        let gate = Gate::cswap {
+                            control,
+                            first: target,
+                            second,
+                        };
+                        let terms = [
+                            Gate::cnot {
+                                control: target,
+                                target: second,
+                            },
+                            Gate::ccx {
+                                control1: control,
+                                control2: second,
+                                target,
+                            },
+                            Gate::cnot {
+                                control: target,
+                                target: second,
+                            },
+                        ];
+                        let native = circuit(n, &[gate.clone()]);
+                        assert_exactly_equal(
+                            &exact_matrix(&native),
+                            &exact_matrix(&circuit(n, &terms)),
+                        );
+                        assert_matches_floating_oracle(&native);
+                        assert_exactly_equal(
+                            &exact_matrix(&circuit(n, &[gate.clone(), gate])),
+                            &exact_matrix(&Circuit::new(n)),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -905,7 +1125,7 @@ mod exact_tests {
     }
 
     #[test]
-    #[should_panic(expected = "Rz windows are rejected before matrix construction")]
+    #[should_panic(expected = "parametric windows are rejected before matrix construction")]
     fn direct_rz_matrix_application_is_rejected() {
         let mut matrix = UnitaryMatrix::identity(1).unwrap();
         matrix

@@ -3,8 +3,8 @@
 //! The pass walks the circuit once and keeps the Clifford frame: for the
 //! Clifford prefix `U` seen so far, the row of each generator `P` (`X_q` or
 //! `Z_q`) is `U† P U`. A rotation about `P` after `U` equals a rotation about
-//! `U† P U` before it, so a T, T† or Rz on qubit `q` is a rotation about the
-//! frame's Z row of `q`, its *axis*. Two rotations about the same unsigned
+//! `U† P U` before it. RX uses the X row, RZ/P/T/T† the Z row, and RY the
+//! signed Hermitian product `i X Z`. Two rotations about the same unsigned
 //! axis merge, at the later one's position, when every live rotation recorded
 //! between them commutes with that axis. CCX and CCZ gates, measurements and
 //! resets are recorded as *blockers*: they never merge, but a fold across one
@@ -61,7 +61,10 @@ const MAX_ATTEMPT_STEPS: usize = 1 << 20;
 /// which dense wide circuits such as QFT do not recover in faster scans.
 const MAX_SLICED_QUBITS: usize = 32;
 
-/// Folds T and Rz rotations across Clifford gates, including Hadamards.
+/// Folds T/T†, P and RZ/RX/RY across Clifford gates, including Hadamards.
+/// Numeric angles never snap to Clifford angles or undergo floating modulo
+/// reduction. Checked angle arithmetic retains exact pi fractions and declines
+/// numeric merges that would round, overflow, or exceed representation limits.
 /// Can run independently or after [`crate::phase_fold_rand::PhaseFoldRand`].
 pub struct PhaseFoldPauli;
 
@@ -75,16 +78,26 @@ impl Pass for PhaseFoldPauli {
     }
 }
 
-/// Circuit rewrite up to global phase. Random fingerprints only select
-/// candidates; exact axis and commutation checks authorize every rewrite.
+/// Fold rotations using checked angle arithmetic and exact Pauli commutation.
+/// Random fingerprints only select candidates; exact checks authorize rewrites.
 pub fn phase_fold_pauli(circuit: &Circuit) -> Circuit {
     let lowered = crate::angle::lowered_if_needed(circuit);
     let circuit = &lowered;
+    let n = circuit.num_qubits;
+    if !frame_fits(n) || !well_formed(circuit) {
+        return (**circuit).clone();
+    }
     let labels: Vec<_> = (0..circuit.num_qubits)
         .map(|_| (random_label(), random_label()))
         .collect();
     let sliced = circuit.num_qubits <= MAX_SLICED_QUBITS;
     fold(circuit, &labels, MAX_ATTEMPT_STEPS, sliced)
+}
+
+fn frame_fits(n: usize) -> bool {
+    let l = n.div_ceil(64).max(1);
+    n.checked_mul(4 * l)
+        .is_some_and(|words| words <= MAX_AXIS_WORDS)
 }
 
 fn random_label() -> u128 {
@@ -102,10 +115,7 @@ fn fold(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: usize, sliced
     let l = n.div_ceil(64).max(1);
     // The exact frame has 2n rows of 2l words. Bound it before allocating it,
     // even for a circuit with very few rotations.
-    let frame_fits = n
-        .checked_mul(4 * l)
-        .is_some_and(|words| words <= MAX_AXIS_WORDS);
-    if labels.len() != n || !frame_fits || !well_formed(circuit) || !may_fold(circuit, labels) {
+    if labels.len() != n || !frame_fits(n) || !well_formed(circuit) || !may_fold(circuit, labels) {
         return circuit.clone();
     }
     let mut folder = Folder::new(labels, n, l, attempt_steps, sliced, circuit.gates.len());
@@ -118,7 +128,7 @@ fn fold(circuit: &Circuit, labels: &[(u128, u128)], attempt_steps: usize, sliced
 }
 
 /// Every gate kind is handled; the input must only be well formed (qubits
-/// in range and distinct, finite Rz angles). Anything else is left as is.
+/// in range and distinct, finite angles). Anything else is left as is.
 fn well_formed(circuit: &Circuit) -> bool {
     let n = circuit.num_qubits;
     circuit.gates.iter().all(|g| {
@@ -136,7 +146,7 @@ fn may_fold(circuit: &Circuit, labels: &[(u128, u128)]) -> bool {
     let mut rotations = circuit
         .gates
         .iter()
-        .filter(|g| matches!(g, Gate::t(_) | Gate::tdg(_) | Gate::rz(..)));
+        .filter(|g| RotationKind::of(g).is_some());
     if rotations.nth(1).is_none() {
         return false;
     }
@@ -144,18 +154,42 @@ fn may_fold(circuit: &Circuit, labels: &[(u128, u128)]) -> bool {
     let mut seen = FxHashSet::default();
     for gate in &circuit.gates {
         match *gate {
-            Gate::t(q) | Gate::tdg(q) | Gate::rz(_, q) => {
+            Gate::t(q)
+            | Gate::tdg(q)
+            | Gate::rz(_, q)
+            | Gate::rx(_, q)
+            | Gate::ry(_, q)
+            | Gate::p(_, q) => {
+                let kind = RotationKind::of(gate).unwrap();
                 let angle = Angle::of(gate);
                 if angle.is_clifford() {
                     if let Some(clifford) = angle.clifford_gate(q) {
+                        if matches!(kind, RotationKind::X | RotationKind::Y) {
+                            if kind == RotationKind::Y {
+                                sketch.apply(&Gate::sdg(q));
+                            }
+                            sketch.apply(&Gate::h(q));
+                        }
                         sketch.apply(&clifford);
+                        if matches!(kind, RotationKind::X | RotationKind::Y) {
+                            sketch.apply(&Gate::h(q));
+                            if kind == RotationKind::Y {
+                                sketch.apply(&Gate::s(q));
+                            }
+                        }
                     }
-                } else if !seen.insert(sketch.z[q as usize]) {
+                } else if !seen.insert(sketch.axis(kind, q)) {
                     return true;
                 }
             }
             // No frame change, as in the main scan.
             Gate::measure { .. } | Gate::reset(_) | Gate::ccx { .. } | Gate::ccz { .. } => {}
+            Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. }
+            | Gate::ch { .. }
+            | Gate::cswap { .. } => seen.clear(),
             _ => sketch.apply(gate),
         }
     }
@@ -182,6 +216,7 @@ struct Replacement {
     gate: usize,
     qubit: u32,
     angle: Angle,
+    kind: RotationKind,
 }
 
 impl Folder {
@@ -206,7 +241,14 @@ impl Folder {
     /// Scan gate `idx`. `None` once axis storage is full.
     fn step(&mut self, idx: usize, gate: &Gate) -> Option<()> {
         match *gate {
-            Gate::t(q) | Gate::tdg(q) | Gate::rz(_, q) => self.rotation(idx, q, Angle::of(gate)),
+            Gate::t(q)
+            | Gate::tdg(q)
+            | Gate::rz(_, q)
+            | Gate::rx(_, q)
+            | Gate::ry(_, q)
+            | Gate::p(_, q) => {
+                self.rotation(idx, q, RotationKind::of(gate).unwrap(), Angle::of(gate))
+            }
             Gate::ccx {
                 control1,
                 control2,
@@ -234,6 +276,18 @@ impl Folder {
                 self.history.record_blocker(&self.exact.z[q].words)?;
                 self.history.record_blocker(&self.exact.x[q].words)
             }
+            Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. }
+            | Gate::ch { .. }
+            | Gate::cswap { .. } => {
+                // Start a new segment. The retained frame is merely a common
+                // change of Pauli basis for axes within that segment; no
+                // candidate can cross the unsupported operation.
+                self.history.newest.clear();
+                Some(())
+            }
             _ => {
                 self.apply_clifford(gate);
                 Some(())
@@ -241,18 +295,16 @@ impl Folder {
         }
     }
 
-    /// A T, T† or Rz on `q` at gate `idx`: merge it into the newest earlier
+    /// A single-qubit rotation: merge it into the newest earlier
     /// rotation it can reach, or record it for later ones to merge into.
-    fn rotation(&mut self, idx: usize, q: u32, angle: Angle) -> Option<()> {
+    fn rotation(&mut self, idx: usize, q: u32, kind: RotationKind, angle: Angle) -> Option<()> {
         if angle.is_clifford() {
             // An Rz by a multiple of pi/2 is part of the frame.
-            self.apply_clifford_angle(angle, q);
+            self.apply_clifford_angle(angle, q, kind);
             return Some(());
         }
-        let hash = self.sketch.z[q as usize];
-        let row = &self.exact.z[q as usize];
-        let sign = row.sign();
-        self.axis.clone_from(&row.words);
+        let hash = self.sketch.axis(kind, q);
+        let sign = self.exact.axis(kind, q, &mut self.axis);
         let mut angle = angle;
         let mut input_gates = 1;
         if let Some(id) = self.history.partner(hash, &self.axis) {
@@ -271,11 +323,12 @@ impl Folder {
                     gate: idx,
                     qubit: q,
                     angle: merged.clone(),
+                    kind,
                 });
                 if merged.is_clifford() {
                     // S, S† or Z now sits here and changes every later
                     // axis; the identity leaves nothing.
-                    self.apply_clifford_angle(merged.clone(), q);
+                    self.apply_clifford_angle(merged.clone(), q, kind);
                     return Some(());
                 }
                 // A non-Clifford merged rotation stays live and may itself
@@ -322,9 +375,21 @@ impl Folder {
     }
 
     /// Apply the S, S† or Z a Clifford angle amounts to (nothing for zero).
-    fn apply_clifford_angle(&mut self, angle: Angle, q: u32) {
+    fn apply_clifford_angle(&mut self, angle: Angle, q: u32, kind: RotationKind) {
+        if matches!(kind, RotationKind::X | RotationKind::Y) {
+            if kind == RotationKind::Y {
+                self.apply_clifford(&Gate::sdg(q));
+            }
+            self.apply_clifford(&Gate::h(q));
+        }
         if let Some(gate) = angle.clifford_gate(q) {
             self.apply_clifford(&gate);
+        }
+        if matches!(kind, RotationKind::X | RotationKind::Y) {
+            self.apply_clifford(&Gate::h(q));
+            if kind == RotationKind::Y {
+                self.apply_clifford(&Gate::s(q));
+            }
         }
     }
 
@@ -338,7 +403,7 @@ impl Folder {
         if self.replacements.is_empty() && !circuit.gates.iter().any(exact_rz) {
             return circuit.clone();
         }
-        let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+        let mut output = circuit.empty_like();
         output
             .gates
             .reserve(circuit.gates.len() - self.replacements.len());
@@ -350,9 +415,9 @@ impl Folder {
                 continue;
             }
             match replacement {
-                Some(r) => r.angle.emit(&mut output, r.qubit),
-                None => match *gate {
-                    Gate::rz(_, q) if exact_rz(gate) => Angle::of(gate).emit(&mut output, q),
+                Some(r) => r.angle.emit(&mut output, r.qubit, r.kind),
+                None => match gate {
+                    Gate::rz(_, q) => Angle::of(gate).emit(&mut output, *q, RotationKind::Z),
                     _ => output.apply(gate.clone()),
                 },
             }
@@ -812,6 +877,15 @@ impl SketchFrame {
         }
     }
 
+    fn axis(&self, kind: RotationKind, q: u32) -> u128 {
+        let q = q as usize;
+        match kind {
+            RotationKind::X => self.x[q],
+            RotationKind::Y => self.x[q] ^ self.z[q],
+            RotationKind::Z | RotationKind::Phase => self.z[q],
+        }
+    }
+
     fn apply(&mut self, gate: &Gate) {
         match *gate {
             Gate::h(q) => {
@@ -828,7 +902,21 @@ impl SketchFrame {
                 self.x[c] ^= self.z[t];
                 self.x[t] ^= self.z[c];
             }
-            Gate::x(_) | Gate::z(_) => {} // only the exact row sign changes
+            Gate::swap(a, b) => {
+                self.x.swap(a as usize, b as usize);
+                self.z.swap(a as usize, b as usize);
+            }
+            Gate::sx(q) => {
+                self.apply(&Gate::h(q));
+                self.apply(&Gate::s(q));
+                self.apply(&Gate::h(q));
+            }
+            Gate::cy { control, target } => {
+                self.apply(&Gate::sdg(target));
+                self.apply(&Gate::cnot { control, target });
+                self.apply(&Gate::s(target));
+            }
+            Gate::x(_) | Gate::y(_) | Gate::z(_) => {} // only the exact row sign changes
             _ => unreachable!("supported Clifford gate"),
         }
     }
@@ -849,6 +937,32 @@ impl ExactFrame {
         }
     }
 
+    /// Populate a reusable axis buffer and return its Hermitian sign.
+    fn axis(&self, kind: RotationKind, q: u32, axis: &mut Vec<u64>) -> i8 {
+        let q = q as usize;
+        let row = match kind {
+            RotationKind::X | RotationKind::Y => &self.x[q],
+            RotationKind::Z | RotationKind::Phase => &self.z[q],
+        };
+        axis.clone_from(&row.words);
+        if kind != RotationKind::Y {
+            return row.sign();
+        }
+        // Y = i X Z. Multiplication must retain its phase before converting
+        // to the canonical Hermitian word: XOR alone loses the axis sign.
+        let z = &self.z[q];
+        let l = axis.len() / 2;
+        let crossings = row.words[l..]
+            .iter()
+            .zip(&z.words[..l])
+            .fold(0, |acc, (a, b)| acc ^ (a & b));
+        let phase = (1 + row.phase + z.phase + 2 * (crossings.count_ones() & 1) as u8) & 3;
+        for (a, b) in axis.iter_mut().zip(&z.words) {
+            *a ^= *b;
+        }
+        Row::word_sign(axis, phase)
+    }
+
     fn apply(&mut self, gate: &Gate) {
         match *gate {
             Gate::h(q) => {
@@ -857,6 +971,24 @@ impl ExactFrame {
             }
             Gate::x(q) => self.z[q as usize].negate(),
             Gate::z(q) => self.x[q as usize].negate(),
+            Gate::y(q) => {
+                self.x[q as usize].negate();
+                self.z[q as usize].negate();
+            }
+            Gate::swap(a, b) => {
+                self.x.swap(a as usize, b as usize);
+                self.z.swap(a as usize, b as usize);
+            }
+            Gate::sx(q) => {
+                self.apply(&Gate::h(q));
+                self.apply(&Gate::s(q));
+                self.apply(&Gate::h(q));
+            }
+            Gate::cy { control, target } => {
+                self.apply(&Gate::sdg(target));
+                self.apply(&Gate::cnot { control, target });
+                self.apply(&Gate::s(target));
+            }
             Gate::s(q) | Gate::sdg(q) => {
                 // S† X S = -Y = i³ X Z and S X S† = Y = i X Z.
                 let q = q as usize;
@@ -920,12 +1052,47 @@ impl Row {
     /// with these planes (whose `Y = i X Z` factors carry the phase
     /// `i^|x ∧ z|`).
     fn sign(&self) -> i8 {
-        let (x, z) = self.words.split_at(self.words.len() / 2);
+        Self::word_sign(&self.words, self.phase)
+    }
+
+    fn word_sign(words: &[u64], phase: u8) -> i8 {
+        let (x, z) = words.split_at(words.len() / 2);
         let ys: u32 = x.iter().zip(z).map(|(x, z)| (x & z).count_ones()).sum();
-        match (self.phase + 4 - (ys & 3) as u8) & 3 {
+        match (phase + 4 - (ys & 3) as u8) & 3 {
             0 => 1,
             2 => -1,
             _ => unreachable!("Clifford conjugation preserves Hermiticity"),
+        }
+    }
+}
+
+/// Physical rotation at the later gate's position. P shares the Z axis but
+/// retains its native spelling; its scalar phase is irrelevant to this pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RotationKind {
+    X,
+    Y,
+    Z,
+    Phase,
+}
+
+impl RotationKind {
+    fn of(gate: &Gate) -> Option<Self> {
+        match gate {
+            Gate::rx(..) => Some(Self::X),
+            Gate::ry(..) => Some(Self::Y),
+            Gate::rz(..) | Gate::t(_) | Gate::tdg(_) => Some(Self::Z),
+            Gate::p(..) => Some(Self::Phase),
+            _ => None,
+        }
+    }
+
+    fn gate(self, theta: crate::angle::Angle, q: u32) -> Gate {
+        match self {
+            Self::X => Gate::rx(theta, q),
+            Self::Y => Gate::ry(theta, q),
+            Self::Z => Gate::rz(theta, q),
+            Self::Phase => Gate::p(theta, q),
         }
     }
 }
@@ -950,10 +1117,17 @@ impl Angle {
             _ => None,
         }
     }
-    fn emit(&self, output: &mut Circuit, q: u32) {
-        self.0.emit(output, q);
+    fn emit(&self, output: &mut Circuit, q: u32, kind: RotationKind) {
+        if kind == RotationKind::Z {
+            self.0.emit(output, q);
+        } else if !self.0.is_zero() {
+            output.apply(kind.gate(self.0.normalized(), q));
+        }
     }
 }
+
+#[cfg(test)]
+mod rotation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1038,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn merges_rz_and_t_across_commuting_rotations() {
+    fn numeric_and_named_angles_merge_across_commuting_rotations() {
         let mut c = Circuit::new(2);
         c.apply(Gate::t(0));
         c.apply(Gate::h(0));
@@ -1053,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn opposite_sign_rz_and_t_cancel() {
+    fn numeric_pi_can_cancel_named_t_in_a_mixed_fold() {
         let mut c = Circuit::new(1);
         c.apply(Gate::rz(
             crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
@@ -1067,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn rz_can_fold_to_clifford_and_change_the_frame() {
+    fn named_t_can_fold_to_clifford_and_change_the_frame() {
         let mut c = Circuit::new(1);
         c.apply(Gate::rz(
             crate::angle_expr::parse("pi / 4.0", 1).unwrap(),
@@ -1499,13 +1673,7 @@ mod tests {
         let out = phase_fold_pauli(&c);
         assert_eq!(count_t(&out), 1, "{:?}", out.gates);
         let at = out.gates.iter().position(|g| *g == Gate::reset(0)).unwrap();
-        assert_eq!(
-            count_t(&Circuit {
-                gates: out.gates[at..].to_vec(),
-                ..c.clone()
-            }),
-            0
-        );
+        assert_eq!(count_t(&c.replacing_gates(out.gates[at..].to_vec())), 0);
     }
 
     /// An attempt whose interval exceeds its budget is treated as blocked;

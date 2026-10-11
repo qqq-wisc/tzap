@@ -108,7 +108,7 @@ def test_module_missing_file_is_reported_without_traceback(tmp_path):
 def test_module_bad_qasm_is_reported_without_traceback(tmp_path):
     source = tmp_path / "bad.qasm"
     source.write_text(
-        "OPENQASM 2.0; qreg q[1]; y q[0];",
+        "OPENQASM 2.0; qreg q[1]; unknown q[0];",
         encoding="utf-8",
     )
 
@@ -140,7 +140,8 @@ def test_module_reports_output_write_failures_without_traceback(tmp_path):
     assert "Traceback" not in completed.stderr
 
 
-def test_main_forwards_every_optimizer_flag(monkeypatch, tmp_path):
+@pytest.mark.parametrize("rotation_flag", ["--decompose-rotations", "--decompose-rz"])
+def test_main_forwards_every_optimizer_flag(monkeypatch, tmp_path, rotation_flag):
     source = tmp_path / "input.qasm"
     source.write_text(QASM, encoding="utf-8")
     captured = {}
@@ -157,7 +158,7 @@ def test_main_forwards_every_optimizer_flag(monkeypatch, tmp_path):
             str(source),
             "-Osuper",
             "--fixpoint",
-            "--decompose-rz",
+            rotation_flag,
             "--decompose-cz",
             "--decompose-ccx",
             "--superopt-gates",
@@ -175,7 +176,7 @@ def test_main_forwards_every_optimizer_flag(monkeypatch, tmp_path):
             "level": "Osuper",
             "passes": None,
             "fixpoint": True,
-            "decompose_rz": True,
+            "decompose_rotations": True,
             "decompose_cz": True,
             "decompose_ccx": True,
             "superopt_gates": "base",

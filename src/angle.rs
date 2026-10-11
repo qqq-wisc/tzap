@@ -255,6 +255,30 @@ impl std::hash::Hash for Angle {
     }
 }
 impl Angle {
+    /// Compare literal values without the projective 2π rotation equivalence.
+    pub(crate) fn literal_eq(&self, rhs: &Self) -> bool {
+        match (self.components(), rhs.components()) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self == rhs,
+            _ => false,
+        }
+    }
+    /// Exact half-angle for controlled lowering; never reduce modulo 2π.
+    pub(crate) fn checked_half(&self) -> Result<Self, AngleError> {
+        let (pi, r) = self.components().ok_or(AngleError::PreservedExpression)?;
+        let half = r.get() / 2.0;
+        if half * 2.0 != r.get() {
+            return Err(AngleError::RoundedAddition);
+        }
+        Ok(Self::affine(
+            pi.checked_div(PiFraction::new(2, 1)?)?,
+            FiniteF64::new(half)?,
+        ))
+    }
+    pub(crate) fn literal_neg(&self) -> Result<Self, AngleError> {
+        let (pi, r) = self.components().ok_or(AngleError::PreservedExpression)?;
+        Ok(Self::affine(pi.checked_neg()?, FiniteF64::new(-r.get())?))
+    }
     pub fn from_f64(value: f64) -> Result<Self, AngleError> {
         Ok(Self(Value::Float(FiniteF64::new(value)?)))
     }
@@ -430,7 +454,7 @@ impl Angle {
             Gate::s(_) => Some(Self::turns(2)),
             Gate::sdg(_) => Some(Self::turns(6)),
             Gate::z(_) => Some(Self::turns(4)),
-            Gate::rz(a, _) => Some(a.clone()),
+            Gate::rz(a, _) | Gate::p(a, _) | Gate::rx(a, _) | Gate::ry(a, _) => Some(a.clone()),
             _ => None,
         }
     }

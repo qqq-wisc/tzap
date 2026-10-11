@@ -270,7 +270,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     let mut visualize_pbc: Option<String> = None;
     let mut pbc_expansion_budget: Option<usize> = None;
     let mut pbc_max_weight: Option<std::num::NonZeroUsize> = None;
-    let mut decompose_rz = false;
+    let mut decompose_rotations = false;
     let mut decompose_cz = false;
     let mut decompose_ccx = false;
     let mut rz_epsilon: f64 = DEFAULT_RZ_EPSILON;
@@ -299,7 +299,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
         match args[i].as_str() {
             "--help" | "-h" => help = true,
             "--version" | "-v" | "-V" => version = true,
-            "--decompose-rz" => decompose_rz = true,
+            "--decompose-rotations" | "--decompose-rz" => decompose_rotations = true,
             "--to-pbc" => to_pbc = true,
             "--pbc-no-opt" => pbc_no_opt = true,
             "--decompose-cz" => decompose_cz = true,
@@ -506,7 +506,7 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
         arg_error(
             "missing required <input.qasm> argument\n\n  \
              Usage: tzap <input.qasm> [-o output.qasm] [-O1|-O2|-O3|-Osuper] \
-             [--decompose-ccx] [--decompose-cz] [--decompose-rz] [--passes <list>] \
+             [--decompose-ccx] [--decompose-cz] [--decompose-rotations] [--passes <list>] \
              [--parallel|--no-parallel] [--fixpoint]\n  \
              Pass - to read the circuit from stdin.\n  \
              Run `tzap --help` for the full option list.",
@@ -516,9 +516,9 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
     if optimization_level.is_some() && (passes.is_some() || fixpoint) {
         arg_error("-O1, -O2, -O3, and -Osuper cannot be combined with --passes or --fixpoint");
     }
-    if passes.is_some() && (decompose_rz || decompose_cz || decompose_ccx) {
+    if passes.is_some() && (decompose_rotations || decompose_cz || decompose_ccx) {
         arg_error(
-            "--passes cannot be combined with --decompose-rz, --decompose-cz, or --decompose-ccx \
+            "--passes cannot be combined with --decompose-rotations, --decompose-cz, or --decompose-ccx \
              — list the corresponding decomposition passes instead",
         );
     }
@@ -557,10 +557,10 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
         let requested = [
             (decompose_ccx, PassName::DecomposeToffoli),
             (decompose_cz, PassName::DecomposeCz),
-            (decompose_rz, PassName::DecomposeRz),
+            (decompose_rotations, PassName::DecomposeRotations),
         ];
         passes = Some(requested.iter().filter(|r| r.0).map(|r| r.1).collect());
-        (decompose_ccx, decompose_cz, decompose_rz) = (false, false, false);
+        (decompose_ccx, decompose_cz, decompose_rotations) = (false, false, false);
     }
     to_pbc |= pbc_passes.0;
     if pbc_expansion_budget.is_some() && !to_pbc && visualize_pbc.is_none() {
@@ -621,7 +621,8 @@ pub(crate) fn parse_args(args: &[String]) -> Opts {
                 level: optimization_level.unwrap_or(Level::O3),
                 passes,
                 fixpoint,
-                decompose_rz,
+                decompose_rotations,
+                decompose_rz: false,
                 decompose_cz,
                 decompose_ccx,
                 rz_epsilon,
@@ -684,9 +685,10 @@ fn print_help(ui: &Ui) {
         "    {bold}--decompose-cz{reset}   Decompose CZ gates into H+CX+H\n"
     ));
     out.push_str(&format!(
-        "    {bold}--decompose-rz{reset}   Decompose Rz gates into Clifford+T (gridsynth)\n"
+        "    {bold}--decompose-rotations{reset}   Decompose P, Rz/Rx/Ry, CP, CRz/CRx/CRy into Clifford+T (gridsynth)\n"
     ));
-    out.push_str(&format!("    {bold}--epsilon{reset} <eps>  Approximation epsilon for --decompose-rz (default: 1e-10)\n"));
+    out.push_str("                     --decompose-rz is a compatibility alias.\n");
+    out.push_str(&format!("    {bold}--epsilon{reset} <eps>  Approximation epsilon for --decompose-rotations (default: 1e-10)\n"));
     out.push_str(&format!(
         "    {bold}--superopt-gates{reset} <basis>  MURM basis: auto (default), base, or a\n"
     ));
@@ -704,7 +706,7 @@ fn print_help(ui: &Ui) {
     out.push_str(&format!("    {bold}--passes{reset} <list>  Run these passes in order, overriding the default pipeline\n"));
     out.push_str("                     (see PASSES). Excludes --decompose-* — list the\n");
     out.push_str("                     corresponding decomposition pass names directly.\n");
-    out.push_str("                     --epsilon still configures DecomposeRz.\n");
+    out.push_str("                     --epsilon still configures DecomposeRotations.\n");
     out.push_str(&format!(
         "    {bold}--fixpoint{reset}       Repeat the pipeline until gate count stops decreasing\n"
     ));

@@ -1,10 +1,11 @@
 //! OpenQASM 2.0 parser and serializer.
 //!
-//! Supports `h`, `x`, `z`, `s`, `sdg`, `t`, `tdg`, `rz`, `cx`, `ccx`, `ccz`,
-//! `cz`, `measure`, `reset`, `qreg`, and `creg`. Classical conditionals
+//! Supports Clifford+T, phase and axis rotations, controlled Y/H/phase/rotations,
+//! SWAP/CSWAP, CX/CZ/CCX/CCZ, measurement, reset, and register declarations.
+//! Classical conditionals
 //! (`if`), custom gate definitions (`gate`), barriers, and `include` files
 //! other than `qelib1.inc` (which is ignored) are not supported.
-//! Rz angle expressions must remain finite, and multi-qubit gates must use
+//! Angle expressions must remain finite, and multi-qubit gates must use
 //! distinct qubit operands.
 
 use std::borrow::Cow;
@@ -103,12 +104,18 @@ pub fn parse(qasm: &str) -> Result<Circuit, String> {
                 &[]
             }
             b'q' => &["qreg"],
-            b'c' => &["creg", "cx ", "ccz ", "ccx ", "cz "],
+            b'c' => &[
+                "creg", "cx ", "ccz ", "ccx ", "cz ", "cy ", "ch ", "cswap ", "cp(", "cu1(",
+                "crx(", "cry(", "crz(",
+            ],
             b'm' => &["measure "],
-            b'r' => &["reset ", "rz("],
+            b'r' => &["reset ", "rz(", "rx(", "ry("],
             b'h' => &["h "],
             b'x' => &["x "],
-            b's' => &["s ", "sdg "],
+            b's' => &["s ", "sdg ", "sx ", "swap "],
+            b'y' => &["y "],
+            b'p' => &["p("],
+            b'u' => &["u1("],
             b't' => &["tdg ", "t "],
             b'z' => &["z "],
             _ => &[],
@@ -258,14 +265,85 @@ pub fn parse(qasm: &str) -> Result<Circuit, String> {
                     "t", rest, &registers, line_num,
                 )?));
             }
-            "rz(" => {
+            "cy " | "ch " | "swap " | "cswap " => {
                 seen_gate = true;
-                let paren_end = find_matching_paren(rest)
-                    .ok_or_else(|| format!("line {line_num}: rz missing closing ')': {line}"))?;
+                let name = keyword.trim();
+                let qubits = resolve_qubits(rest, &registers, line_num)?;
+                require_arity(name, &qubits, if name == "cswap" { 3 } else { 2 }, line_num)?;
+                gates.push(match name {
+                    "cy" => Gate::cy {
+                        control: qubits[0],
+                        target: qubits[1],
+                    },
+                    "ch" => Gate::ch {
+                        control: qubits[0],
+                        target: qubits[1],
+                    },
+                    "swap" => Gate::swap(qubits[0], qubits[1]),
+                    "cswap" => Gate::cswap {
+                        control: qubits[0],
+                        first: qubits[1],
+                        second: qubits[2],
+                    },
+                    _ => unreachable!(),
+                });
+            }
+            "y " | "sx " => {
+                seen_gate = true;
+                let name = keyword.trim();
+                let q = resolve_single_qubit(name, rest, &registers, line_num)?;
+                gates.push(if name == "y" { Gate::y(q) } else { Gate::sx(q) });
+            }
+            "cp(" | "cu1(" | "crx(" | "cry(" | "crz(" => {
+                seen_gate = true;
+                let name = keyword.trim_end_matches('(');
+                let end = find_matching_paren(rest).ok_or_else(|| {
+                    format!("line {line_num}: {name} missing closing ')': {line}")
+                })?;
+                let theta = parse_angle(&rest[..end], line_num)?;
+                let qs = resolve_qubits(&rest[end + 1..], &registers, line_num)?;
+                require_arity(name, &qs, 2, line_num)?;
+                let (control, target) = (qs[0], qs[1]);
+                gates.push(match name {
+                    "cp" | "cu1" => Gate::cp {
+                        lambda: theta,
+                        control,
+                        target,
+                    },
+                    "crx" => Gate::crx {
+                        theta,
+                        control,
+                        target,
+                    },
+                    "cry" => Gate::cry {
+                        theta,
+                        control,
+                        target,
+                    },
+                    "crz" => Gate::crz {
+                        theta,
+                        control,
+                        target,
+                    },
+                    _ => unreachable!(),
+                });
+            }
+            "rz(" | "rx(" | "ry(" | "p(" | "u1(" => {
+                seen_gate = true;
+                let name = keyword.trim_end_matches('(');
+                let paren_end = find_matching_paren(rest).ok_or_else(|| {
+                    format!("line {line_num}: {name} missing closing ')': {line}")
+                })?;
                 let theta = parse_angle(&rest[..paren_end], line_num)?;
                 let qubit =
-                    resolve_single_qubit("rz", &rest[paren_end + 1..], &registers, line_num)?;
-                gates.push(Gate::rz(theta, qubit));
+                    resolve_single_qubit(name, &rest[paren_end + 1..], &registers, line_num)?;
+                gates.push(match name {
+                    "rz" => Gate::rz(theta, qubit),
+                    "rx" => Gate::rx(theta, qubit),
+                    "ry" => Gate::ry(theta, qubit),
+                    "p" | "u1" => Gate::p(theta, qubit),
+                    _ => unreachable!(),
+                });
             }
             _ => unreachable!("keyword came from the candidate list"),
         }
@@ -296,43 +374,137 @@ pub fn serialize(circuit: &Circuit) -> String {
 fn write_gate(s: &mut String, gate: &Gate) {
     use std::fmt::Write;
     match gate {
-        Gate::x(q) => writeln!(s, "x q[{q}];"),
-        Gate::h(q) => writeln!(s, "h q[{q}];"),
-        Gate::s(q) => writeln!(s, "s q[{q}];"),
-        Gate::sdg(q) => writeln!(s, "sdg q[{q}];"),
-        Gate::z(q) => writeln!(s, "z q[{q}];"),
-        Gate::t(q) => writeln!(s, "t q[{q}];"),
-        Gate::tdg(q) => writeln!(s, "tdg q[{q}];"),
-        Gate::rz(theta, q) => {
-            if let Some((pi, r)) = theta.components() {
-                if pi.numerator() != 0 && r.get() != 0.0 {
-                    writeln!(s, "rz({}*pi/{}) q[{q}];", pi.numerator(), pi.denominator()).unwrap();
-                    return writeln!(s, "rz({}) q[{q}];", crate::angle::real_token(r.get()))
-                        .unwrap();
-                }
+        Gate::sx(q) => {
+            for term in [Gate::h(*q), Gate::s(*q), Gate::h(*q)] {
+                write_gate(s, &term);
             }
-            writeln!(s, "rz({theta}) q[{q}];")
+            return;
         }
-        Gate::cnot { control, target } => writeln!(s, "cx q[{control}],q[{target}];"),
-        Gate::cz { control, target } => writeln!(s, "cz q[{control}],q[{target}];"),
-        Gate::ccx {
-            control1,
-            control2,
+        Gate::swap(a, b) => {
+            for (control, target) in [(*a, *b), (*b, *a), (*a, *b)] {
+                write_gate(s, &Gate::cnot { control, target });
+            }
+            return;
+        }
+        Gate::crx {
+            theta,
+            control,
+            target,
+        }
+        | Gate::cry {
+            theta,
+            control,
             target,
         } => {
-            writeln!(s, "ccx q[{control1}],q[{control2}],q[{target}];")
+            if matches!(gate, Gate::cry { .. }) {
+                write_gate(s, &Gate::sdg(*target));
+            }
+            write_gate(s, &Gate::h(*target));
+            write_gate(
+                s,
+                &Gate::crz {
+                    theta: theta.clone(),
+                    control: *control,
+                    target: *target,
+                },
+            );
+            write_gate(s, &Gate::h(*target));
+            if matches!(gate, Gate::cry { .. }) {
+                write_gate(s, &Gate::s(*target));
+            }
+            return;
         }
-        Gate::ccz {
-            control1,
-            control2,
-            target,
+        Gate::cswap {
+            control,
+            first,
+            second,
         } => {
-            writeln!(s, "ccz q[{control1}],q[{control2}],q[{target}];")
+            // CSWAP is absent from the original qelib1.inc. Preserve roles and
+            // every branch phase with this exact expansion.
+            for term in [
+                Gate::cnot {
+                    control: *first,
+                    target: *second,
+                },
+                Gate::ccx {
+                    control1: *control,
+                    control2: *second,
+                    target: *first,
+                },
+                Gate::cnot {
+                    control: *first,
+                    target: *second,
+                },
+            ] {
+                write_gate(s, &term);
+            }
+            return;
         }
-        Gate::measure { qubit, cbit } => writeln!(s, "measure q[{qubit}] -> c[{cbit}];"),
-        Gate::reset(q) => writeln!(s, "reset q[{q}];"),
+        Gate::rz(theta, q)
+            if theta
+                .components()
+                .is_some_and(|(p, r)| p.numerator() != 0 && r.get() != 0.0) =>
+        {
+            let (p, r) = theta.components().unwrap();
+            write_gate(
+                s,
+                &Gate::rz(
+                    crate::angle::Angle::pi_fraction(p.numerator(), p.denominator()).unwrap(),
+                    *q,
+                ),
+            );
+            write_gate(
+                s,
+                &Gate::rz(crate::angle::Angle::from_f64(r.get()).unwrap(), *q),
+            );
+            return;
+        }
+        Gate::rz(theta, _) | Gate::rx(theta, _) | Gate::ry(theta, _) | Gate::p(theta, _) => {
+            let name = if matches!(gate, Gate::p(..)) {
+                "u1"
+            } else {
+                gate.kind().name()
+            };
+            write!(s, "{name}({theta}) ").unwrap();
+        }
+        Gate::cp { lambda, .. } => {
+            write!(s, "cu1({lambda}) ").unwrap();
+        }
+        Gate::crz { theta, .. } => {
+            write!(s, "crz({theta}) ").unwrap();
+        }
+        Gate::x(_)
+        | Gate::h(_)
+        | Gate::s(_)
+        | Gate::sdg(_)
+        | Gate::z(_)
+        | Gate::t(_)
+        | Gate::tdg(_)
+        | Gate::y(_)
+        | Gate::reset(_)
+        | Gate::measure { .. }
+        | Gate::cnot { .. }
+        | Gate::cz { .. }
+        | Gate::cy { .. }
+        | Gate::ch { .. }
+        | Gate::ccx { .. }
+        | Gate::ccz { .. } => {
+            s.push_str(gate.kind().name());
+            s.push(' ');
+        }
     }
-    .unwrap();
+    let (arity, qubits) = crate::circuit::qubit_operands(gate);
+    for (index, &qubit) in qubits[..arity].iter().enumerate() {
+        if index != 0 {
+            s.push(',');
+        }
+        write!(s, "q[{qubit}]").unwrap();
+    }
+    if let Gate::measure { cbit, .. } = *gate {
+        s.push_str(" -> ");
+        write!(s, "c[{cbit}]").unwrap();
+    }
+    s.push_str(";\n");
 }
 
 fn require_arity(
@@ -562,6 +734,25 @@ fn resolve_qubits(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_gates_reject_bad_angles_operands_and_arity() {
+        for statement in [
+            "cp(NaN) q[0],q[1]",
+            "crx(inf) q[0],q[1]",
+            "cry(0.3 q[0],q[1]",
+            "crz(pi) q[3],q[0]",
+            "cy q[0]",
+            "ch q[0],q[1],q[2]",
+            "cswap q[0],q[1]",
+            "p(0.3) q[0],q[1]",
+        ] {
+            assert!(
+                parse(&format!("qreg q[3]; {statement};")).is_err(),
+                "{statement}"
+            );
+        }
+    }
+
     use super::*;
     use std::f64::consts::PI;
 
@@ -843,11 +1034,11 @@ t q[0];
 
     #[test]
     fn unsupported_gate_error() {
-        let qasm = "OPENQASM 2.0;\nqreg q[1];\nry(0.5) q[0];\n";
+        let qasm = "OPENQASM 2.0;\nqreg q[1];\nu3(0.5,0.2,0.1) q[0];\n";
         let err = parse(qasm).unwrap_err();
         assert!(err.contains("line 3"));
         assert!(err.contains("unsupported"));
-        assert!(err.contains("ry"));
+        assert!(err.contains("u3"));
     }
 
     // --- pi expression tests ---

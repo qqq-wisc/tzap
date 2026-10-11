@@ -210,7 +210,21 @@ struct Cap {
 }
 
 fn validate(circuit: &Circuit, gate: &Gate) -> Result<(), PbcError> {
-    if matches!(gate, Gate::rz(..) | Gate::reset(_)) {
+    if !matches!(
+        gate,
+        Gate::h(_)
+            | Gate::x(_)
+            | Gate::z(_)
+            | Gate::s(_)
+            | Gate::sdg(_)
+            | Gate::t(_)
+            | Gate::tdg(_)
+            | Gate::cnot { .. }
+            | Gate::cz { .. }
+            | Gate::ccx { .. }
+            | Gate::ccz { .. }
+            | Gate::measure { .. }
+    ) {
         return Err(PbcError::UnsupportedGate(gate.kind()));
     }
     check_operands(gate, circuit.num_qubits)?;

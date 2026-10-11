@@ -254,21 +254,21 @@ def test_measurement_and_reset_order_on_same_wire_is_preserved():
 
 def test_unsupported_gate_has_actionable_error():
     circuit = QuantumCircuit(1)
-    circuit.y(0)
+    circuit.id(0)
 
-    with pytest.raises(TranspilerError, match="does not support.*'y'"):
+    with pytest.raises(TranspilerError, match="does not support.*'id'"):
         PassManager([TzapPass(level="O1")]).run(circuit)
 
 
-@pytest.mark.parametrize("operation", ["barrier", "swap", "rx", "delay"])
+@pytest.mark.parametrize("operation", ["barrier", "delay"])
 def test_other_unsupported_operations_name_the_operation(operation):
     circuit = QuantumCircuit(2)
     if operation == "barrier":
         circuit.barrier()
     elif operation == "swap":
         circuit.swap(0, 1)
-    elif operation == "rx":
-        circuit.rx(0.2, 0)
+    elif operation == "p":
+        circuit.p(0.2, 0)
     else:
         circuit.delay(10, 0)
 
@@ -429,3 +429,61 @@ def _canonical_operations(circuit):
         )
         for item in circuit.data
     ]
+
+
+@pytest.mark.parametrize("option", [None, "decompose_rotations", "decompose_rz"])
+def test_all_rotation_axes_roundtrip_and_decompose(option):
+    import numpy as np
+    from qiskit.quantum_info import Operator
+
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.rx(-0.73, 0)
+    circuit.cx(0, 1)
+    circuit.ry(1.39, 1)
+    circuit.rz(0.37, 0)
+    kwargs = {} if option is None else {option: True}
+    output = optimize(circuit, level="O1", rz_epsilon=1e-3, **kwargs)
+    expected, actual = Operator(circuit).data, Operator(output).data
+    index = np.argmax(np.abs(expected))
+    phase = expected.flat[index] / actual.flat[index]
+    phase /= abs(phase)
+    assert np.allclose(expected, phase * actual, atol=4e-3)
+    if option:
+        assert not any(
+            inst.operation.name in ("rx", "ry", "rz") for inst in output.data
+        )
+    else:
+        assert {"rx", "ry", "rz"}.issubset(output.count_ops())
+
+
+@pytest.mark.parametrize(
+    "name", ["p", "y", "sx", "swap", "cy", "cp", "crx", "cry", "crz", "ch", "cswap"]
+)
+def test_native_standard_gate_transport_preserves_unitary(name):
+    from qiskit.quantum_info import Operator
+
+    circuit = QuantumCircuit(3)
+    circuit.h(0)
+    circuit.h(2)
+    if name in ("p", "cp", "crx", "cry", "crz"):
+        args = (0.73, 2) if name == "p" else (0.73, 2, 0)
+    elif name in ("y", "sx"):
+        args = (2,)
+    elif name == "cswap":
+        args = (2, 0, 1)
+    else:
+        args = (2, 0)
+    getattr(circuit, name)(*args)
+    optimized = optimize(circuit, level="O1")
+    assert Operator(circuit).equiv(Operator(optimized))
+    serialized = optimize_qasm(_dag_to_qasm(circuit_to_dag(circuit)), level="O1").qasm
+    assert Operator(circuit).equiv(Operator(qasm2.loads(serialized)))
+    if name in ("p", "cp", "crx", "cry", "crz"):
+        lowered = optimize(
+            circuit, level="O1", decompose_rotations=True, rz_epsilon=1e-4
+        )
+        assert not set(lowered.count_ops()).intersection(
+            {"p", "cp", "crx", "cry", "crz", "rz", "rx", "ry"}
+        )
+        assert Operator(circuit).equiv(Operator(lowered), atol=1e-4)

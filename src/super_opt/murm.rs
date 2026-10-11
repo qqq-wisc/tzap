@@ -44,8 +44,9 @@ const CACHE_MAGIC: &[u8; 4] = b"MURM";
 // Version 2 introduced exact cyclotomic fingerprints, version 3 the compact
 // i8 coefficient bound, version 4 stores 64-bit rather than 128-bit keys,
 // version 5 stores the configurable gate basis, and version 6 validates the
-// complete body with a checksum and strict structural bounds.
-const CACHE_FORMAT_VERSION: u32 = 6;
+// complete body with a checksum and strict structural bounds. Version 7 widens
+// the gate-basis bitset from 16 to 32 bits.
+const CACHE_FORMAT_VERSION: u32 = 7;
 const CACHE_CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SERIALIZED_NODE_BYTES: u64 = 16;
@@ -148,13 +149,13 @@ fn read_cache_header(input: &mut impl Read, config: MurmConfig) -> io::Result<()
     input.read_exact(&mut gates_buf)?;
     let mut entries_buf = [0u8; 8];
     input.read_exact(&mut entries_buf)?;
-    let mut basis_buf = [0u8; 2];
+    let mut basis_buf = [0u8; 4];
     input.read_exact(&mut basis_buf)?;
     let stored_entries = u64::from_le_bytes(entries_buf);
     if usize::try_from(u32::from_le_bytes(qubits_buf)).ok() != Some(config.max_qubits)
         || usize::try_from(u32::from_le_bytes(gates_buf)).ok() != Some(config.max_gates)
         || u64::try_from(config.max_entries_per_qubit).ok() != Some(stored_entries)
-        || u16::from_le_bytes(basis_buf) != config.basis.bits()
+        || u32::from_le_bytes(basis_buf) != config.basis.bits()
     {
         return Err(invalid("cache config mismatch"));
     }

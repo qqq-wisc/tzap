@@ -103,13 +103,17 @@ $ tzap benchmarks/feynman/hwb12.qasm -o optimized.qasm
 tzap benchmarks/feynman/hwb12.qasm -O1 -o optimized.qasm
 ```
 
+`PhaseFoldPauli` folds native P/RX/RY/RZ rotations across commuting operations.
+It retains exact pi fractions and declines numeric sums that add rounding.
+
 **Optional decomposition**
 
-CCX, CCZ, CZ, and Rz stay native by default. To decompose them, use:
+CCX, CCZ, CZ, phase gates, and ordinary/controlled rotations stay native by default. To decompose them, use:
 
 - `--decompose-ccx` to decompose CCX and CCZ
 - `--decompose-cz` to decompose CZ into CX+H
-- `--decompose-rz` to decompose Rz via gridsynth
+- `--decompose-rotations` to decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy via gridsynth
+  (`--decompose-rz` remains a compatibility alias)
 
 **PBC circuits**
 
@@ -119,14 +123,15 @@ Use `--to-pbc` to convert a circuit to PBC and optimize its Pauli rotations:
 tzap input.qasm --to-pbc -o output.pbc
 ```
 
-Use `--decompose-rz` when the input contains Rz gates; resets are unsupported.
+Use `--decompose-rotations` for phase gates and rotations before PBC conversion.
+Native Y/SX/SWAP/CY/CH/CSWAP and resets are unsupported by PBC.
 See the [PBC guide](docs/pbc.md) for the format, options, and examples.
 
 ## Circuit support
 
 tzap supports a subset of OpenQASM 2.0:
 
-- **Gates:** `h`, `x`, `z`, `s`, `sdg`, `t`, `tdg`, `rz`, `cx`, `ccx`, `ccz`, `cz`, `measure`, `reset`
+- **Gates:** `h`, `x`, `z`, `s`, `sdg`, `t`, `tdg`, `p` (`u1`), `y`, `sx`, `rx`, `ry`, `rz`, `swap`, `cx`, `cy`, `ch`, `cp` (`cu1`), `crx`, `cry`, `crz`, `cswap`, `ccx`, `ccz`, `cz`, `measure`, `reset`
 - **Declarations:** `qreg`, `creg`
 - **Not supported:** classical conditionals (`if`), custom gate definitions (`gate`), barriers, `include` files (besides `qelib1.inc`, which is ignored)
 - Unrecognized lines produce an error
@@ -135,6 +140,9 @@ tzap supports a subset of OpenQASM 2.0:
 
 1. **Fuzzing and equivalence verification** on small random circuits and benchmark circuits.
 2. **Lean port:** the core optimizer is implemented and proven sound in Lean 4 — see [`lean/`](lean/).
+
+The new native gate families and generalized rotation synthesis are currently
+implemented in Rust and Python; the Lean gate model has not been extended.
 
 ## Citation
 

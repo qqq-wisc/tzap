@@ -132,7 +132,7 @@ pub fn cnot_min(circuit: &Circuit) -> Circuit {
 pub fn cnot_min_with(circuit: &Circuit, max_qubits: usize, max_terms: usize) -> Circuit {
     let max_qubits = max_qubits.clamp(1, MAX_CHUNK_QUBITS);
     let max_terms = max_terms.max(1);
-    let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+    let mut output = circuit.empty_like();
     let mut chunk = Chunk::new(circuit.num_qubits, max_qubits, max_terms);
 
     for gate in &circuit.gates {
@@ -153,7 +153,7 @@ pub fn cnot_min_with(circuit: &Circuit, max_qubits: usize, max_terms: usize) -> 
 /// `budget_is_a_pure_early_exit` checks.
 #[cfg(test)]
 fn cnot_min_unbounded(circuit: &Circuit) -> Circuit {
-    let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+    let mut output = circuit.empty_like();
     let mut chunk = Chunk::new(circuit.num_qubits, MAX_CHUNK_QUBITS, MAX_CHUNK_TERMS);
     chunk.bounded = false;
     for gate in &circuit.gates {
@@ -300,6 +300,19 @@ impl Chunk {
             // phase is cubic in the inputs, not a parity, so it gets the same
             // treatment as the genuinely non-diagonal gates.
             Gate::h(_)
+            | Gate::p(..)
+            | Gate::y(_)
+            | Gate::sx(_)
+            | Gate::rx(..)
+            | Gate::ry(..)
+            | Gate::swap(..)
+            | Gate::cy { .. }
+            | Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. }
+            | Gate::ch { .. }
+            | Gate::cswap { .. }
             | Gate::ccx { .. }
             | Gate::ccz { .. }
             | Gate::measure { .. }

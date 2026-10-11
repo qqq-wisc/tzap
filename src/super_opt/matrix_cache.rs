@@ -202,6 +202,12 @@ enum NormalizedGate {
     Cz(usize, usize),
     Ccx(usize, usize, usize),
     Ccz(usize, usize, usize),
+    Y(usize),
+    Sx(usize),
+    Swap(usize, usize),
+    Cy(usize, usize),
+    Ch(usize, usize),
+    Cswap(usize, usize, usize),
 }
 
 /// Longest window the fixed-size compact key can represent without falling
@@ -315,8 +321,8 @@ pub(super) struct GateCode {
     arity: u8,
 }
 
-/// Split `gate` into its window-independent code parts. `None` for `rz`, which
-/// a compact key cannot express — an Rz gate can reach a window through a
+/// Split `gate` into its window-independent code parts. `None` for parametric gates,
+/// which a compact key cannot express — they can reach a window through a
 /// bridged-in qubit's history, so this is a real case, not an assertion.
 pub(super) fn gate_code(gate: &Gate) -> Option<GateCode> {
     let (tag, operands, arity) = match gate {
@@ -348,7 +354,30 @@ pub(super) fn gate_code(gate: &Gate) -> Option<GateCode> {
             let (a, b, c) = canonical_triple(*control1, *control2, *target);
             (10, [a, b, c], 3)
         }
-        Gate::rz(..) => return None,
+        Gate::y(q) => (11, [*q, 0, 0], 1),
+        Gate::sx(q) => (12, [*q, 0, 0], 1),
+        Gate::swap(a, b) => {
+            let (a, b) = canonical_pair(*a, *b);
+            (13, [a, b, 0], 2)
+        }
+        Gate::cy { control, target } => (14, [*control, *target, 0], 2),
+        Gate::ch { control, target } => (15, [*control, *target, 0], 2),
+        Gate::cswap {
+            control,
+            first,
+            second,
+        } => {
+            let (a, b) = canonical_pair(*first, *second);
+            (16, [*control, a, b], 3)
+        }
+        Gate::rz(..)
+        | Gate::p(..)
+        | Gate::rx(..)
+        | Gate::ry(..)
+        | Gate::cp { .. }
+        | Gate::crx { .. }
+        | Gate::cry { .. }
+        | Gate::crz { .. } => return None,
         Gate::measure { .. } | Gate::reset(_) => {
             unreachable!("measurement and reset are window barriers")
         }
@@ -380,7 +409,7 @@ impl GateCode {
             for &qubit in support {
                 position += u16::from(qubit < operand);
             }
-            code |= position << (4 + 2 * index);
+            code |= position << (5 + 2 * index);
         }
         Some(code)
     }
@@ -411,7 +440,32 @@ fn normalized_gate_key(
                 Gate::z(q) => NormalizedGate::Z(local(*q)),
                 Gate::t(q) => NormalizedGate::T(local(*q)),
                 Gate::tdg(q) => NormalizedGate::Tdg(local(*q)),
-                Gate::rz(..) => unreachable!("Rz gates are SuperOpt window barriers"),
+                Gate::y(q) => NormalizedGate::Y(local(*q)),
+                Gate::sx(q) => NormalizedGate::Sx(local(*q)),
+                Gate::swap(a, b) => {
+                    let (a, b) = canonical_pair(local(*a), local(*b));
+                    NormalizedGate::Swap(a, b)
+                }
+                Gate::cy { control, target } => NormalizedGate::Cy(local(*control), local(*target)),
+                Gate::ch { control, target } => NormalizedGate::Ch(local(*control), local(*target)),
+                Gate::cswap {
+                    control,
+                    first,
+                    second,
+                } => {
+                    let (a, b) = canonical_pair(local(*first), local(*second));
+                    NormalizedGate::Cswap(local(*control), a, b)
+                }
+                Gate::rz(..)
+                | Gate::p(..)
+                | Gate::rx(..)
+                | Gate::ry(..)
+                | Gate::cp { .. }
+                | Gate::crx { .. }
+                | Gate::cry { .. }
+                | Gate::crz { .. } => {
+                    unreachable!("parametric gates are SuperOpt window barriers")
+                }
                 Gate::cnot { control, target } => {
                     NormalizedGate::Cnot(local(*control), local(*target))
                 }
