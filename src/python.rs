@@ -105,6 +105,7 @@ fn positive_bound(value: Option<usize>, name: &str) -> PyResult<Option<usize>> {
     level = "O3",
     passes = None,
     fixpoint = false,
+    decompose_rotations = false,
     decompose_rz = false,
     decompose_cz = false,
     decompose_ccx = false,
@@ -122,6 +123,7 @@ fn _optimize_qasm(
     level: &str,
     passes: Option<Vec<String>>,
     fixpoint: bool,
+    decompose_rotations: bool,
     decompose_rz: bool,
     decompose_cz: bool,
     decompose_ccx: bool,
@@ -139,7 +141,7 @@ fn _optimize_qasm(
     }
 
     let passes = parse_passes(passes)?;
-    if passes.is_some() && (decompose_rz || decompose_cz || decompose_ccx) {
+    if passes.is_some() && (decompose_rotations || decompose_rz || decompose_cz || decompose_ccx) {
         return Err(PyValueError::new_err(
             "passes cannot be combined with decomposition options; include the decomposition passes instead",
         ));
@@ -149,6 +151,7 @@ fn _optimize_qasm(
         level: parse_level(level)?,
         passes,
         fixpoint,
+        decompose_rotations,
         decompose_rz,
         decompose_cz,
         decompose_ccx,
@@ -166,7 +169,8 @@ fn _optimize_qasm(
     let (optimized, report) = py
         .detach(|| optimize(&circuit, &options))
         .map_err(|error| OptimizationError::new_err(error.to_string()))?;
-    Ok((optimized.to_qasm(), raw_report(report)))
+    let output = optimized.to_qasm();
+    Ok((output, raw_report(report)))
 }
 
 #[pymodule]

@@ -122,6 +122,24 @@ impl Mat {
         }
     }
 
+    fn apply_controlled_single(&mut self, g: [[C; 2]; 2], control: Qubit, target: Qubit, n: usize) {
+        let (cb, tb) = (
+            1 << (n - 1 - control as usize),
+            1 << (n - 1 - target as usize),
+        );
+        for row in 0..self.dim {
+            if row & cb == 0 || row & tb != 0 {
+                continue;
+            }
+            let other = row | tb;
+            for col in 0..self.dim {
+                let (a, b) = (self.get(row, col), self.get(other, col));
+                self.set(row, col, g[0][0] * a + g[0][1] * b);
+                self.set(other, col, g[1][0] * a + g[1][1] * b);
+            }
+        }
+    }
+
     /// Apply a controlled-NOT: flip target bit when control bit is set.
     fn apply_cnot(&mut self, control: usize, target: usize, num_qubits: usize) {
         let cb = 1 << (num_qubits - 1 - control);
@@ -218,6 +236,32 @@ fn gate_matrix_tdg() -> [[C; 2]; 2] {
     [[C::ONE, C::ZERO], [C::ZERO, C::polar(1.0, -PI / 4.0)]]
 }
 
+fn gate_matrix_y() -> [[C; 2]; 2] {
+    [[C::ZERO, C::new(0.0, -1.0)], [C::new(0.0, 1.0), C::ZERO]]
+}
+
+fn gate_matrix_sx() -> [[C; 2]; 2] {
+    let diagonal = C::new(0.5, 0.5);
+    let off_diagonal = C::new(0.5, -0.5);
+    [[diagonal, off_diagonal], [off_diagonal, diagonal]]
+}
+
+fn gate_matrix_p(theta: f64) -> [[C; 2]; 2] {
+    [[C::ONE, C::ZERO], [C::ZERO, C::polar(1.0, theta)]]
+}
+
+fn gate_matrix_rx(theta: f64) -> [[C; 2]; 2] {
+    let diagonal = C::new((theta / 2.0).cos(), 0.0);
+    let off_diagonal = C::new(0.0, -(theta / 2.0).sin());
+    [[diagonal, off_diagonal], [off_diagonal, diagonal]]
+}
+
+fn gate_matrix_ry(theta: f64) -> [[C; 2]; 2] {
+    let c = C::new((theta / 2.0).cos(), 0.0);
+    let s = C::new((theta / 2.0).sin(), 0.0);
+    [[c, s * -1.0], [s, c]]
+}
+
 fn gate_matrix_rz(theta: f64) -> [[C; 2]; 2] {
     [
         [C::polar(1.0, -theta / 2.0), C::ZERO],
@@ -246,6 +290,128 @@ pub(crate) fn circuit_unitary(circuit: &Circuit) -> Vec<Vec<C>> {
                 *q as usize,
                 n,
             ),
+            Gate::p(theta, q) => mat.apply_single(
+                gate_matrix_p(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *q as usize,
+                n,
+            ),
+            Gate::y(q) => mat.apply_single(gate_matrix_y(), *q as usize, n),
+            Gate::sx(q) => mat.apply_single(gate_matrix_sx(), *q as usize, n),
+            Gate::rx(theta, q) => mat.apply_single(
+                gate_matrix_rx(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *q as usize,
+                n,
+            ),
+            Gate::ry(theta, q) => mat.apply_single(
+                gate_matrix_ry(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *q as usize,
+                n,
+            ),
+            Gate::cy { control, target } => {
+                mat.apply_controlled_single(gate_matrix_y(), *control, *target, n)
+            }
+            Gate::ch { control, target } => {
+                mat.apply_controlled_single(gate_matrix_h(), *control, *target, n)
+            }
+            Gate::cp {
+                lambda,
+                control,
+                target,
+            } => mat.apply_controlled_single(
+                gate_matrix_p(
+                    lambda
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *control,
+                *target,
+                n,
+            ),
+            Gate::crx {
+                theta,
+                control,
+                target,
+            } => mat.apply_controlled_single(
+                gate_matrix_rx(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *control,
+                *target,
+                n,
+            ),
+            Gate::cry {
+                theta,
+                control,
+                target,
+            } => mat.apply_controlled_single(
+                gate_matrix_ry(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *control,
+                *target,
+                n,
+            ),
+            Gate::crz {
+                theta,
+                control,
+                target,
+            } => mat.apply_controlled_single(
+                gate_matrix_rz(
+                    theta
+                        .to_f64_lossy()
+                        .expect("test oracle requires evaluable angle"),
+                ),
+                *control,
+                *target,
+                n,
+            ),
+            Gate::cswap {
+                control,
+                first,
+                second,
+            } => {
+                let (cb, a, b) = (
+                    1 << (n - 1 - *control as usize),
+                    1 << (n - 1 - *first as usize),
+                    1 << (n - 1 - *second as usize),
+                );
+                for row in 0..mat.dim {
+                    if row & cb != 0 && row & a == 0 && row & b != 0 {
+                        let other = row ^ a ^ b;
+                        for col in 0..mat.dim {
+                            mat.data.swap(row * mat.dim + col, other * mat.dim + col);
+                        }
+                    }
+                }
+            }
+            Gate::swap(a, b) => {
+                let mask_a = 1 << (n - 1 - *a as usize);
+                let mask_b = 1 << (n - 1 - *b as usize);
+                for row in 0..mat.dim {
+                    if row & mask_a == 0 && row & mask_b != 0 {
+                        let other = row ^ mask_a ^ mask_b;
+                        for col in 0..mat.dim {
+                            mat.data.swap(row * mat.dim + col, other * mat.dim + col);
+                        }
+                    }
+                }
+            }
             Gate::cnot { control, target } => {
                 mat.apply_cnot(*control as usize, *target as usize, n)
             }
@@ -1128,3 +1294,6 @@ mod tests {
         assert!(circuits_equiv(&a, &b, 1e-10));
     }
 }
+
+#[cfg(test)]
+mod native_tests;

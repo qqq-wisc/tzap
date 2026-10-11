@@ -28,6 +28,15 @@ To use `measure` gates, allocate classical bits with
 | T | `Gate::t(qubit)` |
 | Tdg | `Gate::tdg(qubit)` |
 | Rz | `Gate::rz(angle, qubit)` |
+| Phase | `Gate::p(angle, qubit)` |
+| Y | `Gate::y(qubit)` |
+| Square root of X | `Gate::sx(qubit)` |
+| Rx, Ry | `Gate::rx(angle, qubit)`, `Gate::ry(angle, qubit)` |
+| SWAP | `Gate::swap(first, second)` |
+| CY, CH | `Gate::cy { control, target }`, `Gate::ch { control, target }` |
+| CP | `Gate::cp { lambda, control, target }` |
+| CRX, CRY, CRZ | `Gate::crx { theta, control, target }` (likewise `cry`, `crz`) |
+| CSWAP | `Gate::cswap { control, first, second }` |
 | CNOT | `Gate::cnot { control, target }` |
 | CZ | `Gate::cz { control, target }` |
 | Toffoli | `Gate::ccx { control1, control2, target }` |
@@ -38,7 +47,7 @@ To use `measure` gates, allocate classical bits with
 Operands are `Qubit` and `CBit`, both aliases for `u32`. Integer literals
 still work unannotated; a `usize` index needs `as u32`.
 
-`Gate::rz` now takes a checked `Angle`, rather than an `f64`. This is a Rust
+All parameterized gates take a checked `Angle`, rather than an `f64`. This is a Rust
 source compatibility change. Explicit fractions retain mathematical pi;
 numeric inputs retain their exact finite binary64 value:
 
@@ -49,6 +58,11 @@ let numeric = Gate::rz_f64(0.3, 0)?;
 assert!(Gate::rz_f64(f64::NAN, 0).is_err());
 # Ok::<(), tzap::angle::AngleError>(())
 ```
+
+`Gate::p_f64`, `Gate::rx_f64`, and `Gate::ry_f64` provide the same checked
+numeric construction as `Gate::rz_f64`. `Gate::angle()` borrows a parameter
+without changing it. Controlled gate equality compares literal parameters:
+CRX/CRY/CRZ at 2π retain their control-branch phase.
 
 A numeric `PI/4` is not inferred to be an exact pi fraction. Default folding
 never adds rounding, snaps a small rotation to zero, or wraps a float modulo
@@ -74,6 +88,11 @@ let circuit = Circuit::from_qasm("
 
 let qasm_string = circuit.to_qasm();
 ```
+
+The parser accepts every gate above, including `u1` for P and `cu1` for CP.
+Serialization emits those QASM 2 aliases and expands SX, SWAP, and CSWAP
+exactly. CRX and CRY serialize as basis changes around CRZ, retaining the
+original checked angle without half-angle rounding.
 
 The QASM parser accepts `ccz` as a native circuit gate. `DecomposeToffoli`
 lowers both `ccx` and `ccz` to Clifford+T.
@@ -121,10 +140,11 @@ CCX/CCZ, CZ, or Rz decomposition.
 | `level` | `Level::O3` | `O1` (cancel + phase-fold), `O2` (adds SuperOpt, 2 rounds), `O3` (same, to a fixpoint), `Osuper` (`O3` with the bigger SuperOpt bounds) |
 | `passes` | `None` | An explicit `Vec<PassName>` pipeline, replacing `level`'s |
 | `fixpoint` | `false` | Repeat until the gate count stops falling. Only consulted for pipelines that aren't already fixpoint loops (`passes`, or `O1`) |
-| `decompose_rz` | `false` | Decompose Rz into Clifford+T via gridsynth |
+| `decompose_rotations` | `false` | Decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy into Clifford+T |
+| `decompose_rz` | `false` | Compatibility alias for `decompose_rotations` |
 | `decompose_cz` | `false` | Decompose CZ into H+CX+H before optimizing |
 | `decompose_ccx` | `false` | Decompose CCX and CCZ into Clifford+T |
-| `rz_epsilon` | `1e-10` | Approximation epsilon for `decompose_rz` |
+| `rz_epsilon` | `1e-10` | Per-input-gate numeric-target epsilon for rotation decomposition |
 | `parallel` | `false` | Optimize gate-contiguous chunks concurrently, then concatenate |
 | `superopt` | all `None` | Per-run overrides for the SuperOpt window/MURM bounds |
 | `superopt_gates` | `Auto` | Base MURM basis plus native CZ/CCX/CCZ gates present in the current stage |
@@ -132,7 +152,7 @@ CCX/CCZ, CZ, or Rz decomposition.
 `Report` carries three sets of `Metrics` (`gates`, `two_qubit`, `depth`, `t`,
 `rz`): `input` as handed in, `baseline` (the same original input comparison
 point), and `output`. Requested decompositions are opt-in middle stages:
-optimize the input circuit, decompose CCX/CCZ then CZ then Rz, and optimize
+optimize the input circuit, decompose CCX/CCZ then CZ then rotations, and optimize
 again when a decomposition changed the circuit.
 
 `Report::numerical` records preserved expressions, numeric input fallback,
@@ -143,14 +163,27 @@ unchecked randomized Boolean-function matches; its collision guarantee is
 separate from exact angle arithmetic. An explicit pipeline omitting that pass
 can use deterministic matching.
 
-Explicit `DecomposeRz` requests permit approximation. Its per-rotation epsilon
+Explicit `DecomposeRotations` requests permit approximation. Its per-rotation epsilon
 belongs to the numeric target passed to gridsynth; total conversion error and
-whole-circuit error are uncertified. `DecomposeRz::try_run` and the optimization
+whole-circuit error are uncertified. `DecomposeRotations::try_run` and the optimization
 driver return a structured synthesis error for inputs that cannot be converted.
 The infallible `Pass` adapter conservatively returns the original circuit on a
 synthesis error; callers requiring synthesis must use `try_run` or the driver.
 Certified quarter-turns lower exactly before synthesis, SuperOpt, or PBC.
-Other fractions and numeric Rz remain outside SuperOpt's and PBC's exact domain.
+Other parametric gates remain outside SuperOpt's exact matrix domain.
+
+Controlled rotations expand into unconditional half-angle rotations and two
+CNOTs before synthesis. CP also needs P(lambda/2) on the control; it differs
+from CRZ. Half-angles use checked arithmetic without projective normalization:
+unrepresentable halves produce a synthesis error. Each controlled rotation
+splits its epsilon between two numeric targets; CP uses three. Discarded
+synthesis phases are therefore whole-circuit global phases. Large numeric
+angles use bounded native eigenphases for synthesis; this conversion remains
+uncertified, as does total circuit error.
+
+Y, SX, SWAP, CY, CH, and CSWAP have exact input matrices for SuperOpt; its
+synthesis basis remains unchanged. PBC rejects these native gates, as well as
+parametric gates, unless they have been expanded into its supported basis.
 
 The post-decomposition MURM basis excludes every gate family requested for
 decomposition, including gates named in an explicit `superopt_gates` basis.
@@ -210,7 +243,7 @@ A custom pass only needs to supply `name` and `run`.
 |------|--------|-------------|
 | `DecomposeToffoli` | `tzap::decompose` | Breaks CCX and CCZ gates into Clifford+T |
 | `DecomposeCz` | `tzap::decompose` | Explicitly lowers CZ gates to H+CX+H |
-| `DecomposeRz` | `tzap::decompose` | Decomposes Rz gates into Clifford+T via gridsynth |
+| `DecomposeRotations` | `tzap::decompose` | Decomposes phase gates and ordinary/controlled rotations into Clifford+T |
 | `CancelGates` | `tzap::cancel` | Removes adjacent self-inverse gate pairs (HH, XX, etc.) |
 | `SuperOpt` | `tzap::super_opt` | Replaces small windows using its shared MURM |
 | `PhaseFoldRand` | `tzap::phase_fold_rand` | Merges T/Rz gates across the circuit via randomized parity tracking |
@@ -349,13 +382,23 @@ anchors new windows only near what changed since the previous `run` call,
 which is unsound if the instance ever sees unrelated circuits or concurrent
 chunks, so don't share an incremental instance across parallel workers.
 
-### DecomposeRz epsilon
+### DecomposeRotations epsilon
 
 Control the approximation precision with the `epsilon` field (default `1e-10`):
 
 ```rust,ignore
-use tzap::decompose::DecomposeRz;
+use tzap::decompose::DecomposeRotations;
 
-let pass = DecomposeRz { epsilon: 1e-6 };
+let pass = DecomposeRotations { epsilon: 1e-6 };
 let cliffordt = pass.run(&circuit);
 ```
+
+`DecomposeRz`, `PassName::DecomposeRz`, `--decompose-rz`, and `decompose_rz`
+remain compatibility aliases with the generalized rotation behavior.
+
+`PhaseFoldPauli` folds P/RX/RY/RZ and T/T† using signed Pauli axes and checked
+angle sums. Y, SX, CY, and SWAP update its Clifford frame. Controlled rotations,
+CH, and CSWAP end its analysis region. Numeric sums that would round or overflow
+are declined; exact pi fractions stay symbolic, including mixed symbolic and
+numeric contributions. Qiskit and PennyLane convert emitted symbolic angles to
+framework numeric parameters explicitly when rebuilding their circuits.

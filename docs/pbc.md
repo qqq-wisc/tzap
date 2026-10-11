@@ -27,7 +27,7 @@ optionally followed by the rotation optimizer `PbcOpt`:
 tzap input.qasm --passes CancelGates,ToPbc,PbcOpt -o output.pbc
 ```
 
-The input must have no resets; for Rz gates, also pass `--decompose-rz`.
+The input must have no resets; for Rz gates, also pass `--decompose-rotations`.
 Measurements may appear anywhere, including mid-circuit. tzap checks these
 right after parsing, naming the offending gate, before any other work.
 
@@ -238,3 +238,7 @@ measure q[3] -> c[3];
 draws as
 
 ![PBC drawing of Litinski's Fig. 4 circuit](pbc-litinski-fig4.svg)
+
+Native P/RX/RY/RZ and controlled phase/rotation gates require rotation
+decomposition before conversion. Y/SX/SWAP/CY/CH/CSWAP transfer rules are not
+implemented; convert these gates to the supported basis first.

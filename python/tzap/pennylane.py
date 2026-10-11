@@ -8,6 +8,7 @@ from collections.abc import Iterable, Sequence
 import pennylane as qml
 from pennylane.tape import QuantumScript
 
+from ._angles import angle_radians
 from ._core import optimize_qasm
 
 
@@ -22,6 +23,19 @@ _SIMPLE_OPERATIONS = (
     (qml.PauliZ, "z"),
     (qml.T, "t"),
     (qml.RZ, "rz"),
+    (qml.RX, "rx"),
+    (qml.RY, "ry"),
+    (qml.PhaseShift, "p"),
+    (qml.PauliY, "y"),
+    (qml.SX, "sx"),
+    (qml.SWAP, "swap"),
+    (qml.CY, "cy"),
+    (qml.CH, "ch"),
+    (qml.ControlledPhaseShift, "cp"),
+    (qml.CRX, "crx"),
+    (qml.CRY, "cry"),
+    (qml.CRZ, "crz"),
+    (qml.CSWAP, "cswap"),
     (qml.CNOT, "cx"),
     (qml.CZ, "cz"),
     (qml.Toffoli, "ccx"),
@@ -37,6 +51,19 @@ _ARITIES = {
     "t": 1,
     "tdg": 1,
     "rz": 1,
+    "rx": 1,
+    "ry": 1,
+    "p": 1,
+    "y": 1,
+    "sx": 1,
+    "swap": 2,
+    "cy": 2,
+    "ch": 2,
+    "cp": 2,
+    "crx": 2,
+    "cry": 2,
+    "crz": 2,
+    "cswap": 3,
     "cx": 2,
     "cz": 2,
     "ccx": 3,
@@ -65,28 +92,31 @@ def _operation_name(operation) -> str:
             return name
     raise PennyLaneError(
         f"tzap does not support PennyLane operation {operation.name!r}; decompose to "
-        "[PauliX, Hadamard, S, Adjoint(S), PauliZ, T, Adjoint(T), RZ, "
-        "CNOT, CZ, Toffoli, CCZ] before applying tzap"
+        f"{[kind.__name__ for kind, _ in _SIMPLE_OPERATIONS]}, Adjoint(S), "
+        "and Adjoint(T) before applying tzap"
     )
 
 
 def _concrete_angle(operation) -> float:
+    name = getattr(operation, "name", "rotation")
     try:
         angle = operation.data[0]
     except (AttributeError, IndexError) as error:
-        raise PennyLaneError("RZ must have exactly one angle") from error
+        raise PennyLaneError(f"{name} must have exactly one angle") from error
 
     if qml.math.requires_grad(angle) or qml.math.is_abstract(angle):
         raise PennyLaneError(
-            "tzap requires RZ angles to be concrete and non-trainable; "
+            f"tzap requires {name} angles to be concrete and non-trainable; "
             "optimizing a trainable or traced angle would break autodiff"
         )
     try:
         value = float(angle)
     except (TypeError, ValueError) as error:
-        raise PennyLaneError("tzap requires RZ angles to be real scalars") from error
+        raise PennyLaneError(
+            f"tzap requires {name} angles to be real scalars"
+        ) from error
     if not math.isfinite(value):
-        raise PennyLaneError("tzap requires finite RZ angles")
+        raise PennyLaneError(f"tzap requires finite {name} angles")
     return value
 
 
@@ -145,8 +175,8 @@ def _tape_to_qasm(
                 f"operation {operation.name!r} has {len(operation_wires)} wires, expected {_ARITIES[name]}"
             )
         operands = ",".join(f"q[{wire_indices[wire]}]" for wire in operation_wires)
-        if name == "rz":
-            lines.append(f"rz({_concrete_angle(operation)!r}) {operands};")
+        if name in ("rz", "rx", "ry", "p", "cp", "crx", "cry", "crz"):
+            lines.append(f"{name}({_concrete_angle(operation)!r}) {operands};")
         else:
             lines.append(f"{name} {operands};")
 
@@ -190,10 +220,20 @@ def _output_operations(
 
             name, operands = statement.split(" ", 1)
             wire_operands = [wires[index] for index in _indices(operands)]
-            if name.startswith("rz("):
-                operations.append(
-                    qml.RZ(float(name[3 : name.rfind(")")]), wires=wire_operands[0])
+            if "(" in name:
+                gate_name, angle_text = name.split("(", 1)
+                gate_name = {"u1": "p", "cu1": "cp"}.get(gate_name, gate_name)
+                operation_type = next(
+                    kind for kind, gate in _SIMPLE_OPERATIONS if gate == gate_name
                 )
+                operations.append(
+                    operation_type(angle_radians(angle_text[:-1]), wires=wire_operands)
+                )
+            elif name in ("y", "swap", "cy", "ch", "cswap"):
+                operation_type = next(
+                    kind for kind, gate in _SIMPLE_OPERATIONS if gate == name
+                )
+                operations.append(operation_type(wires=wire_operands))
             elif name == "x":
                 operations.append(qml.PauliX(wires=wire_operands[0]))
             elif name == "h":
@@ -239,6 +279,7 @@ def _optimize_transform(
     level: str = "O3",
     passes: Iterable[str] | None = None,
     fixpoint: bool = False,
+    decompose_rotations: bool = False,
     decompose_rz: bool = False,
     decompose_cz: bool = False,
     decompose_ccx: bool = False,
@@ -253,7 +294,7 @@ def _optimize_transform(
 
     Terminal measurements and observables are retained by copying the input
     ``QuantumScript`` with only its operation list replaced. Existing
-    ``GlobalPhase`` operations are preserved. RZ parameters must be concrete,
+    ``GlobalPhase`` operations are preserved. Rotation parameters must be concrete,
     finite, and non-trainable.
     """
 
@@ -264,6 +305,7 @@ def _optimize_transform(
         level=level,
         passes=pass_list,
         fixpoint=fixpoint,
+        decompose_rotations=decompose_rotations,
         decompose_rz=decompose_rz,
         decompose_cz=decompose_cz,
         decompose_ccx=decompose_ccx,
@@ -300,6 +342,7 @@ def optimize(
     level: str = "O3",
     passes: Iterable[str] | None = None,
     fixpoint: bool = False,
+    decompose_rotations: bool = False,
     decompose_rz: bool = False,
     decompose_cz: bool = False,
     decompose_ccx: bool = False,
@@ -321,6 +364,7 @@ def optimize(
         "level": level,
         "passes": None if passes is None else tuple(passes),
         "fixpoint": fixpoint,
+        "decompose_rotations": decompose_rotations,
         "decompose_rz": decompose_rz,
         "decompose_cz": decompose_cz,
         "decompose_ccx": decompose_ccx,

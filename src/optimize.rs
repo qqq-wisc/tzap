@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use crate::cancel::CancelGates;
 use crate::circuit::{Circuit, Gate, GateKind, GateSet, qubit_operands};
 use crate::cnot_min::CnotMin;
-use crate::decompose::{DecomposeCz, DecomposeRz, DecomposeToffoli};
+use crate::decompose::{DecomposeCz, DecomposeRotations, DecomposeToffoli};
 use crate::pass::Pass;
 use crate::phase_fold_pauli::PhaseFoldPauli;
 use crate::phase_fold_rand::PhaseFoldRand;
@@ -81,11 +81,11 @@ pub const SUPER_SUPEROPT_MURM_ENTRIES: usize = 5_000_000;
 /// An optimization level: which default pipeline [`optimize`] runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
-    /// Randomized phase folding + gate cancellation. Fastest.
+    /// Randomized and exact-axis Pauli folding + gate cancellation. Fastest.
     O1,
     /// Adds a SuperOpt pass to [`Level::O1`], capped at 2 rounds rather than
     /// run to a true fixpoint — see `optimize_default`'s `max_rounds`. With
-    /// `decompose_rz` the cap allows one extra round, so Rz synthesis lands in
+    /// rotation decomposition the cap allows one extra round, so synthesis lands in
     /// the same place it does at the uncapped levels (see [`run_to_fixpoint`]).
     O2,
     /// Like [`Level::O2`], but run to a true fixpoint instead of capped at 2
@@ -100,7 +100,7 @@ pub enum Level {
 pub enum PassName {
     DecomposeToffoli,
     DecomposeCz,
-    DecomposeRz,
+    DecomposeRotations,
     CancelGates,
     SuperOpt,
     PhaseFoldRand,
@@ -115,24 +115,31 @@ pub enum StageKind {
     InputOptimization,
     DecomposeCcx,
     DecomposeCz,
-    DecomposeRz,
+    DecomposeRotations,
     PostDecompositionOptimization,
 }
 
 impl StageKind {
+    /// Compatibility name for the generalized rotation stage.
+    #[allow(non_upper_case_globals)]
+    pub const DecomposeRz: Self = Self::DecomposeRotations;
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::ExplicitPipeline => "Running explicit pipeline",
             Self::InputOptimization => "Optimizing input circuit",
             Self::DecomposeCcx => "Decomposing CCX/CCZ",
             Self::DecomposeCz => "Decomposing CZ",
-            Self::DecomposeRz => "Decomposing Rz",
+            Self::DecomposeRotations => "Decomposing rotations",
             Self::PostDecompositionOptimization => "Optimizing decomposed circuit",
         }
     }
 }
 
 impl PassName {
+    /// Compatibility name; decomposes all supported rotations and phase gates.
+    #[allow(non_upper_case_globals)]
+    pub const DecomposeRz: Self = Self::DecomposeRotations;
     /// The name this pass is selected by in [`Options::passes`].
     pub fn label(self) -> &'static str {
         Self::ALL
@@ -155,9 +162,9 @@ impl PassName {
             "Decompose cz gates into H+CX+H",
         ),
         (
-            "DecomposeRz",
-            PassName::DecomposeRz,
-            "Decompose Rz gates into Clifford+T (gridsynth; see --epsilon)",
+            "DecomposeRotations",
+            PassName::DecomposeRotations,
+            "Decompose P, Rz/Rx/Ry, CP, CRz/CRx/CRy into Clifford+T (gridsynth; see --epsilon)",
         ),
         (
             "CancelGates",
@@ -177,7 +184,7 @@ impl PassName {
         (
             "PhaseFoldPauli",
             PassName::PhaseFoldPauli,
-            "Fold T/Rz rotations across Cliffords with exact commutation checks",
+            "Fold T/P/Rz/Rx/Ry rotations with checked angles and exact commutation",
         ),
         (
             "CnotMin",
@@ -186,15 +193,18 @@ impl PassName {
         ),
     ];
 
-    /// Look up a pass by its exact name, as listed in [`PassName::ALL`].
+    /// Look up a pass by its canonical name or a compatibility alias.
     pub fn parse(s: &str) -> Option<PassName> {
+        if s == "DecomposeRz" {
+            return Some(Self::DecomposeRotations);
+        }
         Self::ALL
             .iter()
             .find(|(n, _, _)| *n == s)
             .map(|(_, p, _)| *p)
     }
 
-    /// Comma-separated list of every valid name (for help / error messages).
+    /// Comma-separated list of canonical names (for help / error messages).
     pub fn all_names() -> String {
         Self::ALL
             .iter()
@@ -319,13 +329,15 @@ pub struct Options {
     /// consulted for pipelines that aren't already a fixpoint loop (`passes`,
     /// or [`Level::O1`]).
     pub fixpoint: bool,
-    /// Decompose Rz gates into Clifford+T via gridsynth.
+    /// Decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy into Clifford+T via gridsynth.
+    pub decompose_rotations: bool,
+    /// Compatibility option for `decompose_rotations`; also decomposes controlled rotations and phase gates.
     pub decompose_rz: bool,
     /// Decompose CZ gates into H+CX+H before optimizing.
     pub decompose_cz: bool,
     /// Decompose CCX and CCZ gates into Clifford+T.
     pub decompose_ccx: bool,
-    /// Approximation epsilon for `decompose_rz`.
+    /// Per-input-gate approximation epsilon for `decompose_rotations` (and its alias).
     pub rz_epsilon: f64,
     /// Optimize gate-contiguous chunks of the circuit in parallel, then
     /// concatenate the results (see [`optimize`]).
@@ -342,6 +354,7 @@ impl Default for Options {
             level: Level::O3,
             passes: None,
             fixpoint: false,
+            decompose_rotations: false,
             decompose_rz: false,
             decompose_cz: false,
             decompose_ccx: false,
@@ -350,6 +363,13 @@ impl Default for Options {
             superopt: SuperOptBounds::default(),
             superopt_gates: SuperOptGates::Auto,
         }
+    }
+}
+
+impl Options {
+    /// Whether rotation synthesis was requested through either option name.
+    pub fn decompose_rotations_enabled(&self) -> bool {
+        self.decompose_rotations || self.decompose_rz
     }
 }
 
@@ -382,7 +402,15 @@ impl Metrics {
         let mut depth = 0;
         for gate in &circuit.gates {
             match gate {
-                Gate::cnot { .. } | Gate::cz { .. } => two_qubit += 1,
+                Gate::cnot { .. }
+                | Gate::cz { .. }
+                | Gate::swap(..)
+                | Gate::cy { .. }
+                | Gate::ch { .. }
+                | Gate::cp { .. }
+                | Gate::crx { .. }
+                | Gate::cry { .. }
+                | Gate::crz { .. } => two_qubit += 1,
                 Gate::t(_) | Gate::tdg(_) => t += 1,
                 Gate::rz(..) => rz += 1,
                 _ => {}
@@ -659,7 +687,7 @@ fn chunk_circuit(circuit: &Circuit, num_chunks: usize) -> Vec<Circuit> {
         .gates
         .chunks(chunk_size)
         .map(|slice| {
-            let mut c = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+            let mut c = circuit.empty_like();
             for g in slice {
                 c.apply(g.clone());
             }
@@ -669,9 +697,13 @@ fn chunk_circuit(circuit: &Circuit, num_chunks: usize) -> Vec<Circuit> {
 }
 
 /// Concatenate optimized chunks back into a single circuit, in order.
-fn stitch(num_qubits: usize, num_cbits: usize, chunks: &[Circuit]) -> Circuit {
-    let mut out = Circuit::with_cbits(num_qubits, num_cbits);
+fn stitch(parent: &Circuit, chunks: &[Circuit]) -> Circuit {
+    let mut out = parent.empty_like();
     for c in chunks {
+        assert_eq!(
+            (parent.num_qubits, parent.num_cbits),
+            (c.num_qubits, c.num_cbits)
+        );
         for g in &c.gates {
             out.apply(g.clone());
         }
@@ -688,7 +720,8 @@ fn run_pipeline(circuit: &Circuit, passes: &[&dyn Pass], observer: &dyn Observer
     observer.progress_start(baseline);
     observer.progress_update(None, &c, baseline);
     for p in passes {
-        c = p.run(&c);
+        let next = p.run(&c);
+        c = next;
         observer.progress_update(None, &c, baseline);
     }
     observer.progress_end(baseline);
@@ -707,7 +740,8 @@ fn run_fixpoint_sweep(
     let mut c = circuit.clone();
     observer.progress_update(Some(iteration), &c, baseline);
     for pass in passes {
-        c = pass.run(&c);
+        let next = pass.run(&c);
+        c = next;
         observer.progress_update(Some(iteration), &c, baseline);
     }
     c
@@ -760,13 +794,13 @@ fn run_fixpoint_phase(
 /// and *faster* despite running more rounds, since every post-synthesis round
 /// then sweeps far fewer gates.
 ///
-/// Afterwards, if there were Rz gates to decompose, the sweeps resume on the
+/// Afterwards, if there were rotations to decompose, the sweeps resume on the
 /// synthesized circuit. `max_rounds` is a budget shared across both phases,
 /// except that the post-synthesis phase always gets at least one sweep —
 /// freshly synthesized Clifford+T sequences are never left unoptimized just
 /// because the pre-synthesis phase used up the cap. So O2, the one capped
 /// level, runs up to `max_rounds + 1` sweeps when synthesis intervenes; paying
-/// that extra sweep is what buys O2 the same Rz placement as the uncapped
+/// that extra sweep is what buys O2 the same synthesis placement as the uncapped
 /// levels rather than silently degrading to synthesize-after-one-sweep.
 fn run_to_fixpoint(
     circuit: &Circuit,
@@ -783,7 +817,8 @@ fn run_to_fixpoint(
 
     if let Some(pass) = rz_decompose {
         let had_rz = c.gates.iter().any(|g| matches!(g, Gate::rz(..)));
-        c = pass.run(&c);
+        let next = pass.run(&c);
+        c = next;
         observer.progress_update(Some(round), &c, baseline);
         if had_rz {
             let spent = round;
@@ -893,7 +928,7 @@ fn run_map_reduce(
     }
     let optimized = optimized.into_iter().collect::<Result<Vec<_>, _>>()?;
     fixpoint.report_to(observer);
-    Ok(stitch(circuit.num_qubits, circuit.num_cbits, &optimized))
+    Ok(stitch(circuit, &optimized))
 }
 
 /// Run one named pass over the current whole-circuit stage. SuperOpt resolves
@@ -925,13 +960,13 @@ fn run_explicit_pass(
     match name {
         PassName::DecomposeToffoli => map_pass!(DecomposeToffoli),
         PassName::DecomposeCz => map_pass!(DecomposeCz),
-        PassName::DecomposeRz => run_map_reduce(
+        PassName::DecomposeRotations => run_map_reduce(
             circuit,
             options.parallel,
             num_chunks,
             observer,
             |chunk, _| {
-                DecomposeRz {
+                DecomposeRotations {
                     epsilon: options.rz_epsilon,
                 }
                 .try_run(chunk)
@@ -1141,8 +1176,28 @@ fn level_uses_superopt(level: Level) -> bool {
 fn check_output_invariants(input: &Circuit, result: &Circuit, decomposed: GateSet) {
     let input_gates = input.gate_set();
     let output_gates = result.gate_set();
-    if output_gates.contains(GateKind::Rz) && !input_gates.contains(GateKind::Rz) {
-        panic!("BUG: output contains Rz gates but input did not");
+    for kind in [
+        GateKind::Rz,
+        GateKind::Rx,
+        GateKind::Ry,
+        GateKind::P,
+        GateKind::Cp,
+        GateKind::Crx,
+        GateKind::Cry,
+        GateKind::Crz,
+    ] {
+        // A numeric rotation conjugated into a named T/Tdg's Z axis can
+        // merge there and emit RZ even when the original numeric gate was
+        // RX, RY or P. Named-only Clifford+T inputs still cannot produce RZ.
+        let introduced_rz = kind == GateKind::Rz
+            && [GateKind::Rx, GateKind::Ry, GateKind::P]
+                .iter()
+                .any(|&axis| input_gates.contains(axis));
+        assert!(
+            !output_gates.contains(kind) || input_gates.contains(kind) || introduced_rz,
+            "BUG: output contains {} gates but input did not",
+            kind.name()
+        );
     }
     for kind in decomposed.iter() {
         assert!(
@@ -1171,7 +1226,7 @@ pub fn optimize(circuit: &Circuit, options: &Options) -> Result<(Circuit, Report
 /// Optimize `circuit`, reporting progress to `observer`.
 ///
 /// The default workflow optimizes the input circuit, applies requested
-/// CCX/CCZ, CZ, and Rz decompositions in that order, then optimizes again if
+/// CCX/CCZ, CZ, and rotation decompositions in that order, then optimizes again if
 /// any decomposition changed the circuit. [`Options::passes`] overrides that
 /// with an explicit, user-ordered pipeline. Under [`Options::parallel`], each
 /// optimization stage runs map-reduce style (see [`run_map_reduce`]).
@@ -1188,8 +1243,10 @@ pub fn optimize_with(
     // Explicit pipeline via `passes`: run exactly what the caller listed, in
     // order, with the original input as the reporting baseline.
     if let Some(names) = &options.passes {
-        let uses_rz = names.iter().any(|p| matches!(p, PassName::DecomposeRz));
-        if options.parallel || uses_rz {
+        let uses_rotations = names
+            .iter()
+            .any(|p| matches!(p, PassName::DecomposeRotations));
+        if options.parallel || uses_rotations {
             init_global_pool();
         }
         let result = run_optimization_stage(
@@ -1210,7 +1267,7 @@ pub fn optimize_with(
         return Ok((result, report));
     }
 
-    if options.parallel || options.decompose_rz {
+    if options.parallel || options.decompose_rotations_enabled() {
         init_global_pool();
     }
 
@@ -1237,8 +1294,17 @@ pub fn optimize_with(
     if options.decompose_cz {
         forbidden = forbidden.union(GateSet::singleton(GateKind::Cz));
     }
-    if options.decompose_rz {
-        forbidden = forbidden.union(GateSet::singleton(GateKind::Rz));
+    if options.decompose_rotations_enabled() {
+        forbidden = forbidden.union(GateSet::from_kinds([
+            GateKind::Rz,
+            GateKind::Rx,
+            GateKind::Ry,
+            GateKind::P,
+            GateKind::Cp,
+            GateKind::Crx,
+            GateKind::Cry,
+            GateKind::Crz,
+        ]));
     }
     let mut decomposed = false;
 
@@ -1256,10 +1322,19 @@ pub fn optimize_with(
             &DecomposeCz,
         ),
         (
-            options.decompose_rz,
-            GateSet::singleton(GateKind::Rz),
-            StageKind::DecomposeRz,
-            &DecomposeRz {
+            options.decompose_rotations_enabled(),
+            GateSet::from_kinds([
+                GateKind::Rz,
+                GateKind::Rx,
+                GateKind::Ry,
+                GateKind::P,
+                GateKind::Cp,
+                GateKind::Crx,
+                GateKind::Cry,
+                GateKind::Crz,
+            ]),
+            StageKind::DecomposeRotations,
+            &DecomposeRotations {
                 epsilon: options.rz_epsilon,
             },
         ),
@@ -1267,9 +1342,9 @@ pub fn optimize_with(
     for (requested, kinds, stage, pass) in decompositions {
         if requested && !result.gate_set().intersection(kinds).is_empty() {
             observer.stage_start(stage);
-            if stage == StageKind::DecomposeRz {
+            if stage == StageKind::DecomposeRotations {
                 let start = Instant::now();
-                let synthesized = DecomposeRz {
+                let synthesized = DecomposeRotations {
                     epsilon: options.rz_epsilon,
                 }
                 .try_run(&result)
@@ -1307,6 +1382,151 @@ pub fn optimize_with(
 mod tests {
     use super::*;
     use crate::qasm;
+
+    #[test]
+    fn checked_pauli_can_emit_rz_from_other_rotation_axes() {
+        for gates in [
+            vec![Gate::rx_f64(0.1, 0).unwrap(), Gate::h(0), Gate::t(0)],
+            vec![Gate::ry_f64(0.1, 0).unwrap(), Gate::sx(0), Gate::t(0)],
+            vec![Gate::p_f64(0.1, 0).unwrap(), Gate::t(0)],
+        ] {
+            let input = Circuit::new(1).replacing_gates(gates);
+            assert!(!input.gate_set().contains(GateKind::Rz));
+            for parallel in [false, true] {
+                for mode in 0..4 {
+                    let options = Options {
+                        level: Level::O1,
+                        parallel,
+                        decompose_rotations: mode == 2,
+                        passes: match mode {
+                            1 => Some(vec![PassName::PhaseFoldPauli]),
+                            3 => Some(vec![PassName::PhaseFoldPauli, PassName::DecomposeRotations]),
+                            _ => None,
+                        },
+                        rz_epsilon: 1e-3,
+                        ..Options::default()
+                    };
+                    let (output, _) = optimize(&input, &options).unwrap();
+                    let decomposed = mode >= 2;
+                    if decomposed {
+                        assert!(
+                            output
+                                .gates
+                                .iter()
+                                .all(|gate| gate.kind().has_exact_matrix())
+                        );
+                    } else if !parallel {
+                        assert!(matches!(output.gates.last(), Some(Gate::rz(..))));
+                        assert!(output.gates.len() <= input.gates.len());
+                    }
+                    assert!(crate::unitary::circuits_equiv(
+                        &input,
+                        &output,
+                        if decomposed { 2e-3 } else { 1e-12 }
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotations_options_and_named_aliases_lower_every_axis() {
+        let input = qasm::parse("OPENQASM 2.0;\nqreg q[2];\nh q[0];\nrx(-0.73) q[0];\ncx q[0],q[1];\nry(1.39) q[1];\nrz(0.37) q[0];\n").unwrap();
+        for parallel in [false, true] {
+            for mode in 0..4 {
+                let options = Options {
+                    level: Level::O1,
+                    decompose_rotations: mode == 0,
+                    decompose_rz: mode == 1,
+                    passes: match mode {
+                        2 => Some(vec![PassName::DecomposeRotations]),
+                        3 => Some(vec![PassName::DecomposeRz]),
+                        _ => None,
+                    },
+                    rz_epsilon: 1e-3,
+                    parallel,
+                    ..Options::default()
+                };
+                let (output, _) = optimize(&input, &options).unwrap();
+                assert!(
+                    !output
+                        .gates
+                        .iter()
+                        .any(|g| matches!(g, Gate::rz(..) | Gate::rx(..) | Gate::ry(..)))
+                );
+                assert!(crate::unitary::circuits_equiv(&input, &output, 4e-3));
+            }
+        }
+        assert_eq!(
+            PassName::parse("DecomposeRotations"),
+            Some(PassName::DecomposeRotations)
+        );
+        assert_eq!(
+            PassName::parse("DecomposeRz"),
+            Some(PassName::DecomposeRotations)
+        );
+        assert!(PassName::all_names().contains("DecomposeRotations"));
+        // A default run keeps Rx/Ry native.
+        let (output, _) = optimize(
+            &input,
+            &Options {
+                level: Level::O1,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert!(output.gates.iter().any(|g| matches!(g, Gate::rx(..))));
+        assert!(output.gates.iter().any(|g| matches!(g, Gate::ry(..))));
+    }
+
+    #[test]
+    fn rotation_pipeline_triggers_for_phases_and_controlled_rotations_without_rz() {
+        for gate in [
+            Gate::p_f64(0.73, 0).unwrap(),
+            Gate::cp {
+                lambda: crate::angle::Angle::from_f64(0.73).unwrap(),
+                control: 0,
+                target: 1,
+            },
+            Gate::crx {
+                theta: crate::angle::Angle::from_f64(0.73).unwrap(),
+                control: 0,
+                target: 1,
+            },
+            Gate::cry {
+                theta: crate::angle::Angle::from_f64(0.73).unwrap(),
+                control: 1,
+                target: 0,
+            },
+            Gate::crz {
+                theta: crate::angle::Angle::from_f64(0.73).unwrap(),
+                control: 0,
+                target: 1,
+            },
+        ] {
+            let input = Circuit::with_cbits(2, 0).replacing_gates(vec![gate]);
+            for parallel in [false, true] {
+                for mode in 0..4 {
+                    let options = Options {
+                        level: Level::O1,
+                        parallel,
+                        rz_epsilon: 1e-3,
+                        decompose_rotations: mode == 0,
+                        decompose_rz: mode == 1,
+                        passes: match mode {
+                            2 => Some(vec![PassName::DecomposeRotations]),
+                            3 => Some(vec![PassName::DecomposeRz]),
+                            _ => None,
+                        },
+                        ..Options::default()
+                    };
+                    let (output, _) = optimize(&input, &options).unwrap();
+                    assert!(output.gates.iter().all(|g| g.kind().has_exact_matrix()));
+                    assert!(crate::unitary::circuits_equiv(&input, &output, 1e-3));
+                }
+            }
+        }
+    }
 
     /// Parallel (map-reduce) optimization of a measured circuit must
     /// round-trip to valid QASM. Regression guard: the stitched
@@ -1699,7 +1919,7 @@ mod tests {
                 if options.decompose_cz {
                     assert!(!output.gate_set().contains(GateKind::Cz));
                 }
-                if options.decompose_rz {
+                if options.decompose_rotations_enabled() {
                     assert!(!output.gate_set().contains(GateKind::Rz));
                 }
                 assert!(Circuit::from_qasm(&output.to_qasm()).is_ok());
@@ -2173,7 +2393,7 @@ mod tests {
                     if options.decompose_cz {
                         assert!(!output.gate_set().contains(GateKind::Cz));
                     }
-                    if options.decompose_rz {
+                    if options.decompose_rotations_enabled() {
                         assert!(!output.gate_set().contains(GateKind::Rz));
                     }
 
@@ -2230,7 +2450,7 @@ mod tests {
                             if options.decompose_cz {
                                 assert!(!output.gate_set().contains(GateKind::Cz));
                             }
-                            if options.decompose_rz {
+                            if options.decompose_rotations_enabled() {
                                 assert!(!output.gate_set().contains(GateKind::Rz));
                             }
                             cases += 1;

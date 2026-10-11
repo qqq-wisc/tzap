@@ -206,7 +206,7 @@ fn unsupported_inputs_fail_even_without_output_destination() {
         ("reset q[0];", "gate 1 (reset q0): PBC has no resets"),
         (
             "rz(pi/5) q[0];",
-            "gate 1 (rz((1*pi/5)) q0): Rz needs --decompose-rz",
+            "gate 1 (rz((1*pi/5)) q0): Rotations need --decompose-rotations",
         ),
         (
             "h q[1];\ncx q[0],q[0];",

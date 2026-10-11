@@ -170,8 +170,8 @@ def _random_program(seed: int) -> tuple[int, list[Gate]]:
 def _qiskit_circuit(program: list[Gate], num_qubits: int) -> QuantumCircuit:
     circuit = QuantumCircuit(num_qubits)
     for name, wires, angle in program:
-        if name == "rz":
-            circuit.rz(angle, wires[0])
+        if angle is not None:
+            getattr(circuit, name)(angle, *wires)
         else:
             getattr(circuit, name)(*wires)
     return circuit
@@ -185,6 +185,19 @@ def _pennylane_operations(program: list[Gate]):
         "z": qml.PauliZ,
         "t": qml.T,
         "rz": qml.RZ,
+        "rx": qml.RX,
+        "ry": qml.RY,
+        "p": qml.PhaseShift,
+        "y": qml.PauliY,
+        "sx": qml.SX,
+        "swap": qml.SWAP,
+        "cy": qml.CY,
+        "ch": qml.CH,
+        "cp": qml.ControlledPhaseShift,
+        "crx": qml.CRX,
+        "cry": qml.CRY,
+        "crz": qml.CRZ,
+        "cswap": qml.CSWAP,
         "cx": qml.CNOT,
         "cz": qml.CZ,
         "ccx": qml.Toffoli,
@@ -199,8 +212,8 @@ def _pennylane_operations(program: list[Gate]):
                 operations.append(qml.adjoint(qml.S(wires=operation_wires)))
             elif name == "tdg":
                 operations.append(qml.adjoint(qml.T(wires=operation_wires)))
-            elif name == "rz":
-                operations.append(qml.RZ(angle, wires=operation_wires))
+            elif angle is not None:
+                operations.append(constructors[name](angle, wires=operation_wires))
             else:
                 operations.append(constructors[name](wires=operation_wires))
     return operations
@@ -216,6 +229,19 @@ def _pennylane_to_qiskit(tape, num_qubits: int) -> QuantumCircuit:
         "T": "t",
         "Adjoint(T)": "tdg",
         "RZ": "rz",
+        "RX": "rx",
+        "RY": "ry",
+        "PhaseShift": "p",
+        "PauliY": "y",
+        "SX": "sx",
+        "SWAP": "swap",
+        "CY": "cy",
+        "CH": "ch",
+        "ControlledPhaseShift": "cp",
+        "CRX": "crx",
+        "CRY": "cry",
+        "CRZ": "crz",
+        "CSWAP": "cswap",
         "CNOT": "cx",
         "CZ": "cz",
         "Toffoli": "ccx",
@@ -225,8 +251,64 @@ def _pennylane_to_qiskit(tape, num_qubits: int) -> QuantumCircuit:
     for operation in tape.operations:
         name = names[operation.name]
         wires = tuple(int(wire) for wire in operation.wires)
-        if name == "rz":
-            circuit.rz(float(operation.data[0]), wires[0])
+        if operation.data:
+            getattr(circuit, name)(float(operation.data[0]), *wires)
         else:
             getattr(circuit, name)(*wires)
     return circuit
+
+
+@pytest.mark.qcec
+@pytest.mark.parametrize("adapter", ["qiskit", "pennylane"])
+@pytest.mark.parametrize("theta", [0.375, 2 * math.pi])
+@pytest.mark.parametrize("level", ["O1", "O2"])
+@pytest.mark.parametrize(
+    "gate",
+    [
+        "p",
+        "y",
+        "sx",
+        "rx",
+        "ry",
+        "swap",
+        "cy",
+        "ch",
+        "cp",
+        "crx",
+        "cry",
+        "crz",
+        "cswap",
+    ],
+)
+def test_native_gate_adapter_equivalence(adapter, theta, level, gate):
+    arity = (
+        3
+        if gate == "cswap"
+        else 2
+        if gate in {"swap", "cy", "ch", "cp", "crx", "cry", "crz"}
+        else 1
+    )
+    angle = theta if gate in {"p", "rx", "ry", "cp", "crx", "cry", "crz"} else None
+    program = [
+        ("h", (0,), None),
+        ("h", (1,), None),
+        ("h", (2,), None),
+        ("cx", (0, 2), None),
+        (gate, tuple(range(arity)), angle),
+        ("t", (1,), None),
+        ("h", (1,), None),
+        ("cx", (0, 2), None),
+    ]
+    original = _qiskit_circuit(program, 3)
+    optimized = _optimize_with(
+        adapter,
+        program,
+        3,
+        {
+            "level": level,
+            "superopt_qubits": 3,
+            "superopt_window_gates": 4,
+            "superopt_murm_entries": 500,
+        },
+    )
+    assert qcec.verify(original, optimized).equivalence in ACCEPTED

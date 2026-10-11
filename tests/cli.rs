@@ -46,6 +46,120 @@ fn tzap_report(args: &[&str]) -> Json {
 }
 
 #[test]
+fn rotations_flags_and_explicit_pass_aliases_lower_phases_and_all_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rotations.qasm");
+    fs::write(
+        &input,
+        "OPENQASM 2.0;\nqreg q[2];\nrx(-0.73) q[0];\nry(1.39) q[1];\nrz(0.37) q[0];\np(0.73) q[0];\ncp(0.37) q[0],q[1];\ncrx(-0.73) q[1],q[0];\ncry(1.39) q[0],q[1];\ncrz(0.37) q[1],q[0];\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["--decompose-rotations", "-O1"],
+        vec!["--decompose-rz", "-O1"],
+        vec!["--passes", "DecomposeRotations"],
+        vec!["--passes", "DecomposeRz"],
+        vec!["--decompose-rotations", "--parallel", "-O1"],
+        vec!["--decompose-rotations", "--to-pbc"],
+    ] {
+        let output = dir.path().join("output.txt");
+        let mut full = vec![
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--epsilon",
+            "1e-3",
+        ];
+        full.extend_from_slice(&args);
+        let result = tzap_run(&full);
+        assert_success(&result, &format!("{args:?}"));
+        let text = fs::read_to_string(&output).unwrap();
+        assert!(
+            ![
+                "rz(", "rx(", "ry(", "u1(", "cu1(", "p(", "cp(", "crx(", "cry(", "crz("
+            ]
+            .iter()
+            .any(|axis| text.contains(axis)),
+            "{args:?}: {text}"
+        );
+        if !args.contains(&"--to-pbc") {
+            assert!(tzap::qasm::parse(&text).is_ok());
+        }
+    }
+    let conflicting = tzap_run(&[
+        input.to_str().unwrap(),
+        "--decompose-rotations",
+        "--passes",
+        "CancelGates",
+    ]);
+    assert!(!conflicting.status.success());
+    let no_flag = tzap_run(&[input.to_str().unwrap(), "--to-pbc"]);
+    assert!(!no_flag.status.success());
+    assert!(String::from_utf8_lossy(&no_flag.stderr).contains("--decompose-rotations"));
+    let report = tzap_report(&[
+        input.to_str().unwrap(),
+        "-O1",
+        "--decompose-rotations",
+        "--epsilon",
+        "1e-3",
+    ]);
+    assert!(report.at("options/decompose_rotations").as_bool());
+    assert!(report.at("options/decompose_rz").as_bool());
+}
+
+#[test]
+fn pauli_folding_is_selectable_and_handles_native_cross_axis_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("pauli-rotations.qasm");
+    let output = dir.path().join("pauli-output.qasm");
+    for (body, expected) in [
+        (
+            "rx(0.125) data[0]; h data[0]; rz(0.25) data[0];",
+            vec![
+                tzap::circuit::Gate::h(0),
+                tzap::circuit::Gate::rz_f64(0.375, 0).unwrap(),
+            ],
+        ),
+        (
+            "ry(0.125) data[0]; s data[0]; rx(0.25) data[0];",
+            vec![
+                tzap::circuit::Gate::s(0),
+                tzap::circuit::Gate::rx_f64(0.125, 0).unwrap(),
+            ],
+        ),
+    ] {
+        let source = format!("OPENQASM 2.0; qreg data[1]; creg result[1]; qreg unused[0]; {body}");
+        fs::write(&input, &source).unwrap();
+        for args in [
+            vec!["--passes", "PhaseFoldPauli"],
+            vec!["--passes", "PhaseFoldPauli", "--fixpoint"],
+            vec!["-O1"],
+            vec!["-O2"],
+            vec!["-O3"],
+            vec!["-Osuper"],
+        ] {
+            let mut command = vec![
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap(),
+                "-q",
+            ];
+            command.extend(args);
+            let result = tzap_run(&command);
+            assert_success(&result, "native Pauli folding");
+            let text = fs::read_to_string(&output).unwrap();
+            let actual = tzap::circuit::Circuit::from_qasm(&text).unwrap();
+            assert_eq!(actual.gates, expected);
+            let original = tzap::circuit::Circuit::from_qasm(&source).unwrap();
+            assert_eq!(
+                (actual.num_qubits, actual.num_cbits),
+                (original.num_qubits, original.num_cbits)
+            );
+        }
+    }
+}
+
+#[test]
 fn no_args_prints_usage() {
     let out = tzap_run(&[]);
     assert!(!out.status.success());
@@ -1038,7 +1152,7 @@ fn o3_reports_native_and_post_rz_fixpoints() {
         !stderr.contains("Gate cancellation") && !stderr.contains("Phase folding"),
         "fixpoint progress should not print optimization-pass logs:\n{stderr}"
     );
-    assert!(stderr.contains("Rz → Clifford+T decomposition"));
+    assert!(stderr.contains("Rotations → Clifford+T decomposition"));
     assert!(stderr.contains("Converged after"), "got: {stderr}");
 
     let report = tzap_report(&[
@@ -1100,13 +1214,14 @@ fn optimization_levels_are_mutually_exclusive() {
 // --- pass and mode combinations ---
 
 /// Every pass selectable via `--passes`, in default pipeline order.
-const ALL_PASS_NAMES: [&str; 7] = [
+const ALL_PASS_NAMES: [&str; 8] = [
     "DecomposeToffoli",
     "DecomposeCz",
     "DecomposeRz",
     "CancelGates",
     "SuperOpt",
     "PhaseFoldRand",
+    "PhaseFoldPauli",
     "CnotMin",
 ];
 

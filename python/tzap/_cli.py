@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.set_defaults(level="O3")
     parser.add_argument("--passes", help="comma-separated explicit pass pipeline")
     parser.add_argument("--fixpoint", action="store_true")
-    parser.add_argument("--decompose-rz", action="store_true")
+    parser.add_argument("--decompose-rotations", "--decompose-rz", action="store_true")
     parser.add_argument("--decompose-cz", action="store_true")
     parser.add_argument("--decompose-ccx", action="store_true")
     parser.add_argument("--superopt-gates", default="auto")
@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
             level=args.level,
             passes=passes,
             fixpoint=args.fixpoint,
-            decompose_rz=args.decompose_rz,
+            decompose_rotations=args.decompose_rotations,
             decompose_cz=args.decompose_cz,
             decompose_ccx=args.decompose_ccx,
             superopt_gates=args.superopt_gates,

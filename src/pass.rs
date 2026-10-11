@@ -1,7 +1,8 @@
 use crate::circuit::{Circuit, Gate, qubit_operands};
 
 /// A circuit pass. The default output keeps optimization pipelines gate-based;
-/// terminal conversions can select a different output type.
+/// terminal conversions can select a different output type. Whole-circuit gate
+/// passes retain the input qubit and classical-bit counts.
 ///
 /// Implementors are not required to be `Sync`/`Send`: a pass may cache state
 /// behind interior mutability that isn't safe to share across threads (see
@@ -54,11 +55,24 @@ pub fn count_rz(c: &Circuit) -> usize {
     c.gates.iter().filter(|g| matches!(g, Gate::rz(..))).count()
 }
 
-/// Number of two-qubit `cnot`/`cz` gates in the circuit.
+/// Number of two-qubit gates in the circuit.
 pub fn count_2q(c: &Circuit) -> usize {
     c.gates
         .iter()
-        .filter(|g| matches!(g, Gate::cnot { .. } | Gate::cz { .. }))
+        .filter(|g| {
+            matches!(
+                g,
+                Gate::cnot { .. }
+                    | Gate::cz { .. }
+                    | Gate::swap(..)
+                    | Gate::cy { .. }
+                    | Gate::ch { .. }
+                    | Gate::cp { .. }
+                    | Gate::crx { .. }
+                    | Gate::cry { .. }
+                    | Gate::crz { .. }
+            )
+        })
         .count()
 }
 

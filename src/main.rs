@@ -406,7 +406,7 @@ fn toffolis(circuit: &Circuit) -> usize {
 /// the offending instruction: resets, gates repeating a qubit, and Rz gates
 /// that no requested pass decomposes.
 fn check_pbc_input(ui: &Ui, run: &Run, circuit: &Circuit) {
-    let decomposes_rz = run.options.decompose_rz
+    let decomposes_rz = run.options.decompose_rotations_enabled()
         || run
             .options
             .passes
@@ -415,8 +415,17 @@ fn check_pbc_input(ui: &Ui, run: &Run, circuit: &Circuit) {
     for (index, gate) in circuit.gates.iter().enumerate() {
         let problem = match gate {
             Gate::reset(_) => "PBC has no resets",
-            Gate::rz(..) if !decomposes_rz => {
-                "Rz needs --decompose-rz (or DecomposeRz in --passes) before PBC conversion"
+            Gate::rz(..)
+            | Gate::p(..)
+            | Gate::rx(..)
+            | Gate::ry(..)
+            | Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. }
+                if !decomposes_rz =>
+            {
+                "Rotations need --decompose-rotations (or DecomposeRotations in --passes) before PBC conversion"
             }
             _ => {
                 let mut qubits = tzap::circuit::qubits_of(gate);

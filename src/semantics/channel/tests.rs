@@ -685,3 +685,108 @@ fn certified_rz_folders_preserve_exact_channels_through_measurement_and_reset() 
         }
     }
 }
+
+#[test]
+fn native_fixed_gates_preserve_exact_channels_around_measurements() {
+    let cx = |control, target| Gate::cnot { control, target };
+    for (gate, expansion) in [
+        (Gate::y(0), vec![Gate::sdg(0), Gate::x(0), Gate::s(0)]),
+        (Gate::sx(1), vec![Gate::h(1), Gate::s(1), Gate::h(1)]),
+        (Gate::swap(1, 0), vec![cx(1, 0), cx(0, 1), cx(1, 0)]),
+    ] {
+        for before in [false, true] {
+            let mut prefix = vec![Gate::h(0), cx(0, 1), Gate::t(1)];
+            if before {
+                prefix.push(measure(0, 0));
+            }
+            let mut native = prefix.clone();
+            let mut expanded = prefix;
+            native.push(gate.clone());
+            expanded.extend(expansion.clone());
+            native.push(measure(1, 0));
+            expanded.push(measure(1, 0));
+            for initial in [false, true] {
+                let actual = gate_channel(&circuit(2, 1, native.clone()), &[initial]);
+                assert_eq!(
+                    actual,
+                    gate_channel(&circuit(2, 1, expanded.clone()), &[initial])
+                );
+                assert_trace_preserving(&actual);
+            }
+        }
+    }
+}
+
+#[test]
+fn fixed_controlled_gates_preserve_exact_channels_with_measurement() {
+    let cy = Gate::cy {
+        control: 0,
+        target: 1,
+    };
+    let cx = Gate::cnot {
+        control: 0,
+        target: 1,
+    };
+    let ch = Gate::ch {
+        control: 0,
+        target: 1,
+    };
+    let ch_terms = vec![
+        Gate::cz {
+            control: 0,
+            target: 1,
+        },
+        Gate::sdg(1),
+        Gate::h(1),
+        Gate::t(1),
+        Gate::h(1),
+        Gate::s(1),
+        cx.clone(),
+        Gate::sdg(1),
+        Gate::h(1),
+        Gate::tdg(1),
+        Gate::h(1),
+        Gate::s(1),
+        cx.clone(),
+    ];
+    let swap_cx = Gate::cnot {
+        control: 1,
+        target: 2,
+    };
+    for (gate, terms) in [
+        (cy, vec![Gate::sdg(1), cx, Gate::s(1)]),
+        (ch, ch_terms),
+        (
+            Gate::cswap {
+                control: 0,
+                first: 1,
+                second: 2,
+            },
+            vec![
+                swap_cx.clone(),
+                Gate::ccx {
+                    control1: 0,
+                    control2: 2,
+                    target: 1,
+                },
+                swap_cx,
+            ],
+        ),
+    ] {
+        for before in [false, true] {
+            let mut prefix = vec![Gate::h(0), Gate::h(1), Gate::t(2)];
+            if before {
+                prefix.push(measure(0, 0));
+            }
+            let mut native = prefix.clone();
+            native.push(gate.clone());
+            native.push(measure(1, 0));
+            let mut expanded = prefix;
+            expanded.extend(terms.clone());
+            expanded.push(measure(1, 0));
+            let actual = gate_channel(&circuit(3, 1, native), &[false]);
+            assert_eq!(actual, gate_channel(&circuit(3, 1, expanded), &[false]));
+            assert_trace_preserving(&actual);
+        }
+    }
+}

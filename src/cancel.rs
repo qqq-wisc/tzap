@@ -594,6 +594,22 @@ fn commutes_past_cnot(g: &Gate, c: Qubit, t: Qubit) -> bool {
         } => *target != t && *control1 != t && *control2 != t,
         Gate::measure { qubit, .. } => *qubit != c && *qubit != t,
         Gate::reset(q) => *q != c && *q != t,
+        Gate::p(..)
+        | Gate::y(_)
+        | Gate::sx(_)
+        | Gate::rx(..)
+        | Gate::ry(..)
+        | Gate::swap(..)
+        | Gate::cy { .. }
+        | Gate::cp { .. }
+        | Gate::crx { .. }
+        | Gate::cry { .. }
+        | Gate::crz { .. }
+        | Gate::ch { .. }
+        | Gate::cswap { .. } => {
+            let (n, qs) = qubit_operands(g);
+            qs[..n].iter().all(|&q| q != c && q != t)
+        }
     }
 }
 
@@ -617,6 +633,22 @@ fn commutes_past_cz(g: &Gate, a: Qubit, b: Qubit) -> bool {
         Gate::cnot { target, .. } | Gate::ccx { target, .. } => *target != a && *target != b,
         Gate::measure { qubit, .. } => *qubit != a && *qubit != b,
         Gate::reset(q) => *q != a && *q != b,
+        Gate::p(..)
+        | Gate::y(_)
+        | Gate::sx(_)
+        | Gate::rx(..)
+        | Gate::ry(..)
+        | Gate::swap(..)
+        | Gate::cy { .. }
+        | Gate::cp { .. }
+        | Gate::crx { .. }
+        | Gate::cry { .. }
+        | Gate::crz { .. }
+        | Gate::ch { .. }
+        | Gate::cswap { .. } => {
+            let (n, qs) = qubit_operands(g);
+            qs[..n].iter().all(|&q| q != a && q != b)
+        }
     }
 }
 
@@ -646,6 +678,22 @@ fn commutes_past_ccx(g: &Gate, a: Qubit, b: Qubit, t: Qubit) -> bool {
         } => ![*control1, *control2, *target].contains(&t),
         Gate::measure { qubit, .. } => !touched(*qubit),
         Gate::reset(q) => !touched(*q),
+        Gate::p(..)
+        | Gate::y(_)
+        | Gate::sx(_)
+        | Gate::rx(..)
+        | Gate::ry(..)
+        | Gate::swap(..)
+        | Gate::cy { .. }
+        | Gate::cp { .. }
+        | Gate::crx { .. }
+        | Gate::cry { .. }
+        | Gate::crz { .. }
+        | Gate::ch { .. }
+        | Gate::cswap { .. } => {
+            let (n, qs) = qubit_operands(g);
+            qs[..n].iter().all(|&q| !touched(q))
+        }
     }
 }
 
@@ -665,6 +713,22 @@ fn commutes_past_ccz(g: &Gate, a: Qubit, b: Qubit, c: Qubit) -> bool {
         Gate::cnot { target, .. } | Gate::ccx { target, .. } => !touched(*target),
         Gate::measure { qubit, .. } => !touched(*qubit),
         Gate::reset(q) => !touched(*q),
+        Gate::p(..)
+        | Gate::y(_)
+        | Gate::sx(_)
+        | Gate::rx(..)
+        | Gate::ry(..)
+        | Gate::swap(..)
+        | Gate::cy { .. }
+        | Gate::cp { .. }
+        | Gate::crx { .. }
+        | Gate::cry { .. }
+        | Gate::crz { .. }
+        | Gate::ch { .. }
+        | Gate::cswap { .. } => {
+            let (n, qs) = qubit_operands(g);
+            qs[..n].iter().all(|&q| !touched(q))
+        }
     }
 }
 
@@ -700,7 +764,7 @@ impl Pass for CancelGates {
                 break;
             }
         }
-        let mut output = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+        let mut output = circuit.empty_like();
         for gate in gates {
             output.apply(gate);
         }

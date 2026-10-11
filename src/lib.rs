@@ -25,3 +25,6 @@ mod bench;
 mod semantics;
 #[cfg(test)]
 mod unitary;
+
+#[cfg(test)]
+mod native_gate_tests;

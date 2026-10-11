@@ -70,6 +70,7 @@ def optimize_qasm(
     level: str = "O3",
     passes: Iterable[str] | None = None,
     fixpoint: bool = False,
+    decompose_rotations: bool = False,
     decompose_rz: bool = False,
     decompose_cz: bool = False,
     decompose_ccx: bool = False,
@@ -86,8 +87,9 @@ def optimize_qasm(
     ``"Osuper"``. Supplying ``passes`` replaces the level's default pipeline.
     Pass names are the same as the CLI's ``--passes`` names.
 
-    Native ``ccx``, ``ccz``, ``cz``, and ``rz`` gates are preserved unless
-    their matching ``decompose_*`` option is enabled. ``superopt_gates`` is
+    Native ``ccx``, ``ccz``, ``cz``, phase gates, and rotations are preserved unless
+    their matching ``decompose_*`` option is enabled. ``decompose_rotations``
+    lowers P, RZ/RX/RY, CP, and CRZ/CRX/CRY; ``decompose_rz`` is a compatibility alias. ``superopt_gates`` is
     ``"auto"``, ``"base"``, or an explicit comma-separated synthesis basis.
 
     The CPU-heavy optimizer releases Python's GIL while it runs.
@@ -100,6 +102,7 @@ def optimize_qasm(
         level=level,
         passes=pass_list,
         fixpoint=fixpoint,
+        decompose_rotations=decompose_rotations,
         decompose_rz=decompose_rz,
         decompose_cz=decompose_cz,
         decompose_ccx=decompose_ccx,

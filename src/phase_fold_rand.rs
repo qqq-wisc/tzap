@@ -146,6 +146,26 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
                 &mut fingerprint_to_group,
                 &mut skip,
             ),
+            Gate::p(..)
+            | Gate::y(_)
+            | Gate::sx(_)
+            | Gate::rx(..)
+            | Gate::ry(..)
+            | Gate::swap(..)
+            | Gate::cy { .. }
+            | Gate::cp { .. }
+            | Gate::crx { .. }
+            | Gate::cry { .. }
+            | Gate::crz { .. }
+            | Gate::ch { .. }
+            | Gate::cswap { .. } => {
+                // Native transfer rules are separate work. End the current
+                // phase-analysis region and retain this operation verbatim.
+                fingerprint_to_group.clear();
+                for value in &mut qubits {
+                    *value = fresh_fingerprint();
+                }
+            }
             Gate::h(q) => {
                 qubits[*q as usize] = fresh_fingerprint();
             }
@@ -219,7 +239,7 @@ pub fn phase_fold_rand(circuit: &Circuit) -> Circuit {
     }
 
     // Reconstruct circuit, moving gates to avoid per-gate clones.
-    let mut output = Circuit::with_cbits(n, circuit.num_cbits);
+    let mut output = circuit.empty_like();
     for (idx, gate) in circuit.gates.clone().into_iter().enumerate() {
         if skip[idx] {
             continue;

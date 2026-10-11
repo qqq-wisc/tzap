@@ -294,9 +294,6 @@ def test_supported_operation_with_wrong_arity_is_rejected(monkeypatch):
 @pytest.mark.parametrize(
     "operation",
     [
-        qml.RX(0.2, wires=0),
-        qml.RY(0.2, wires=0),
-        qml.SWAP(wires=[0, 1]),
         qml.Identity(wires=0),
         qml.adjoint(qml.Hadamard(0)),
         qml.BasisState(np.array([1]), wires=0),
@@ -343,8 +340,8 @@ def test_output_bridge_reconstructs_standalone_reset():
 
 
 def test_output_bridge_rejects_unknown_native_operation():
-    with pytest.raises(PennyLaneError, match="unsupported.*'y'"):
-        _output_operations("y q[0];", ("wire",))
+    with pytest.raises(PennyLaneError, match="unsupported.*'unknown'"):
+        _output_operations("unknown q[0];", ("wire",))
 
 
 def test_qnode_unconditioned_mid_circuit_measurement_executes():
@@ -600,3 +597,61 @@ def _operation_signatures(operations):
         )
         for operation in operations
     ]
+
+
+@pytest.mark.parametrize("option", [None, "decompose_rotations", "decompose_rz"])
+def test_all_rotation_axes_roundtrip_and_decompose(option):
+    tape = qml.tape.QuantumScript(
+        [
+            qml.Hadamard(0),
+            qml.RX(-0.73, 0),
+            qml.CNOT([0, 1]),
+            qml.RY(1.39, 1),
+            qml.RZ(0.37, 0),
+        ]
+    )
+    kwargs = {} if option is None else {option: True}
+    output, _ = transform_tape(tape, level="O1", rz_epsilon=1e-3, **kwargs)
+    expected = qml.matrix(tape, wire_order=[0, 1])
+    actual = qml.matrix(output, wire_order=[0, 1])
+    index = np.argmax(np.abs(expected))
+    phase = expected.flat[index] / actual.flat[index]
+    phase /= abs(phase)
+    assert np.allclose(expected, phase * actual, atol=4e-3)
+    if option:
+        assert not any(op.name in ("RX", "RY", "RZ") for op in output.operations)
+    else:
+        assert {"RX", "RY", "RZ"}.issubset(operation_names(output))
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        qml.PhaseShift(0.73, wires=2),
+        qml.PauliY(2),
+        qml.SX(2),
+        qml.SWAP([2, 0]),
+        qml.CY([2, 0]),
+        qml.CH([2, 0]),
+        qml.ControlledPhaseShift(0.73, [2, 0]),
+        qml.CRX(0.73, [2, 0]),
+        qml.CRY(0.73, [2, 0]),
+        qml.CRZ(0.73, [2, 0]),
+        qml.CSWAP([2, 0, 1]),
+    ],
+)
+def test_native_standard_gate_transport_preserves_unitary(operation):
+    tape = qml.tape.QuantumScript([qml.Hadamard(0), qml.Hadamard(2), operation])
+    transformed, _ = transform_tape(tape, level="O1")
+    actual = qml.matrix(transformed, wire_order=[0, 1, 2])
+    expected = qml.matrix(tape, wire_order=[0, 1, 2])
+    overlap = np.vdot(expected, actual)
+    assert np.allclose(actual, expected * overlap / abs(overlap), atol=1e-12)
+    if operation.num_params:
+        lowered, _ = transform_tape(
+            tape, level="O1", decompose_rotations=True, rz_epsilon=1e-4
+        )
+        assert not any(op.num_params for op in lowered.operations)
+        actual = qml.matrix(lowered, wire_order=[0, 1, 2])
+        overlap = np.vdot(expected, actual)
+        assert np.allclose(actual, expected * overlap / abs(overlap), atol=1e-4)

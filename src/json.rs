@@ -312,7 +312,14 @@ fn options_value(options: &Options, run: &RunInfo<'_>) -> Value {
             }),
         ),
         ("fixpoint", Value::Bool(options.fixpoint)),
-        ("decompose_rz", Value::Bool(options.decompose_rz)),
+        (
+            "decompose_rotations",
+            Value::Bool(options.decompose_rotations_enabled()),
+        ),
+        (
+            "decompose_rz",
+            Value::Bool(options.decompose_rotations_enabled()),
+        ),
         ("decompose_cz", Value::Bool(options.decompose_cz)),
         ("decompose_ccx", Value::Bool(options.decompose_ccx)),
         ("rz_epsilon", Value::Float(options.rz_epsilon)),

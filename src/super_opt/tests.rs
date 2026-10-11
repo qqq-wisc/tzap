@@ -1111,6 +1111,169 @@ fn rz_windows_are_rejected_without_matrix_lookup() {
 }
 
 #[test]
+fn native_parametric_gates_are_exact_matrix_boundaries() {
+    for gate in [
+        Gate::p_f64(0.37, 0).unwrap(),
+        Gate::rx_f64(0.0, 0).unwrap(),
+        Gate::ry_f64(std::f64::consts::PI, 0).unwrap(),
+    ] {
+        let mut circuit = Circuit::new(1);
+        circuit.gates = vec![Gate::h(0), gate.clone(), Gate::h(0)];
+        let result = SuperOpt::analyzer(1, 3)
+            .with_murm(murm(1, 2))
+            .run(&circuit)
+            .unwrap();
+        assert_eq!(result.circuit.gates, circuit.gates);
+        assert!(result.rewrites.is_empty());
+        assert!(
+            result
+                .subcircuits
+                .iter()
+                .all(|w| !w.gate_indices.contains(&1) && w.gate_indices != [0, 2])
+        );
+        assert!(compact_normalized_key(&circuit, &[1], &[0]).is_none());
+        let only = (circuit).replacing_gates(vec![gate]);
+        let result = SuperOpt::analyzer(1, 1).run(&only).unwrap();
+        assert_eq!(result.cache_hits + result.cache_misses, 0);
+    }
+}
+
+#[test]
+fn native_parametric_barriers_survive_bridged_histories() {
+    for gate in [
+        Gate::p_f64(0.37, 1).unwrap(),
+        Gate::rx_f64(-0.73, 1).unwrap(),
+        Gate::ry_f64(1.39, 1).unwrap(),
+    ] {
+        let circuit = Circuit::with_cbits(2, 0).replacing_gates(vec![
+            Gate::h(0),
+            gate.clone(),
+            Gate::cnot {
+                control: 0,
+                target: 1,
+            },
+            Gate::t(1),
+            Gate::h(0),
+        ]);
+        let result = SuperOpt::analyzer(2, 5)
+            .with_murm(murm(2, 2))
+            .run(&circuit)
+            .unwrap();
+        assert!(result.circuit.gates.contains(&gate));
+        assert!(
+            result
+                .subcircuits
+                .iter()
+                .all(|w| !w.gate_indices.contains(&1))
+        );
+        assert!(crate::unitary::circuits_equiv(
+            &result.circuit,
+            &circuit,
+            1e-10
+        ));
+        // A disjoint gate still permits independent cancellation.
+        let disjoint =
+            Circuit::with_cbits(2, 0).replacing_gates(vec![Gate::h(0), gate.clone(), Gate::h(0)]);
+        let result = SuperOpt::analyzer(2, 3)
+            .with_murm(murm(2, 2))
+            .run(&disjoint)
+            .unwrap();
+        assert_eq!(result.circuit.gates, vec![gate]);
+    }
+}
+
+#[test]
+fn native_fixed_gates_use_existing_murm_representatives() {
+    for (n, gates, expected) in [
+        (1, vec![Gate::y(0), Gate::y(0)], vec![]),
+        (1, vec![Gate::sx(0), Gate::sx(0)], vec![Gate::x(0)]),
+        (2, vec![Gate::swap(1, 0), Gate::swap(0, 1)], vec![]),
+    ] {
+        let circuit = Circuit::with_cbits(n, 0).replacing_gates(gates);
+        let result = SuperOpt::analyzer(n, 2)
+            .with_murm(murm(n, 1))
+            .run(&circuit)
+            .unwrap();
+        assert_eq!(result.circuit.gates, expected);
+        assert_matrix_equal(
+            &naive_matrix(&circuit, &[0, 1], &(0..n as Qubit).collect::<Vec<_>>()),
+            &naive_matrix(
+                &result.circuit,
+                &(0..result.circuit.gates.len()).collect::<Vec<_>>(),
+                &(0..n as Qubit).collect::<Vec<_>>(),
+            ),
+        );
+    }
+}
+
+#[test]
+fn native_fixed_matrix_keys_distinguish_gates_and_canonicalize_swap() {
+    let circuit = Circuit::with_cbits(18, 0).replacing_gates(vec![
+        Gate::x(3),
+        Gate::y(3),
+        Gate::sx(3),
+        Gate::swap(3, 17),
+        Gate::swap(17, 3),
+    ]);
+    let keys: Vec<_> = (0..5)
+        .map(|i| compact_normalized_key(&circuit, &[i], &[3, 17]).unwrap())
+        .collect();
+    for a in 0..4 {
+        for b in 0..a {
+            assert_ne!(keys[a], keys[b]);
+        }
+    }
+    assert_eq!(keys[3], keys[4]);
+    assert_matrix_equal(
+        &naive_matrix(&circuit, &[3], &[3, 17]),
+        &naive_matrix(&circuit, &[4], &[3, 17]),
+    );
+    // Five-qubit support forces the general cache path as well.
+    let pass = SuperOpt::analyzer(5, 6);
+    let mut wide = Circuit::new(5);
+    wide.gates = vec![
+        Gate::y(4),
+        Gate::sx(4),
+        Gate::swap(4, 1),
+        Gate::swap(1, 0),
+        Gate::swap(0, 2),
+        Gate::swap(2, 3),
+    ];
+    let result = pass.run(&wide).unwrap();
+    assert_eq!(result.circuit.gates, wide.gates);
+    let full = result
+        .subcircuits
+        .iter()
+        .find(|w| w.gate_indices.len() == 6)
+        .expect("five-qubit general matrix key");
+    assert_eq!(full.qubits, vec![0, 1, 2, 3, 4]);
+    assert_matrix_equal(
+        &full.matrix,
+        &naive_matrix(&wide, &full.gate_indices, &full.qubits),
+    );
+    let warm = pass.run(&wide).unwrap();
+    assert_eq!(warm.cache_misses, 0);
+}
+
+#[test]
+fn disk_read_rejects_previous_narrow_gate_set_format() {
+    let config = MurmConfig::new(1, 1, 100);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("murm.bin");
+    Murm::build(config)
+        .unwrap()
+        .write_to_disk(&path, config)
+        .unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    assert_eq!(
+        Murm::read_from_disk(&path, config).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
 fn coefficient_overflow_leaves_the_window_unchanged() {
     // This one-qubit Clifford+T word reaches a numerator coefficient outside
     // -127..=127. It is deliberately longer than the CLI presets so the test
@@ -1840,7 +2003,7 @@ fn disk_read_rejects_a_missing_or_corrupt_file() {
 fn murm_cache_body_offset(bytes: &[u8]) -> usize {
     // magic + format + version-length byte + version + qubits + gates +
     // entry cap + basis
-    27 + usize::from(bytes[8])
+    29 + usize::from(bytes[8])
 }
 
 #[test]
@@ -2677,4 +2840,144 @@ fn incremental_matches_full_sweeps_on_random_circuits() {
             current = next;
         }
     }
+}
+
+#[test]
+fn controlled_gates_have_safe_keys_murm_rewrites_and_parametric_barriers() {
+    for gate in [
+        Gate::cy {
+            control: 0,
+            target: 1,
+        },
+        Gate::ch {
+            control: 1,
+            target: 0,
+        },
+        Gate::cswap {
+            control: 0,
+            first: 1,
+            second: 2,
+        },
+    ] {
+        let n = if matches!(gate, Gate::cswap { .. }) {
+            3
+        } else {
+            2
+        };
+        let circuit = Circuit::with_cbits(n, 0).replacing_gates(vec![gate.clone(), gate]);
+        let result = SuperOpt::analyzer(n, 2)
+            .with_murm(murm(n, 1))
+            .run(&circuit)
+            .unwrap();
+        assert!(result.circuit.gates.is_empty());
+    }
+    for gate in [
+        Gate::cp {
+            lambda: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+        Gate::crx {
+            theta: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+        Gate::cry {
+            theta: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+        Gate::crz {
+            theta: crate::angle::Angle::from_f64(0.0).unwrap(),
+            control: 0,
+            target: 1,
+        },
+    ] {
+        let circuit = Circuit::with_cbits(2, 0).replacing_gates(vec![Gate::h(0), gate, Gate::h(0)]);
+        let result = SuperOpt::analyzer(2, 3)
+            .with_murm(murm(2, 2))
+            .run(&circuit)
+            .unwrap();
+        assert_eq!(result.circuit.gates, circuit.gates);
+        assert!(
+            result
+                .subcircuits
+                .iter()
+                .all(|w| !w.gate_indices.contains(&1) && w.gate_indices != [0, 2])
+        );
+        assert!(compact_normalized_key(&circuit, &[1], &[0, 1]).is_none());
+    }
+    let circuit = Circuit::with_cbits(3, 0).replacing_gates(vec![
+        Gate::x(1),
+        Gate::cy {
+            control: 0,
+            target: 1,
+        },
+        Gate::cy {
+            control: 1,
+            target: 0,
+        },
+        Gate::ch {
+            control: 0,
+            target: 1,
+        },
+        Gate::ch {
+            control: 1,
+            target: 0,
+        },
+        Gate::cswap {
+            control: 0,
+            first: 1,
+            second: 2,
+        },
+        Gate::cswap {
+            control: 0,
+            first: 2,
+            second: 1,
+        },
+        Gate::cswap {
+            control: 1,
+            first: 0,
+            second: 2,
+        },
+    ]);
+    let keys: Vec<_> = (0..circuit.gates.len())
+        .map(|i| compact_normalized_key(&circuit, &[i], &[0, 1, 2]).unwrap())
+        .collect();
+    assert_eq!(keys[5], keys[6]);
+    for a in 0..keys.len() {
+        for b in 0..a {
+            if (a, b) != (6, 5) {
+                assert_ne!(keys[a], keys[b]);
+            }
+        }
+    }
+    // Support wider than four qubits exercises the general-key fallback.
+    let wide = Circuit::with_cbits(5, 0).replacing_gates(vec![
+        Gate::ch {
+            control: 4,
+            target: 0,
+        },
+        Gate::cy {
+            control: 0,
+            target: 1,
+        },
+        Gate::cswap {
+            control: 1,
+            first: 2,
+            second: 3,
+        },
+    ]);
+    let pass = SuperOpt::analyzer(5, 3);
+    let cold = pass.run(&wide).unwrap();
+    let window = cold
+        .subcircuits
+        .iter()
+        .find(|w| w.gate_indices == [0, 1, 2])
+        .unwrap();
+    assert_matrix_equal(
+        &window.matrix,
+        &naive_matrix(&wide, &[0, 1, 2], &[0, 1, 2, 3, 4]),
+    );
+    assert_eq!(pass.run(&wide).unwrap().cache_misses, 0);
 }

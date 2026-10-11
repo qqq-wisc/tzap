@@ -121,6 +121,7 @@ fn assert_schema(report: &Json, context: &str) {
             "level",
             "passes",
             "fixpoint",
+            "decompose_rotations",
             "decompose_rz",
             "decompose_cz",
             "decompose_ccx",
@@ -141,6 +142,7 @@ fn assert_schema(report: &Json, context: &str) {
         level.as_str();
     }
     options.get("fixpoint").as_bool();
+    options.get("decompose_rotations").as_bool();
     options.get("decompose_rz").as_bool();
     options.get("decompose_cz").as_bool();
     options.get("decompose_ccx").as_bool();

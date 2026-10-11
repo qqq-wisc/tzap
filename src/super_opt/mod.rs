@@ -26,9 +26,10 @@
 //!   place is still sound because every skipped gate commutes past the
 //!   window: it shares no qubit with any member between anchor and head.
 //!
-//! A window dies when it exceeds `max_qubits` or `window_gates`, when Rz,
-//! measurement, or reset touches one of its qubits (Rz is outside SuperOpt's
-//! exact Clifford+T matrix domain; measurement/reset are non-unitary), or when
+//! A window dies when it exceeds `max_qubits` or `window_gates`, when a parametric
+//! gate, measurement, or reset touches one of its qubits (parametric gates are
+//! outside SuperOpt's exact Clifford+T matrix domain; measurement/reset are
+//! non-unitary), or when
 //! one of its gates is claimed by a selected rewrite. Each window is analyzed
 //! after every extension, so every intermediate size is considered, not just
 //! the final one.
@@ -266,11 +267,11 @@ struct ActiveWindow {
     // only ever needed on the miss path, where it is rebuilt into one shared
     // scratch buffer.
     state: Option<u32>,
-    // Tracked incrementally by `expand_component_closure` (the only place an
-    // Rz gate can enter `gate_indices`, via a bridged-in qubit's history), so
-    // `analyze_window` can reject an Rz window in O(1) instead of rescanning
+    // Tracked incrementally by `expand_component_closure` (the only place a
+    // barrier can enter `gate_indices`, via a bridged-in qubit's history), so
+    // `analyze_window` can reject it in O(1) instead of rescanning
     // the whole (monotonically growing) gate list on every touch.
-    contains_rz: bool,
+    contains_matrix_barrier: bool,
     // How many of `gate_indices` were already found unclaimed, and the
     // `RewriteSet` version that finding is valid at — see
     // `RewriteSet::window_claims_any`.
@@ -368,7 +369,7 @@ impl WindowArena {
                 window.qubits.clear();
                 window.qubits.extend_from_slice(qubits);
                 window.state = None;
-                window.contains_rz = false;
+                window.contains_matrix_barrier = false;
                 window.checked_len = 0;
                 window.checked_version = 0;
                 window.seq = seq;
@@ -379,7 +380,7 @@ impl WindowArena {
                     gate_indices: smallvec![anchor],
                     qubits: QubitVec::from_slice(qubits),
                     state: None,
-                    contains_rz: false,
+                    contains_matrix_barrier: false,
                     checked_len: 0,
                     checked_version: 0,
                     seq,
@@ -535,11 +536,11 @@ impl SuperOpt {
             // on every comparison — and without reading the arena at all.
             touched_windows.sort_unstable();
 
-            // Rz is outside the exact Clifford+T matrix domain; measurement
-            // and reset are non-unitary. All three terminate windows touching
-            // their qubit. Keep the gate in per-qubit history so a disjoint
+            // Parametric gates are outside the exact Clifford+T matrix domain;
+            // measurement and reset are non-unitary. These terminate windows
+            // touching their qubit. Keep the gate in per-qubit history so a disjoint
             // window cannot later bridge across this barrier.
-            if matches!(gate, Gate::rz(..) | Gate::measure { .. } | Gate::reset(_)) {
+            if !gate.kind().has_exact_matrix() {
                 for &entry in &touched_windows {
                     arena.retire(registered_slot(entry));
                 }
@@ -612,7 +613,7 @@ impl SuperOpt {
                 let window_id = arena.anchor(gate_index, &gate_qubits);
                 // A single non-identity Clifford+T gate cannot be rewritten to
                 // the empty circuit. Analyze it only when diagnostics were
-                // requested; Rz windows are rejected inside `analyze_window`.
+                // requested; barrier windows are rejected inside `analyze_window`.
                 if self.collect_subcircuits {
                     self.analyze_window(
                         circuit,
@@ -680,12 +681,11 @@ impl SuperOpt {
         subcircuits: &mut Vec<SuperOptWindow>,
     ) -> Result<bool, SuperOptError> {
         // Exact SuperOpt matrices represent Clifford+T only. Never construct
-        // a matrix or accept a rewrite for a window containing Rz; phase
-        // folding/decomposition is responsible for those rotations.
-        // `contains_rz` is tracked incrementally by `expand_component_closure`,
+        // a matrix or accept a rewrite for a window containing parametric gates.
+        // `contains_matrix_barrier` is tracked incrementally by `expand_component_closure`,
         // so this is O(1) rather than a rescan of the (monotonically growing)
         // gate list on every touch.
-        if window.contains_rz {
+        if window.contains_matrix_barrier {
             return Ok(false);
         }
         let code = appended.and_then(|code| code.encode(&window.qubits));
@@ -835,8 +835,8 @@ fn expand_component_closure(
             // `checked_len` members are unclaimed" record no longer names a
             // prefix of the members it was taken over.
             window.checked_len = 0;
-            if matches!(circuit.gates[gate_index], Gate::rz(..)) {
-                window.contains_rz = true;
+            if !circuit.gates[gate_index].kind().has_exact_matrix() {
+                window.contains_matrix_barrier = true;
             }
             if window.gate_indices.len() > max_gates {
                 return (false, added);
@@ -961,7 +961,7 @@ impl RewriteSet {
     /// because a window's members all commute past the unclaimed gates
     /// between them (see the module documentation).
     fn apply(self, circuit: &Circuit) -> (Circuit, Vec<SuperOptRewrite>) {
-        let mut optimized = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
+        let mut optimized = circuit.empty_like();
         for (index, gate) in circuit.gates.iter().enumerate() {
             if let Some(rewrite) = self.anchored[index] {
                 for gate in &self.selected[rewrite].replacement {
@@ -993,16 +993,40 @@ fn unique_qubits(gate: &Gate) -> QubitVec {
         | Gate::t(q)
         | Gate::tdg(q)
         | Gate::rz(_, q)
+        | Gate::p(_, q)
+        | Gate::y(q)
+        | Gate::sx(q)
+        | Gate::rx(_, q)
+        | Gate::ry(_, q)
         | Gate::reset(q) => smallvec![*q],
         Gate::measure { qubit, .. } => smallvec![*qubit],
-        Gate::cnot { control, target } | Gate::cz { control, target } => {
-            match (*control).cmp(target) {
-                std::cmp::Ordering::Less => smallvec![*control, *target],
-                std::cmp::Ordering::Greater => smallvec![*target, *control],
-                std::cmp::Ordering::Equal => smallvec![*control],
-            }
+        Gate::swap(control, target)
+        | Gate::cnot { control, target }
+        | Gate::cz { control, target }
+        | Gate::cy { control, target }
+        | Gate::ch { control, target }
+        | Gate::cp {
+            control, target, ..
         }
-        Gate::ccx {
+        | Gate::crx {
+            control, target, ..
+        }
+        | Gate::cry {
+            control, target, ..
+        }
+        | Gate::crz {
+            control, target, ..
+        } => match (*control).cmp(target) {
+            std::cmp::Ordering::Less => smallvec![*control, *target],
+            std::cmp::Ordering::Greater => smallvec![*target, *control],
+            std::cmp::Ordering::Equal => smallvec![*control],
+        },
+        Gate::cswap {
+            control: control1,
+            first: control2,
+            second: target,
+        }
+        | Gate::ccx {
             control1,
             control2,
             target,
