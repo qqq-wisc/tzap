@@ -107,10 +107,24 @@ The adapter retains:
 
 - quantum and classical registers and their bit identities;
 - circuit name and metadata;
-- the circuit's existing global phase;
+- the circuit's `global_phase` attribute, copied unchanged (see below);
 - measurements, resets, and their classical-bit mappings.
 
-Like tzap itself, circuit equivalence is considered up to global phase.
+### Global phase is not tracked
+
+Like tzap itself, the pass treats circuits as equivalent up to global phase.
+The optimized circuit equals the input times an unknown phase factor, and the
+copied `global_phase` does not account for it. Rewrites such as
+`p(a)` → `rz(a)`, folding T gates past an X, or gridsynth synthesis each change
+the phase.
+
+That difference is unobservable for the circuit on its own, but it becomes a
+relative phase, and so a wrong result, if the optimized circuit is later
+controlled. `QuantumCircuit.control()`, `ControlledGate`, and phase-estimation
+oracles all do this. Build controlled operations first (transpiling to the
+supported basis), then optimize; never call `.control()` on tzap output.
+Comparisons such as `Operator(a) == Operator(b)` likewise need
+`Operator.equiv`.
 Independent operations may have a different valid topological order after a
 Qiskit pass-manager round trip.
 

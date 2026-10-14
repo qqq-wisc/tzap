@@ -153,6 +153,10 @@ impl AngleContext {
         let mut budget = self.inputs(&[a])?;
         self.pow_inner(a, exponent, &mut budget)
     }
+    pub fn power(&mut self, a: &Angle, b: &Angle) -> Result<Angle, Error> {
+        let mut budget = self.inputs(&[a, b])?;
+        self.power_inner(a, b, &mut budget)
+    }
     pub fn function(&mut self, fun: Function, a: &Angle) -> Result<Angle, Error> {
         let mut budget = self.inputs(&[a])?;
         self.function_inner(fun, a, &mut budget)
@@ -809,6 +813,39 @@ impl AngleContext {
             }
         };
         self.intern(NodeKind::Power(a.clone(), e), sign, budget)
+    }
+
+    /// Real-valued `a^b`. Integer exponents stay exact powers; other exponents
+    /// use the principal value `exp(b·ln a)`, real only for `a > 0` (and
+    /// `0^b = 0` for proven-positive `b`).
+    pub(super) fn power_inner(
+        &mut self,
+        a: &Angle,
+        b: &Angle,
+        budget: &mut Budget,
+    ) -> Result<Angle, Error> {
+        let exponent = b.as_rational();
+        if let Some(r) = exponent.as_ref().filter(|r| r.is_integer()) {
+            let (e, _) = r.as_small().ok_or(Error::Limit(Resource::Work))?;
+            return self.pow_inner(a, e, budget);
+        }
+        match a.prove_positive() {
+            Proof::Proven => {}
+            Proof::Unknown => return Err(Error::DomainUnproved),
+            Proof::Disproven => {
+                return match (a.prove_zero(), b.prove_positive()) {
+                    (Proof::Proven, Proof::Proven) => Ok(Angle::ZERO),
+                    (Proof::Proven, Proof::Unknown) => Err(Error::DomainUnproved),
+                    _ => Err(Error::NonRealPower),
+                };
+            }
+        }
+        if exponent.is_some_and(|r| r == Rational::canonical(1, 2)) {
+            return self.function_inner(Function::Sqrt, a, budget);
+        }
+        let ln = self.function_inner(Function::Ln, a, budget)?;
+        let product = self.mul_inner(b, &ln, budget)?;
+        self.function_inner(Function::Exp, &product, budget)
     }
 
     pub(super) fn function_inner(

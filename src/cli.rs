@@ -679,13 +679,13 @@ fn print_help(ui: &Ui) {
         "    {bold}-o{reset} <file>        Write output to <file> (- for stdout)\n"
     ));
     out.push_str(&format!(
-        "    {bold}--decompose-ccx{reset}  Decompose CCX and CCZ gates into Clifford+T\n"
+        "    {bold}--decompose-ccx{reset}  Decompose CCX, CCZ and CSWAP gates into Clifford+T\n"
     ));
     out.push_str(&format!(
         "    {bold}--decompose-cz{reset}   Decompose CZ gates into H+CX+H\n"
     ));
     out.push_str(&format!(
-        "    {bold}--decompose-rotations{reset}   Decompose P, Rz/Rx/Ry, CP, CRz/CRx/CRy into Clifford+T (gridsynth)\n"
+        "    {bold}--decompose-rotations{reset}   Decompose P, Rz/Rx/Ry, CP, CRz/CRx/CRy and CH into Clifford+T\n"
     ));
     out.push_str("                     --decompose-rz is a compatibility alias.\n");
     out.push_str(&format!("    {bold}--epsilon{reset} <eps>  Approximation epsilon for --decompose-rotations (default: 1e-10)\n"));

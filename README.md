@@ -55,6 +55,12 @@ Qiskit optimization pass or PennyLane transform. See the
 [Qiskit API guide](https://github.com/qqq-wisc/tzap/blob/main/docs/qiskit.md) or
 [PennyLane API guide](https://github.com/qqq-wisc/tzap/blob/main/docs/pennylane.md) for framework-specific setup.
 
+> [!WARNING]
+> tzap does not track global phase: an optimized circuit equals its input only
+> up to an unknown phase. That is unobservable on its own, but becomes a
+> relative phase once the circuit is controlled (`QuantumCircuit.control()`,
+> `qml.ctrl`). Add controls *before* optimizing, never after.
+
 
 
 ## Running tzap
@@ -110,10 +116,15 @@ It retains exact pi fractions and declines numeric sums that add rounding.
 
 CCX, CCZ, CZ, phase gates, and ordinary/controlled rotations stay native by default. To decompose them, use:
 
-- `--decompose-ccx` to decompose CCX and CCZ
+- `--decompose-ccx` to decompose CCX, CCZ, and CSWAP
 - `--decompose-cz` to decompose CZ into CX+H
-- `--decompose-rotations` to decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy via gridsynth
+- `--decompose-rotations` to decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy via gridsynth, and CH exactly
   (`--decompose-rz` remains a compatibility alias)
+
+T/Tdg metrics include exact T-equivalent phase and axis rotations, including
+the half-angle terms of controlled rotations and CH's two T gates. Rz metrics
+count remaining arbitrary-angle terms: one for P/Rz/Rx/Ry, two for CRx/CRy/CRz,
+and three for CP. These resource counts do not require decomposition flags.
 
 **PBC circuits**
 
@@ -123,8 +134,9 @@ Use `--to-pbc` to convert a circuit to PBC and optimize its Pauli rotations:
 tzap input.qasm --to-pbc -o output.pbc
 ```
 
-Use `--decompose-rotations` for phase gates and rotations before PBC conversion.
-Native Y/SX/SWAP/CY/CH/CSWAP and resets are unsupported by PBC.
+Clifford gates, T, CCX/CCZ, and exact π/4-multiple rotations convert directly.
+Use `--decompose-rotations` for CH and other rotations, and `--decompose-ccx` for
+CSWAP, before PBC conversion. Resets are unsupported by PBC.
 See the [PBC guide](docs/pbc.md) for the format, options, and examples.
 
 ## Circuit support

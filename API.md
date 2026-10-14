@@ -115,7 +115,9 @@ let qasm_string = circuit.to_qasm();
 The parser accepts every gate above, including `u1` for P and `cu1` for CP.
 Serialization emits those QASM 2 aliases and expands SX, SWAP, and CSWAP
 exactly. CRX and CRY serialize as basis changes around CRZ, retaining the
-original checked angle without half-angle rounding.
+original checked angle without half-angle rounding. Only names from the
+original `qelib1.inc` are written; `tzap::qasm::for_each_emitted` and
+`emitted_gate_names` expose the exact statements, and metrics count them.
 
 The QASM parser accepts `ccz` as a native circuit gate. `DecomposeToffoli`
 lowers both `ccx` and `ccz` to Clifford+T.
@@ -177,10 +179,10 @@ CCX/CCZ, CZ, or Rz decomposition.
 | `level` | `Level::O3` | `O1` (cancel + phase-fold), `O2` (adds SuperOpt, 2 rounds), `O3` (same, to a fixpoint), `Osuper` (`O3` with the bigger SuperOpt bounds) |
 | `passes` | `None` | An explicit `Vec<PassName>` pipeline, replacing `level`'s |
 | `fixpoint` | `false` | Repeat until the gate count stops falling. Only consulted for pipelines that aren't already fixpoint loops (`passes`, or `O1`) |
-| `decompose_rotations` | `false` | Decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy into Clifford+T |
+| `decompose_rotations` | `false` | Decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy into Clifford+T; lower CH exactly |
 | `decompose_rz` | `false` | Compatibility alias for `decompose_rotations` |
 | `decompose_cz` | `false` | Decompose CZ into H+CX+H before optimizing |
-| `decompose_ccx` | `false` | Decompose CCX and CCZ into Clifford+T |
+| `decompose_ccx` | `false` | Decompose CCX, CCZ, and CSWAP into Clifford+T |
 | `rz_epsilon` | `1e-10` | Per-input-gate certified spectral epsilon for rotation decomposition |
 | `parallel` | `false` | Optimize gate-contiguous chunks concurrently, then concatenate |
 | `superopt` | all `None` | Per-run overrides for the SuperOpt window/MURM bounds |
@@ -188,9 +190,20 @@ CCX/CCZ, CZ, or Rz decomposition.
 
 `Report` carries three sets of `Metrics` (`gates`, `two_qubit`, `depth`, `t`,
 `rz`): `input` as handed in, `baseline` (the same original input comparison
-point), and `output`. Requested decompositions are opt-in middle stages:
+point), and `output`. All three count statements as `to_qasm` writes them
+(`tzap::qasm::for_each_emitted`): a SWAP counts as three CX gates, CRX/CRY
+include their basis changes, and CSWAP counts its CCX, so the numbers describe
+the emitted program. Requested decompositions are opt-in middle stages:
 optimize the input circuit, decompose CCX/CCZ then CZ then rotations, and optimize
 again when a decomposition changed the circuit.
+
+`t` and `count_t` include exact T-equivalent P/Rz/Rx/Ry rotations, the
+half-angle terms of CP/CRx/CRy/CRz, and CH's two T gates. `rz` and `count_rz`
+count arbitrary-angle terms still requiring synthesis: one per ordinary
+rotation or phase gate, two per controlled rotation, and three per CP.
+Only proven exact angles are classified as Clifford+T; decimal approximations
+remain arbitrary-angle terms. Native CCX/CCZ/CSWAP are counted as gates rather
+than assigned an implicit T cost.
 
 `Report::numerical` records resource-limited folds, randomized matching,
 certified syntheses and their outward-summed error bounds. Legacy preserved-source,
@@ -209,8 +222,10 @@ remains separate. Exact folds add no arithmetic rounding.
 returns the original circuit. Exact quarter turns lower without approximation.
 
 Y, SX, SWAP, CY, CH, and CSWAP have exact input matrices for SuperOpt; its
-synthesis basis remains unchanged. PBC conversion expands supported native
-Clifford gates exactly and requires rotation synthesis for non-quarter angles.
+synthesis basis remains unchanged. `to_pbc` lowers Y, SX, CY, SWAP, quarter-turn
+single-qubit rotations, and Clifford-angle controlled rotations exactly; for CH,
+CSWAP, and other rotations, `tzap::pbc::needs_decomposition` is true and the
+`UnsupportedGate` error names the pass to run first.
 
 The post-decomposition MURM basis excludes every gate family requested for
 decomposition, including gates named in an explicit `superopt_gates` basis.
@@ -268,9 +283,9 @@ A custom pass only needs to supply `name` and `run`.
 
 | Pass | Import | Description |
 |------|--------|-------------|
-| `DecomposeToffoli` | `tzap::decompose` | Breaks CCX and CCZ gates into Clifford+T |
+| `DecomposeToffoli` | `tzap::decompose` | Breaks CCX, CCZ, and CSWAP gates into Clifford+T |
 | `DecomposeCz` | `tzap::decompose` | Explicitly lowers CZ gates to H+CX+H |
-| `DecomposeRotations` | `tzap::decompose` | Decomposes phase gates and ordinary/controlled rotations into Clifford+T |
+| `DecomposeRotations` | `tzap::decompose` | Decomposes phase gates and ordinary/controlled rotations into Clifford+T; lowers CH exactly |
 | `CancelGates` | `tzap::cancel` | Removes adjacent self-inverse gate pairs (HH, XX, etc.) |
 | `SuperOpt` | `tzap::super_opt` | Replaces small windows using its shared MURM |
 | `PhaseFoldRand` | `tzap::phase_fold_rand` | Merges T/Rz gates across the circuit via randomized parity tracking |

@@ -295,9 +295,13 @@ def _optimize_transform(
     """Optimize a PennyLane tape, quantum function, or QNode with tzap.
 
     Terminal measurements and observables are retained by copying the input
-    ``QuantumScript`` with only its operation list replaced. Existing
-    ``GlobalPhase`` operations are preserved. Rotation parameters must be concrete,
-    finite, and non-trainable.
+    ``QuantumScript`` with only its operation list replaced. Rotation parameters
+    must be concrete, finite, and non-trainable.
+
+    Global phase is not tracked: the output equals the input only up to an
+    unknown phase, and existing ``GlobalPhase`` operations are copied unchanged.
+    Never apply ``qml.ctrl`` to an optimized function; that turns the unknown
+    phase into a wrong relative phase. Control first, then optimize.
     """
 
     qasm, wires, global_phases = _tape_to_qasm(tape)
@@ -357,7 +361,9 @@ def optimize(
 ):
     """Optimize a PennyLane tape, quantum function, or QNode with tzap.
 
-    Called without a circuit-like first argument, this returns a decorator.
+    The result equals the input only up to global phase; never apply
+    ``qml.ctrl`` to it. Called without a circuit-like first argument, this
+    returns a decorator.
     This wrapper keeps parameterized-decorator syntax consistent across
     PennyLane versions whose transform dispatchers differ on that syntax.
     """

@@ -166,9 +166,13 @@ class TzapPass(TransformationPass):
     """Run tzap as a Qiskit transformation pass.
 
     Input operations must already be in tzap's supported basis. Circuit name,
-    metadata, global phase, quantum/classical registers, and bit identities
-    are retained. Like tzap itself, circuit equivalence is considered up to
-    global phase.
+    metadata, quantum/classical registers, and bit identities are retained.
+
+    Global phase is not tracked: the output equals the input only up to an
+    unknown phase, and ``global_phase`` is copied from the input unchanged.
+    Do not call ``.control()`` (or otherwise control) the optimized circuit;
+    that turns the unknown phase into a wrong relative phase. Add controls
+    first, then optimize.
     """
 
     def __init__(
@@ -214,7 +218,10 @@ class TzapPass(TransformationPass):
 
 
 def optimize(circuit: QuantumCircuit, **options: Any) -> QuantumCircuit:
-    """Optimize a Qiskit circuit with a one-pass Qiskit ``PassManager``."""
+    """Optimize a Qiskit circuit with a one-pass Qiskit ``PassManager``.
+
+    The result equals ``circuit`` only up to global phase; see ``TzapPass``.
+    """
 
     return PassManager([TzapPass(**options)]).run(circuit)
 

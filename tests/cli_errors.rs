@@ -996,19 +996,15 @@ fn bulk_sweep_of_bad_cli_invocations_never_panics() {
 }
 
 /// Degenerate inputs that are *not* errors — an empty program, a header
-/// with no gates, a statement with no trailing `;` on its own line, an
-/// empty statement from `;;` — must still succeed cleanly rather than
-/// being rejected or (worse) crashing.
+/// with no gates, an empty statement from `;;` — must still succeed cleanly
+/// rather than being rejected or (worse) crashing. A final statement without
+/// `;` is invalid OpenQASM 2 (and may be a truncated file), so it is rejected.
 #[test]
 fn degenerate_but_valid_qasm_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let cases: &[(&str, &str)] = &[
         ("empty_program", ""),
         ("only_header", "OPENQASM 2.0;\ninclude \"qelib1.inc\";\n"),
-        (
-            "unterminated_line",
-            "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\nh q[0]",
-        ),
         (
             "double_semicolon",
             "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];;\nh q[0];\n",
@@ -1023,4 +1019,13 @@ fn degenerate_but_valid_qasm_succeeds() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    let path = write_qasm(
+        dir.path(),
+        "unterminated_line.qasm",
+        "OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[1];\nh q[0]",
+    );
+    let out = tzap_run(&[path.to_str().unwrap()]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("missing ';'"), "got: {stderr}");
 }

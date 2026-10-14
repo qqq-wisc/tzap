@@ -20,6 +20,7 @@ use crate::decompose::{DecomposeCz, DecomposeRotations, DecomposeToffoli};
 use crate::pass::{Pass, PassState};
 use crate::phase_fold_pauli::PhaseFoldPauli;
 use crate::phase_fold_rand::PhaseFoldRand;
+use crate::qasm;
 #[cfg(test)]
 use crate::super_opt::OPTIONAL_GATE_KINDS;
 use crate::super_opt::{
@@ -154,7 +155,7 @@ impl PassName {
         (
             "DecomposeToffoli",
             PassName::DecomposeToffoli,
-            "Decompose ccx (Toffoli) and ccz gates into Clifford+T",
+            "Decompose ccx (Toffoli), ccz and cswap gates into Clifford+T",
         ),
         (
             "DecomposeCz",
@@ -164,7 +165,7 @@ impl PassName {
         (
             "DecomposeRotations",
             PassName::DecomposeRotations,
-            "Decompose P, Rz/Rx/Ry, CP, CRz/CRx/CRy into Clifford+T (gridsynth; see --epsilon)",
+            "Decompose P, Rz/Rx/Ry, CP, CRz/CRx/CRy and CH into Clifford+T (gridsynth; see --epsilon)",
         ),
         (
             "CancelGates",
@@ -329,13 +330,13 @@ pub struct Options {
     /// consulted for pipelines that aren't already a fixpoint loop (`passes`,
     /// or [`Level::O1`]).
     pub fixpoint: bool,
-    /// Decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy into Clifford+T via gridsynth.
+    /// Decompose P, Rz/Rx/Ry, CP, and CRz/CRx/CRy via gridsynth, and CH exactly.
     pub decompose_rotations: bool,
     /// Compatibility option for `decompose_rotations`; also decomposes controlled rotations and phase gates.
     pub decompose_rz: bool,
     /// Decompose CZ gates into H+CX+H before optimizing.
     pub decompose_cz: bool,
-    /// Decompose CCX and CCZ gates into Clifford+T.
+    /// Decompose CCX, CCZ and CSWAP gates into Clifford+T.
     pub decompose_ccx: bool,
     /// Per-input-gate approximation epsilon for `decompose_rotations` (and its alias).
     pub rz_epsilon: f64,
@@ -380,7 +381,9 @@ pub struct Metrics {
     pub gates: usize,
     pub two_qubit: usize,
     pub depth: usize,
+    /// T/Tdg cost, including exact phase/axis rotations and CH.
     pub t: usize,
+    /// Arbitrary-angle rotation terms still requiring synthesis.
     pub rz: usize,
 }
 
@@ -392,7 +395,12 @@ impl Metrics {
     /// between one traversal and four is a measurable share of total runtime.
     /// `count_2q`/`count_t`/`count_rz`/`depth` remain as published, separately
     /// callable API; this just doesn't route through them.
+    ///
+    /// Gates are counted as [`qasm::serialize`] writes them (see
+    /// [`qasm::for_each_emitted`]), so input, baseline and output metrics all
+    /// describe OpenQASM 2 statements rather than tzap's native gate list.
     pub fn of(circuit: &Circuit) -> Metrics {
+        let mut gates = 0;
         let mut two_qubit = 0;
         let mut t = 0;
         let mut rz = 0;
@@ -400,35 +408,36 @@ impl Metrics {
         // past the deepest layer already occupied by any of its operands.
         let mut next_layer = vec![0usize; circuit.num_qubits];
         let mut depth = 0;
-        for gate in &circuit.gates {
-            match gate {
-                Gate::cnot { .. }
-                | Gate::cz { .. }
-                | Gate::swap(..)
-                | Gate::cy { .. }
-                | Gate::ch { .. }
-                | Gate::cp { .. }
-                | Gate::crx { .. }
-                | Gate::cry { .. }
-                | Gate::crz { .. } => two_qubit += 1,
-                Gate::t(_) | Gate::tdg(_) => t += 1,
-                Gate::rz(..) => rz += 1,
-                _ => {}
-            }
-            let (arity, operands) = qubit_operands(gate);
-            let layer = operands[..arity]
-                .iter()
-                .map(|&qubit| next_layer[qubit as usize])
-                .max()
-                .unwrap_or(0)
-                + 1;
-            for &qubit in &operands[..arity] {
-                next_layer[qubit as usize] = layer;
-            }
-            depth = depth.max(layer);
+        for native in &circuit.gates {
+            qasm::for_each_emitted(native, |gate: &Gate| {
+                gates += 1;
+                match gate {
+                    Gate::cnot { .. }
+                    | Gate::cz { .. }
+                    | Gate::cy { .. }
+                    | Gate::ch { .. }
+                    | Gate::cp { .. }
+                    | Gate::crz { .. } => two_qubit += 1,
+                    _ => {}
+                }
+                let (gate_t, gate_rz) = crate::pass::rotation_counts(gate);
+                t += gate_t;
+                rz += gate_rz;
+                let (arity, operands) = qubit_operands(gate);
+                let layer = operands[..arity]
+                    .iter()
+                    .map(|&qubit| next_layer[qubit as usize])
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                for &qubit in &operands[..arity] {
+                    next_layer[qubit as usize] = layer;
+                }
+                depth = depth.max(layer);
+            });
         }
         Metrics {
-            gates: circuit.gates.len(),
+            gates,
             two_qubit,
             depth,
             t,
@@ -1300,7 +1309,7 @@ pub fn optimize_with(
     let mut forbidden = GateSet::EMPTY;
     if options.decompose_ccx {
         forbidden = forbidden.union(GateSet::from_bits_const(
-            (1 << GateKind::Ccx as u8) | (1 << GateKind::Ccz as u8),
+            (1 << GateKind::Ccx as u8) | (1 << GateKind::Ccz as u8) | (1 << GateKind::Cswap as u8),
         ));
     }
     if options.decompose_cz {
@@ -1316,6 +1325,7 @@ pub fn optimize_with(
             GateKind::Crx,
             GateKind::Cry,
             GateKind::Crz,
+            GateKind::Ch,
         ]));
     }
     let mut decomposed = false;
@@ -1323,7 +1333,11 @@ pub fn optimize_with(
     let decompositions: [(bool, GateSet, StageKind, &dyn Pass); 3] = [
         (
             options.decompose_ccx,
-            GateSet::from_bits_const((1 << GateKind::Ccx as u8) | (1 << GateKind::Ccz as u8)),
+            GateSet::from_bits_const(
+                (1 << GateKind::Ccx as u8)
+                    | (1 << GateKind::Ccz as u8)
+                    | (1 << GateKind::Cswap as u8),
+            ),
             StageKind::DecomposeCcx,
             &DecomposeToffoli,
         ),
@@ -1344,6 +1358,7 @@ pub fn optimize_with(
                 GateKind::Crx,
                 GateKind::Cry,
                 GateKind::Crz,
+                GateKind::Ch,
             ]),
             StageKind::DecomposeRotations,
             &DecomposeRotations {

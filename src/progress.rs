@@ -48,12 +48,15 @@ pub(crate) fn fmt_size(bytes: u64) -> String {
     }
 }
 
-/// Percentage reduction from `before` to `after` (0.0 when `before` is 0).
+/// Percentage reduction; growth from zero has no defined percentage.
+/// Negative infinity preserves its direction for bars and formats as `↑new`.
 fn pct(before: usize, after: usize) -> f64 {
     if before > 0 {
         (before as f64 - after as f64) / before as f64 * 100.0
-    } else {
+    } else if after == 0 {
         0.0
+    } else {
+        f64::NEG_INFINITY
     }
 }
 
@@ -68,10 +71,20 @@ fn arrow(reduction: f64) -> char {
 /// real change too small to show, so a box never hides one.
 fn magnitude(reduction: f64) -> String {
     let magnitude = reduction.abs();
-    if magnitude > 0.0 && magnitude < 0.05 {
+    if !magnitude.is_finite() {
+        "new".to_string()
+    } else if magnitude > 0.0 && magnitude < 0.05 {
         "<0.1".to_string()
     } else {
         format!("{magnitude:.1}")
+    }
+}
+
+fn live_percentage(reduction: f64) -> String {
+    if reduction.is_finite() {
+        format!("{reduction:.1}%")
+    } else {
+        "↑new".to_string()
     }
 }
 
@@ -86,8 +99,9 @@ fn format_result_trailing(
     let reduction_str = magnitude(reduction);
     let before_str = fmt_num(before);
     let after_str = fmt_num(after);
+    let percent = if reduction.is_finite() { '%' } else { ' ' };
     format!(
-        "{arrow}{reduction_str:>pct_width$}% · \
+        "{arrow}{reduction_str:>pct_width$}{percent} · \
          {before_str:>count_width$} → {after_str:>count_width$}"
     )
 }
@@ -138,10 +152,14 @@ impl Ui {
         } else {
             "fewer"
         };
-        let title = format!(
-            "Final result · {}% {direction} gates · {secs:.3}s",
-            magnitude(gates_reduction)
-        );
+        let title = if gates_reduction.is_finite() {
+            format!(
+                "Final result · {}% {direction} gates · {secs:.3}s",
+                magnitude(gates_reduction)
+            )
+        } else {
+            format!("Final result · {direction} gates · {secs:.3}s")
+        };
         self.print_reduction_box(&title, metrics);
     }
 
@@ -375,22 +393,34 @@ impl Ui {
             (
                 "Gates",
                 self.render_bar(gates_pct / 100.0, BAR_WIDTH, GATES_BAR_COLOR),
-                format!("{gates_pct:>5.1}% · {gates_str:<gates_width$}"),
+                format!(
+                    "{change:>6} · {gates_str:<gates_width$}",
+                    change = live_percentage(gates_pct)
+                ),
             ),
             (
                 "2q gates",
                 self.render_bar(two_qubit_pct / 100.0, BAR_WIDTH, TWO_QUBIT_BAR_COLOR),
-                format!("{two_qubit_pct:>5.1}% · {two_qubit_str:<two_qubit_width$}"),
+                format!(
+                    "{change:>6} · {two_qubit_str:<two_qubit_width$}",
+                    change = live_percentage(two_qubit_pct)
+                ),
             ),
             (
                 "T/Tdg",
                 self.render_bar(t_pct / 100.0, BAR_WIDTH, T_BAR_COLOR),
-                format!("{t_pct:>5.1}% · {t_str:<t_width$}"),
+                format!(
+                    "{change:>6} · {t_str:<t_width$}",
+                    change = live_percentage(t_pct)
+                ),
             ),
             (
                 "Depth",
                 self.render_bar(depth_pct / 100.0, BAR_WIDTH, DEPTH_BAR_COLOR),
-                format!("{depth_pct:>5.1}% · {depth_str:<depth_width$}"),
+                format!(
+                    "{change:>6} · {depth_str:<depth_width$}",
+                    change = live_percentage(depth_pct)
+                ),
             ),
         ];
         if baseline_rz > 0 {
@@ -402,7 +432,10 @@ impl Ui {
                 (
                     "Rz",
                     self.render_bar(rz_pct / 100.0, BAR_WIDTH, RZ_BAR_COLOR),
-                    format!("{rz_pct:>5.1}% · {rz_str:<rz_width$}"),
+                    format!(
+                        "{change:>6} · {rz_str:<rz_width$}",
+                        change = live_percentage(rz_pct)
+                    ),
                 ),
             );
         }
@@ -492,17 +525,26 @@ impl Ui {
             (
                 "Gates",
                 self.render_bar(gates_pct / 100.0, BAR_WIDTH, GATES_BAR_COLOR),
-                format!("{gates_pct:>5.1}% · {gates_str:<gates_width$}"),
+                format!(
+                    "{change:>6} · {gates_str:<gates_width$}",
+                    change = live_percentage(gates_pct)
+                ),
             ),
             (
                 "2q gates",
                 self.render_bar(two_qubit_pct / 100.0, BAR_WIDTH, TWO_QUBIT_BAR_COLOR),
-                format!("{two_qubit_pct:>5.1}% · {two_qubit_str:<two_qubit_width$}"),
+                format!(
+                    "{change:>6} · {two_qubit_str:<two_qubit_width$}",
+                    change = live_percentage(two_qubit_pct)
+                ),
             ),
             (
                 "T/Tdg",
                 self.render_bar(t_pct / 100.0, BAR_WIDTH, T_BAR_COLOR),
-                format!("{t_pct:>5.1}% · {t_str:<t_width$}"),
+                format!(
+                    "{change:>6} · {t_str:<t_width$}",
+                    change = live_percentage(t_pct)
+                ),
             ),
         ];
         if baseline_rz > 0 {
@@ -512,7 +554,10 @@ impl Ui {
             rows.push((
                 "Rz",
                 self.render_bar(rz_pct / 100.0, BAR_WIDTH, RZ_BAR_COLOR),
-                format!("{rz_pct:>5.1}% · {rz_str:<rz_width$}"),
+                format!(
+                    "{change:>6} · {rz_str:<rz_width$}",
+                    change = live_percentage(rz_pct)
+                ),
             ));
         }
         self.draw_progress("Parallel optimization — % reduction so far", &rows);
@@ -533,6 +578,20 @@ mod tests {
 
         let shrunk = format_result_trailing(pct(162, 3), 162, 3, 4, 3);
         assert!(shrunk.starts_with("↓98.1%"), "got: {shrunk}");
+    }
+
+    #[test]
+    fn growth_from_zero_is_new_resource_cost_not_a_reduction() {
+        let change = pct(0, 7);
+        let trailing = format_result_trailing(change, 0, 7, 3, 1);
+        assert_eq!(trailing, "↑new  · 0 → 7");
+        assert_eq!(live_percentage(change), "↑new");
+        let ui = Ui::plain();
+        assert_eq!(
+            ui.render_bar(change / 100.0, BAR_WIDTH, T_BAR_COLOR),
+            ui.render_bar(0.0, BAR_WIDTH, T_BAR_COLOR)
+        );
+        assert_eq!(pct(0, 0), 0.0);
     }
 
     #[test]

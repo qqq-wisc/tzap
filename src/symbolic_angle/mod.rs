@@ -76,6 +76,7 @@ pub enum Error {
     NonFinite,
     DivisionByZero,
     ZeroPowerZero,
+    NonRealPower,
     InvalidDomain(Function),
     DomainUnproved,
     Limit(Resource),
@@ -95,6 +96,9 @@ impl fmt::Display for Error {
                 f.write_str("angle expression must be finite: division by zero")
             }
             Self::ZeroPowerZero => f.write_str("0^0 is outside the supported real domain"),
+            Self::NonRealPower => {
+                f.write_str("non-integer power of a non-positive base is outside the real domain")
+            }
             Self::InvalidDomain(fun) => {
                 write!(f, "argument is outside {}'s real domain", fun.name())
             }

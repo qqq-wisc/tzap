@@ -66,17 +66,52 @@ pub fn run_passes(circuit: &Circuit, passes: &[&dyn Pass]) -> PassResult {
     }
 }
 
-/// Number of `t`/`tdg` gates in the circuit.
+/// T/Tdg cost of named gates and exact phase/axis rotation terms.
+/// Controlled rotations contribute two half-angle terms (CP contributes three).
+/// Angles requiring synthesis contribute to `count_rz`, not an estimated T cost.
 pub fn count_t(c: &Circuit) -> usize {
-    c.gates
-        .iter()
-        .filter(|g| matches!(g, Gate::t(_) | Gate::tdg(_)))
-        .count()
+    c.gates.iter().map(|g| rotation_counts(g).0).sum()
 }
 
-/// Number of `rz` gates in the circuit.
+/// Number of rotation terms that still require arbitrary-angle synthesis.
+/// P/Rz/Rx/Ry contribute one term; controlled rotations contribute two,
+/// or three for CP. Exact Clifford+T terms are counted separately by `count_t`.
 pub fn count_rz(c: &Circuit) -> usize {
-    c.gates.iter().filter(|g| matches!(g, Gate::rz(..))).count()
+    c.gates.iter().map(|g| rotation_counts(g).1).sum()
+}
+
+/// Shared by the public counters and the single-traversal progress metrics.
+pub(crate) fn rotation_counts(gate: &Gate) -> (usize, usize) {
+    fn angle_counts(angle: &crate::angle::Angle) -> (usize, usize) {
+        match angle.projective_quarters() {
+            Some(k) => (usize::from(k % 2 == 1), 0),
+            None => match angle.affine_parts() {
+                Some((phase, _)) => {
+                    let (t, rz) = angle_counts(&phase);
+                    (t, rz + 1)
+                }
+                None => (0, 1),
+            },
+        }
+    }
+    match gate {
+        Gate::t(_) | Gate::tdg(_) => (1, 0),
+        Gate::rz(a, _) | Gate::p(a, _) | Gate::rx(a, _) | Gate::ry(a, _) => angle_counts(a),
+        Gate::cp { lambda: a, .. }
+        | Gate::crx { theta: a, .. }
+        | Gate::cry { theta: a, .. }
+        | Gate::crz { theta: a, .. } => {
+            let terms = if matches!(gate, Gate::cp { .. }) {
+                3
+            } else {
+                2
+            };
+            let (t, rz) = a.checked_half().map_or((0, 1), |half| angle_counts(&half));
+            (terms * t, terms * rz)
+        }
+        Gate::ch { .. } => (2, 0),
+        _ => (0, 0),
+    }
 }
 
 /// Number of two-qubit gates in the circuit.
@@ -120,7 +155,7 @@ pub fn depth(c: &Circuit) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_2q, count_rz, depth};
+    use super::{count_2q, count_rz, count_t, depth};
     use crate::circuit::{Circuit, Gate};
 
     #[test]
@@ -141,13 +176,43 @@ mod tests {
     }
 
     #[test]
-    fn count_rz_counts_only_rz_gates() {
+    fn count_rz_counts_numeric_rotation_terms() {
         let mut circuit = Circuit::new(1);
         circuit.apply(Gate::rz_f64(0.25, 0).unwrap());
         circuit.apply(Gate::t(0));
         circuit.apply(Gate::rz_f64(-0.5, 0).unwrap());
 
         assert_eq!(count_rz(&circuit), 2);
+    }
+
+    #[test]
+    fn rotation_resource_counts_include_native_gates_and_exact_angles() {
+        for (gate, t, rz) in [
+            ("p(pi/4) q[0]", 1, 0),
+            ("rz(pi/4) q[0]", 1, 0),
+            ("rx(pi/4) q[0]", 1, 0),
+            ("ry(-3*pi/4) q[0]", 1, 0),
+            ("p(pi/2) q[0]", 0, 0),
+            ("rz(0) q[0]", 0, 0),
+            ("cp(pi/4) q[0],q[1]", 0, 3),
+            ("cp(pi/2) q[0],q[1]", 3, 0),
+            ("crz(pi/2) q[0],q[1]", 2, 0),
+            ("crx(-pi/2) q[0],q[1]", 2, 0),
+            ("cry(3*pi/2) q[0],q[1]", 2, 0),
+            ("crz(2*pi) q[0],q[1]", 0, 0),
+            ("crz(4*pi) q[0],q[1]", 0, 0),
+            ("ch q[0],q[1]", 2, 0),
+            ("rx(0.7853981633974483) q[0]", 0, 1),
+            ("ry(0.3) q[0]", 0, 1),
+            ("cp(0.3) q[0],q[1]", 0, 3),
+            ("crz(0.3) q[0],q[1]", 0, 2),
+            ("rz(pi/4 + 0.3) q[0]", 1, 1),
+        ] {
+            let circuit = Circuit::from_qasm(&format!("qreg q[2]; {gate};")).unwrap();
+            assert_eq!((count_t(&circuit), count_rz(&circuit)), (t, rz), "{gate}");
+            let metrics = crate::optimize::Metrics::of(&circuit);
+            assert_eq!((metrics.t, metrics.rz), (t, rz), "{gate}");
+        }
     }
 
     #[test]

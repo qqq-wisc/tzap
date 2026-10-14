@@ -97,11 +97,22 @@ The transform preserves:
 - arbitrary hashable wire labels;
 - shots and shot vectors;
 - terminal measurements and observables;
-- existing `GlobalPhase` operations;
+- existing `GlobalPhase` operations, copied unchanged (see below);
 - unconditioned mid-circuit measurements and reset.
 
 Postselection and classical feed-forward are rejected as unsupported dynamic
-circuits. The optimized circuit is equivalent up to global phase.
+circuits.
+
+### Global phase is not tracked
+
+The optimized circuit equals the input only up to an unknown global phase, and
+the copied `GlobalPhase` operations do not account for it. Rewrites such as
+`PhaseShift(a)` → `RZ(a)` or gridsynth synthesis each change the phase.
+Expectation values, probabilities, and samples are unaffected, but `qml.ctrl`
+of an optimized function turns the difference into a relative phase and gives
+wrong results. Apply `qml.ctrl` (and decompose to the supported gates) first,
+then optimize; never control tzap output. `qml.matrix` comparisons need
+`qml.math.allclose` up to phase.
 
 ## API and options
 

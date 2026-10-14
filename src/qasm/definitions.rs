@@ -300,7 +300,7 @@ impl Registry {
         };
         loop {
             let statement = scanner
-                .next(false)?
+                .next()?
                 .ok_or_else(|| format!("line {line}: gate '{name}' missing closing '}}'"))?;
             if statement.end == b'}' {
                 break;

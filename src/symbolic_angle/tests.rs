@@ -392,11 +392,37 @@ fn exact_expression_printing_roundtrips_across_contexts() {
 }
 
 #[test]
+fn non_integer_powers_use_the_real_principal_value() {
+    let mut ctx = AngleContext::default();
+    for (power, value) in [
+        ("2^(1/2)", "sqrt(2)"),
+        ("2^0.5", "sqrt(2)"),
+        ("4^(1/2)", "2"),
+        ("2^(1/3)", "exp(ln(2)/3)"),
+        ("2^-0.5", "exp(-ln(2)/2)"),
+        ("pi^pi", "exp(pi*ln(pi))"),
+        ("0^(1/2)", "0"),
+        ("-2^0.5", "-sqrt(2)"),
+        ("2^3", "8"),
+    ] {
+        let power_angle = ctx.parse(power).unwrap();
+        let value_angle = ctx.parse(value).unwrap();
+        assert_eq!(
+            ctx.prove_equal(&power_angle, &value_angle).unwrap(),
+            Proof::Proven,
+            "{power}"
+        );
+    }
+    for source in ["(-2)^0.5", "(-1)^(1/3)", "0^(-1/2)"] {
+        assert_eq!(ctx.parse(source), Err(Error::NonRealPower), "{source}");
+    }
+}
+
+#[test]
 fn malformed_input_and_all_budget_limits_fail_explicitly() {
     let mut ctx = AngleContext::default();
     for source in [
-        "", ".", "1e", "1e+", "1..2", "pi2", "sin 1", "foo(1)", "1+", "(1", "sin(1,2)", "2^(1/2)",
-        "pi^pi",
+        "", ".", "1e", "1e+", "1..2", "pi2", "sin 1", "foo(1)", "1+", "(1", "sin(1,2)",
     ] {
         assert!(ctx.parse(source).is_err(), "{source}");
     }

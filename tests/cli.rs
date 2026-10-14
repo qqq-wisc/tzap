@@ -108,6 +108,94 @@ fn rotations_flags_and_explicit_pass_aliases_lower_phases_and_all_rotations() {
 }
 
 #[test]
+fn cswap_and_ch_are_removed_by_flags_and_explicit_decomposition_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, gate, flag, pass, forbidden) in [
+        (
+            "cswap",
+            "cswap q[0],q[1],q[2];",
+            "--decompose-ccx",
+            "DecomposeToffoli",
+            "ccx ",
+        ),
+        (
+            "ch",
+            "ch q[1],q[0];",
+            "--decompose-rotations",
+            "DecomposeRotations",
+            "ch ",
+        ),
+    ] {
+        let input = dir.path().join(format!("{name}.qasm"));
+        let output = dir.path().join("output.qasm");
+        fs::write(&input, format!("OPENQASM 2.0; qreg q[3]; {gate}")).unwrap();
+        for mode in [
+            vec!["-O1", flag],
+            vec!["-O3", flag],
+            vec!["-O3", "--parallel", flag],
+            vec!["--passes", pass],
+            vec!["--passes", pass, "--parallel"],
+        ] {
+            let mut args = vec![input.to_str().unwrap(), "-o", output.to_str().unwrap()];
+            args.extend_from_slice(&mode);
+            let run = tzap_run(&args);
+            assert_success(&run, &format!("{name}: {mode:?}"));
+            let written = fs::read_to_string(&output).unwrap();
+            assert!(!written.contains(forbidden), "{mode:?}: {written}");
+            assert!(
+                !written.contains(&format!("{name} ")),
+                "{mode:?}: {written}"
+            );
+            assert!(tzap::qasm::parse(&written).is_ok());
+        }
+    }
+}
+
+#[test]
+fn native_rotation_metrics_do_not_report_gate_relabelling_as_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("rotation.qasm");
+    for (gate, t, rz) in [
+        ("rz(pi/4) q[0];", 1, 0),
+        ("p(pi/4) q[0];", 1, 0),
+        ("rx(pi/4) q[0];", 1, 0),
+        ("cp(pi/4) q[0],q[1];", 0, 3),
+        ("crz(pi/2) q[0],q[1];", 2, 0),
+    ] {
+        fs::write(&input, format!("OPENQASM 2.0; qreg q[2]; {gate}")).unwrap();
+        let report = tzap_report(&[input.to_str().unwrap(), "-O3"]);
+        for stage in ["input", "baseline", "output"] {
+            assert_eq!(
+                report.at(&format!("metrics/{stage}/t")).as_usize(),
+                t,
+                "{gate}: {stage}"
+            );
+            assert_eq!(
+                report.at(&format!("metrics/{stage}/rz")).as_usize(),
+                rz,
+                "{gate}: {stage}"
+            );
+        }
+        assert_eq!(report.at("reduction_percent/t").as_f64(), 0.0);
+        assert_eq!(report.at("reduction_percent/rz").as_f64(), 0.0);
+    }
+}
+
+#[test]
+fn t_cost_created_by_decomposition_is_shown_as_growth_from_zero() {
+    let run = tzap_run(&[TWO_CCX_QASM, "--passes", "DecomposeToffoli"]);
+    assert_success(&run, "new T cost");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let t_row = stderr
+        .lines()
+        .find(|line| line.contains("│ T/Tdg"))
+        .unwrap();
+    assert!(t_row.contains('↑') && t_row.contains("new"), "{t_row}");
+    assert!(!t_row.contains('%'), "{t_row}");
+    assert!(!t_row.contains("↓"), "{t_row}");
+}
+
+#[test]
 fn pauli_folding_is_selectable_and_handles_native_cross_axis_rotations() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("pauli-rotations.qasm");

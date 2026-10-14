@@ -1,7 +1,9 @@
 use std::num::NonZeroUsize;
 
+use crate::angle::Angle;
 use crate::circuit::{Circuit, Gate, Qubit};
 use crate::pass::Pass;
+use smallvec::SmallVec;
 
 use super::{
     PauliAngle, PauliAxis, PauliNode, PauliRef, PbcCircuit, PbcError, PbcOp, check_operands,
@@ -61,33 +63,147 @@ impl Pass<Result<PbcCircuit, PbcError>> for ToPbc {
 /// # Ok::<(), tzap::pbc::PbcError>(())
 /// ```
 pub fn to_pbc(circuit: &Circuit, max_weight: Option<NonZeroUsize>) -> Result<PbcCircuit, PbcError> {
-    // Validate the caller's indices before lowering can remove a zero Rz or
-    // expand one instruction. Certified angles are validated as one-qubit gates.
     u32::try_from(circuit.num_qubits).map_err(|_| PbcError::TooManyQubits)?;
+    // Lower Clifford gates and exact quarter-turn rotations, validating each
+    // term against the caller's instruction index. Allocate only on demand.
+    let mut lowered: Option<Circuit> = None;
     for (index, gate) in circuit.gates.iter().enumerate() {
-        let validation_gate = match gate {
-            Gate::rz(a, q) if a.projective_quarters().is_some() => Gate::z(*q),
-            _ => gate.clone(),
-        };
-        validate(circuit, &validation_gate).map_err(|cause| PbcError::InvalidInput {
+        let invalid = |cause| PbcError::InvalidInput {
             index,
             cause: Box::new(cause),
-        })?;
+        };
+        match pbc_terms(gate) {
+            None => {
+                validate(circuit, gate).map_err(invalid)?;
+                if let Some(out) = &mut lowered {
+                    out.apply(gate.clone());
+                }
+            }
+            Some(terms) => {
+                // A zero rotation lowers to nothing; still check its operands.
+                check_operands(gate, circuit.num_qubits).map_err(invalid)?;
+                for term in &terms {
+                    validate(circuit, term).map_err(invalid)?;
+                }
+                let out = lowered.get_or_insert_with(|| {
+                    let mut out = circuit.empty_like();
+                    out.gates.extend_from_slice(&circuit.gates[..index]);
+                    out
+                });
+                out.gates.extend(terms);
+            }
+        }
     }
-    let lowered = crate::angle::lowered_if_needed(circuit);
-    let circuit = &lowered;
+    let circuit = lowered.as_ref().unwrap_or(circuit);
     if max_weight.is_some_and(|w| w.get() < 3)
         && circuit
             .gates
             .iter()
             .any(|g| matches!(g, Gate::ccx { .. } | Gate::ccz { .. }))
     {
-        // Validate first, so errors refer to the caller's instruction indices.
-        validate_all(circuit)?;
         let decomposed = crate::decompose::DecomposeToffoli.run(circuit);
         return convert(&decomposed, max_weight);
     }
     convert(circuit, max_weight)
+}
+
+/// Whether `gate` must be decomposed before [`to_pbc`] accepts it: CH, CSWAP,
+/// and rotations other than exact quarter turns (and, when controlled,
+/// Clifford angles). The [`PbcError::UnsupportedGate`] message names the pass.
+pub fn needs_decomposition(gate: &Gate) -> bool {
+    pbc_terms(gate).is_none() && super::decomposition_pass(gate.kind()).is_some()
+}
+
+/// Gates the converter takes directly.
+fn accepted(gate: &Gate) -> bool {
+    matches!(
+        gate,
+        Gate::h(_)
+            | Gate::x(_)
+            | Gate::z(_)
+            | Gate::s(_)
+            | Gate::sdg(_)
+            | Gate::t(_)
+            | Gate::tdg(_)
+            | Gate::cnot { .. }
+            | Gate::cz { .. }
+            | Gate::ccx { .. }
+            | Gate::ccz { .. }
+            | Gate::measure { .. }
+    )
+}
+
+type Terms = SmallVec<[Gate; 12]>;
+
+/// Exact expansion into accepted gates, up to global phase (which PBC drops):
+/// Clifford gates the converter lacks, quarter-turn rotations, and controlled
+/// rotations whose exact expansion is Clifford. `None` means take `gate` as is
+/// (or reject it in `validate`).
+fn pbc_terms(gate: &Gate) -> Option<Terms> {
+    let mut terms = Terms::new();
+    match gate {
+        Gate::y(q) => terms.extend([Gate::z(*q), Gate::x(*q)]),
+        Gate::sx(q) => terms.extend([Gate::h(*q), Gate::s(*q), Gate::h(*q)]),
+        // S·X·S† = Y on the target.
+        Gate::cy { control, target } => terms.extend([
+            Gate::sdg(*target),
+            Gate::cnot {
+                control: *control,
+                target: *target,
+            },
+            Gate::s(*target),
+        ]),
+        Gate::swap(a, b) => {
+            for (control, target) in [(*a, *b), (*b, *a), (*a, *b)] {
+                terms.push(Gate::cnot { control, target });
+            }
+        }
+        Gate::rz(a, q) | Gate::p(a, q) | Gate::rx(a, q) | Gate::ry(a, q) => {
+            quarter_turn(gate, a, *q, false, &mut terms)?;
+        }
+        Gate::cp { .. } | Gate::crx { .. } | Gate::cry { .. } | Gate::crz { .. } => {
+            let expansion = crate::decompose::expand_controlled_rotation(gate).ok()??;
+            for term in &expansion {
+                match term {
+                    Gate::rz(a, q) | Gate::p(a, q) => quarter_turn(term, a, *q, true, &mut terms)?,
+                    _ => terms.push(term.clone()),
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(terms)
+}
+
+/// Append an exact quarter-turn rotation (`clifford`: half turns only).
+fn quarter_turn(
+    gate: &Gate,
+    angle: &Angle,
+    q: Qubit,
+    clifford: bool,
+    terms: &mut Terms,
+) -> Option<()> {
+    let quarters = angle.projective_quarters()?;
+    if clifford && quarters % 2 == 1 {
+        return None;
+    }
+    if matches!(gate, Gate::ry(..)) {
+        terms.push(Gate::sdg(q));
+    }
+    if matches!(gate, Gate::rx(..) | Gate::ry(..)) {
+        terms.push(Gate::h(q));
+    }
+    angle.try_emit(q, &mut |g| {
+        terms.push(g);
+        true
+    });
+    if matches!(gate, Gate::rx(..) | Gate::ry(..)) {
+        terms.push(Gate::h(q));
+    }
+    if matches!(gate, Gate::ry(..)) {
+        terms.push(Gate::s(q));
+    }
+    Some(())
 }
 
 fn validate_all(circuit: &Circuit) -> Result<(), PbcError> {
@@ -210,21 +326,7 @@ struct Cap {
 }
 
 fn validate(circuit: &Circuit, gate: &Gate) -> Result<(), PbcError> {
-    if !matches!(
-        gate,
-        Gate::h(_)
-            | Gate::x(_)
-            | Gate::z(_)
-            | Gate::s(_)
-            | Gate::sdg(_)
-            | Gate::t(_)
-            | Gate::tdg(_)
-            | Gate::cnot { .. }
-            | Gate::cz { .. }
-            | Gate::ccx { .. }
-            | Gate::ccz { .. }
-            | Gate::measure { .. }
-    ) {
+    if !accepted(gate) {
         return Err(PbcError::UnsupportedGate(gate.kind()));
     }
     check_operands(gate, circuit.num_qubits)?;

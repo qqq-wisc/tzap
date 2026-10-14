@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -92,8 +91,13 @@ def optimize_qasm(
 
     Native ``ccx``, ``ccz``, ``cz``, phase gates, and rotations are preserved unless
     their matching ``decompose_*`` option is enabled. ``decompose_rotations``
-    lowers P, RZ/RX/RY, CP, and CRZ/CRX/CRY; ``decompose_rz`` is a compatibility alias. ``superopt_gates`` is
+    lowers P, RZ/RX/RY, CP, CRZ/CRX/CRY, and CH; ``decompose_rz`` is a compatibility alias.
+    ``decompose_ccx`` also lowers CSWAP. ``superopt_gates`` is
     ``"auto"``, ``"base"``, or an explicit comma-separated synthesis basis.
+
+    The returned OpenQASM uses only original ``qelib1.inc`` names: P and CP are
+    written as ``u1``/``cu1``, and SX, SWAP, CSWAP, CRX, and CRY as exact
+    expansions (CRX/CRY around ``crz``). Report metrics count those statements.
 
     The CPU-heavy optimizer releases Python's GIL while it runs.
     """
@@ -122,10 +126,4 @@ def optimize_qasm(
         output=_metrics(raw_report[2]),
         numerical=NumericalReport(*raw_report[3]),
     )
-    if report.numerical.preserved_expressions:
-        warnings.warn(
-            f"tzap retained {report.numerical.preserved_expressions} angle expressions unchanged because exact representation or folding exceeded its limits",
-            RuntimeWarning,
-            stacklevel=2,
-        )
     return OptimizationResult(optimized, report)

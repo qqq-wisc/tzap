@@ -771,3 +771,85 @@ fn sdk_custom_bodies_use_mathematical_constants_and_bound_binary64_values() {
         assert!(error.contains("SDK parameter must be a numeric literal"));
     }
 }
+
+#[test]
+fn qasm2_lexical_rules_reject_signed_integers_reserved_names_and_truncation() {
+    for (source, message) in [
+        ("qreg q[2]; h q[+1];", "bad qubit index '+1'"),
+        ("qreg a[1]; qreg q[2]; h q[+1];", "bad qubit index '+1'"),
+        (
+            "qreg q[1]; creg c[2]; measure q[0] -> c[+1];",
+            "bad cbit index '+1'",
+        ),
+        ("qreg q[+2];", "bad qreg size '+2'"),
+        ("creg c[+2];", "bad creg size '+2'"),
+        ("gate g(sin) a { rz(sin) a; }", "invalid formal name 'sin'"),
+        ("gate g a,sqrt { CX a,sqrt; }", "invalid formal name 'sqrt'"),
+        ("gate exp a { h a; }", "invalid gate name 'exp'"),
+        ("qreg ln[1];", "invalid qreg declaration"),
+        // A file cut off mid-statement must not broadcast over the register.
+        ("qreg q[4]; h q", "missing ';'"),
+        ("qreg q[4]; h q[3]", "missing ';'"),
+    ] {
+        fails(source, message);
+    }
+    assert_eq!(gates("qreg q[2]; h q[ 1 ];"), vec![Gate::h(1)]);
+    assert_eq!(gates("qreg q[4]; h q[3]; // trailing\n"), vec![Gate::h(3)]);
+    assert_eq!(
+        gates("gate g(sine) a { rz(sine) a; } qreg q[1]; g(pi/4) q[0];"),
+        gates("qreg q[1]; rz(pi/4) q[0];")
+    );
+}
+
+#[test]
+fn non_integer_exponents_bind_exactly_in_gate_bodies() {
+    let expected = gates("qreg q[1]; rz(sqrt(2)) q[0]; rz(exp(ln(3)/4)) q[0];");
+    assert_eq!(
+        gates("qreg q[1]; rz(2^0.5) q[0]; rz(3^0.25) q[0];"),
+        expected
+    );
+    assert_eq!(
+        gates("gate g(a,b) x { rz(a^0.5) x; rz(b^(1/4)) x; } qreg q[1]; g(2,3) q[0];"),
+        expected
+    );
+    fails(
+        "gate g(a) x { rz(a^0.5) x; } qreg q[1]; g(-1) q[0];",
+        "non-integer power of a non-positive base",
+    );
+    fails("qreg q[1]; rz((-2)^0.5) q[0];", "non-integer power");
+}
+
+#[test]
+fn reports_describe_the_emitted_statements_for_every_native_gate() {
+    let source = "qreg q[3]; creg c[1];
+        h q[0]; x q[1]; y q[2]; z q[0]; s q[1]; sdg q[2]; t q[0]; tdg q[1]; sx q[2];
+        rz(0.3) q[0]; rx(pi/4) q[1]; ry(0.2) q[2]; p(pi/8) q[0];
+        cx q[0],q[1]; cz q[1],q[2]; cy q[2],q[0]; ch q[0],q[2]; swap q[1],q[0];
+        cp(0.4) q[0],q[1]; crx(pi/2) q[1],q[2]; cry(0.5) q[2],q[0]; crz(pi) q[0],q[2];
+        ccx q[0],q[1],q[2]; ccz q[2],q[1],q[0]; cswap q[1],q[2],q[0];
+        measure q[0] -> c[0]; reset q[1];";
+    let circuit = parse(source).unwrap();
+    let emitted = serialize(&circuit);
+    let reparsed = parse(&emitted).unwrap();
+    assert_eq!(
+        crate::optimize::Metrics::of(&circuit),
+        crate::optimize::Metrics::of(&reparsed)
+    );
+    assert_eq!(
+        crate::optimize::Metrics::of(&circuit).gates,
+        emitted.lines().filter(|l| l.contains("q[")).count() - 1
+    );
+    let mut names: Vec<_> = emitted
+        .lines()
+        .skip(4)
+        .map(|l| scan::identifier(l).0)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut reported = emitted_gate_names(&circuit);
+    reported.sort_unstable();
+    assert_eq!(reported, names);
+    for absent in ["p", "cp", "sx", "swap", "crx", "cry", "cswap"] {
+        assert!(!reported.contains(&absent), "{absent}");
+    }
+}

@@ -1,8 +1,8 @@
 //! Gate-decomposition passes:
-//!   * `DecomposeToffoli` — rewrites every `ccx` and `ccz` into Clifford+T.
+//!   * `DecomposeToffoli` — rewrites every `ccx`, `ccz` and `cswap` into Clifford+T.
 //!   * `DecomposeCz` — rewrites every `cz` into `H · CNOT · H`.
 //!   * `DecomposeRotations` — lowers phase and ordinary/controlled rotations via
-//!     gridsynth (`rsgridsynth`).
+//!     gridsynth (`rsgridsynth`), and lowers CH exactly.
 
 use std::sync::Mutex;
 
@@ -11,7 +11,7 @@ use crate::pass::Pass;
 
 // --- Toffoli decomposition --------------------------------------------------
 
-/// Rewrites every `ccx` and `ccz` gate into Clifford+T.
+/// Rewrites every `ccx`, `ccz` and `cswap` gate into Clifford+T.
 pub struct DecomposeToffoli;
 
 fn emit_ccx_decomposition(output: &mut Circuit, c0: Qubit, c1: Qubit, t: Qubit) {
@@ -77,6 +77,19 @@ impl Pass for DecomposeToffoli {
                     emit_ccx_decomposition(&mut output, *control1, *control2, *target);
                     output.apply(Gate::h(*target));
                 }
+                Gate::cswap {
+                    control,
+                    first,
+                    second,
+                } => {
+                    let cx = Gate::cnot {
+                        control: *first,
+                        target: *second,
+                    };
+                    output.apply(cx.clone());
+                    emit_ccx_decomposition(&mut output, *control, *second, *first);
+                    output.apply(cx);
+                }
                 other => output.apply(other.clone()),
             }
         }
@@ -116,7 +129,8 @@ impl Pass for DecomposeCz {
 
 // --- Rz decomposition via gridsynth -----------------------------------------
 
-/// Synthesizes phase and ordinary/controlled axis rotations into Clifford+T.
+/// Synthesizes phase and ordinary/controlled axis rotations into Clifford+T,
+/// and decomposes CH exactly.
 pub struct DecomposeRotations {
     /// Approximation precision; smaller is more accurate but produces a
     /// larger decomposition. Defaults to `1e-10`.
@@ -399,6 +413,29 @@ fn word_gates(word: Vec<char>, q: crate::circuit::Qubit) -> Result<Vec<Gate>, Sy
 }
 
 fn synthesize_single_rotation(gate: &Gate, epsilon: f64) -> Result<Vec<Gate>, SynthesisError> {
+    if let Gate::ch { control, target } = gate {
+        // H = Ry(pi/4) Z Ry(-pi/4). Each Ry is Clifford-conjugated T/Tdg;
+        // their global phases cancel, preserving the controlled branch phase.
+        let q = *target;
+        return Ok(vec![
+            Gate::sdg(q),
+            Gate::h(q),
+            Gate::tdg(q),
+            Gate::h(q),
+            Gate::s(q),
+            Gate::h(q),
+            Gate::cnot {
+                control: *control,
+                target: q,
+            },
+            Gate::h(q),
+            Gate::sdg(q),
+            Gate::h(q),
+            Gate::t(q),
+            Gate::h(q),
+            Gate::s(q),
+        ]);
+    }
     let (theta, q) = match gate {
         Gate::rz(a, q) | Gate::p(a, q) | Gate::rx(a, q) | Gate::ry(a, q) => (a, *q),
         _ => return Ok(vec![gate.clone()]),
@@ -435,6 +472,68 @@ mod tests {
     use std::f64::consts::PI;
 
     // --- Toffoli decomposition tests ---
+
+    #[test]
+    fn cswap_decomposition_is_exact_for_every_operand_order() {
+        for control in 0..3 {
+            for first in 0..3 {
+                for second in 0..3 {
+                    if control == first || control == second || first == second {
+                        continue;
+                    }
+                    let mut input = Circuit::new(3);
+                    input.apply(Gate::cswap {
+                        control,
+                        first,
+                        second,
+                    });
+                    let output = DecomposeToffoli.run(&input);
+                    assert!(output.gates.iter().all(|gate| !matches!(
+                        gate,
+                        Gate::cswap { .. } | Gate::ccx { .. } | Gate::ccz { .. }
+                    )));
+                    assert!(circuits_equiv(&input, &output, 1e-12));
+                    assert_eq!(output.gates.len(), 17);
+                    assert_eq!(output.gates, DecomposeToffoli.run(&output).gates);
+                    assert!(!output.to_qasm().contains("ccx "));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ch_decomposition_is_exact_and_preserves_controlled_phase() {
+        for (control, target) in [(0, 1), (1, 0)] {
+            let mut input = Circuit::new(2);
+            input.apply(Gate::ch { control, target });
+            let output = DecomposeRotations::default().try_run(&input).unwrap();
+            assert!(output.gates.iter().all(|gate| matches!(
+                gate,
+                Gate::h(_)
+                    | Gate::s(_)
+                    | Gate::sdg(_)
+                    | Gate::t(_)
+                    | Gate::tdg(_)
+                    | Gate::cnot { .. }
+            )));
+            assert!(circuits_equiv(&input, &output, 1e-12));
+            // Compare matrices directly as well: projective equivalence alone
+            // would hide a wrong phase on one branch if the control were fixed.
+            let a = crate::unitary::circuit_unitary(&input);
+            let b = crate::unitary::circuit_unitary(&output);
+            for (a, b) in a.iter().flatten().zip(b.iter().flatten()) {
+                assert!((*a - *b).norm_sq() < 1e-24);
+            }
+            assert_eq!(crate::pass::count_t(&output), 2);
+            assert_eq!(
+                output.gates,
+                DecomposeRotations::default()
+                    .try_run(&output)
+                    .unwrap()
+                    .gates
+            );
+        }
+    }
 
     #[test]
     fn toffoli_single() {

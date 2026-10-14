@@ -324,7 +324,8 @@ def test_comments_and_angle_expressions_are_accepted():
 
     result = tzap.optimize_qasm(circuit, passes=["CancelGates"])
 
-    assert result.report.input.rz == 1
+    # An exact quarter turn is Clifford: no T and no arbitrary-angle Rz term.
+    assert (result.report.input.t, result.report.input.rz) == (0, 0)
     assert "s q[0];" in result.qasm
     assert result.report.output.rz == 0
 

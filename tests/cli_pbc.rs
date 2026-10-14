@@ -206,7 +206,7 @@ fn unsupported_inputs_fail_even_without_output_destination() {
         ("reset q[0];", "gate 1 (reset q0): PBC has no resets"),
         (
             "rz(pi/5) q[0];",
-            "gate 1 (rz(((1/5)*pi)) q0): Rotations need --decompose-rotations",
+            "gate 1 (rz(((1/5)*pi)) q0): Rotations at non-Clifford angles need --decompose-rotations",
         ),
         (
             "h q[1];\ncx q[0],q[0];",
@@ -747,5 +747,54 @@ fn expansion_budget_flag() {
         &["-", "--to-pbc", "--pbc-expansion-budget", "lots"],
     ] {
         Tzap::new(bad).stdin(&source).run().failed("bad flag use");
+    }
+}
+
+#[test]
+fn clifford_gates_convert_and_other_gates_name_their_decomposition_flag() {
+    let convert = |body: &str, flags: &[&str]| {
+        let mut args = vec!["-", "-o", "-", "--to-pbc", "--passes", "CancelGates"];
+        args.extend_from_slice(flags);
+        Tzap::new(&args).stdin(&qasm(3, body)).run()
+    };
+    for body in [
+        "y q[0];\nsx q[1];\ncy q[0],q[2];\nswap q[1],q[2];",
+        "rz(pi/2) q[0];\nrx(pi) q[1];\nry(-pi/2) q[2];\np(pi/4) q[0];",
+        "crz(pi) q[0],q[1];\ncp(pi) q[1],q[2];\ncrx(2*pi) q[2],q[0];\ncry(-pi) q[0],q[2];",
+    ] {
+        convert(body, &[]).ok(body);
+    }
+    for (body, error, flag) in [
+        (
+            "ch q[0],q[1];",
+            "gate 1 (ch q0, q1): CH needs --decompose-rotations",
+            "--decompose-rotations",
+        ),
+        (
+            "crz(pi/2) q[0],q[1];",
+            "Rotations at non-Clifford angles need --decompose-rotations",
+            "--decompose-rotations",
+        ),
+        (
+            "h q[0];\ncswap q[0],q[1],q[2];",
+            "gate 2 (cswap q0, q1, q2): CSWAP needs --decompose-ccx",
+            "--decompose-ccx",
+        ),
+    ] {
+        let run = convert(body, &[]).failed(body);
+        assert!(run.stderr.contains(error), "{}", run.stderr);
+        let passes = if flag == "--decompose-ccx" {
+            "CancelGates,DecomposeToffoli"
+        } else {
+            "CancelGates,DecomposeRotations"
+        };
+        Tzap::new(&["-", "-o", "-", "--to-pbc", "--passes", passes])
+            .stdin(&qasm(3, body))
+            .run()
+            .ok(passes);
+        Tzap::new(&["-", "-o", "-", "--to-pbc", "-O1", flag])
+            .stdin(&qasm(3, body))
+            .run()
+            .ok(flag);
     }
 }

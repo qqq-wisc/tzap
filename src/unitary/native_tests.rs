@@ -351,19 +351,28 @@ fn native_gates_are_preserved_safely_by_existing_passes() {
                 );
             }
         }
-        // PBC transfer rules are deferred; reject rather than silently drop.
-        assert_eq!(
-            crate::pbc::to_pbc(&circuit(3, &[gate.clone()]), None).unwrap_err(),
-            crate::pbc::PbcError::InvalidInput {
-                index: 0,
-                cause: Box::new(crate::pbc::PbcError::UnsupportedGate(gate.kind()))
-            }
-        );
+        // PBC lowers Clifford gates exactly and rejects the rest, naming the
+        // decomposition pass, rather than silently dropping them.
+        let single = circuit(3, &[gate.clone()]);
+        if crate::pbc::needs_decomposition(&gate) {
+            assert_eq!(
+                crate::pbc::to_pbc(&single, None).unwrap_err(),
+                crate::pbc::PbcError::InvalidInput {
+                    index: 0,
+                    cause: Box::new(crate::pbc::PbcError::UnsupportedGate(gate.kind()))
+                }
+            );
+        } else {
+            let pbc = crate::pbc::to_pbc(&single, None).unwrap();
+            let actual =
+                crate::semantics::pbc_unitary(&pbc, crate::semantics::Limits::default()).unwrap();
+            crate::semantics::test_support::check_numeric(&actual, &single);
+        }
     }
 }
 
 #[test]
-fn native_swap_counts_as_one_two_qubit_gate_and_occupies_both_wires() {
+fn native_swap_counts_once_natively_and_as_three_cx_in_emitted_metrics() {
     let input = circuit(
         3,
         &[
@@ -375,9 +384,11 @@ fn native_swap_counts_as_one_two_qubit_gate_and_occupies_both_wires() {
     );
     assert_eq!(crate::pass::count_2q(&input), 1);
     assert_eq!(crate::pass::depth(&input), 3);
+    // Reports describe serialized QASM 2: SX is H·S·H and SWAP is three CX.
     let metrics = crate::optimize::Metrics::of(&input);
-    assert_eq!(metrics.two_qubit, 1);
-    assert_eq!(metrics.depth, 3);
+    assert_eq!(metrics.gates, 8);
+    assert_eq!(metrics.two_qubit, 3);
+    assert_eq!(metrics.depth, 7);
 }
 
 #[test]

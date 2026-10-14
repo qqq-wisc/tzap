@@ -1,3 +1,4 @@
+use super::scan::nninteger;
 use super::{
     Evaluation, Operands,
     definitions::{self, Callable, Registry},
@@ -59,7 +60,7 @@ pub(super) fn operand(
     if let [(name, offset, width)] = registers
         && let Some(rest) = s.strip_prefix(name.as_str())
         && let Some(index) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']'))
-        && let Ok(index) = index.parse::<usize>()
+        && let Some(index) = nninteger(index)
         && index < *width
     {
         return Ok(Operand::Indexed((offset + index) as u32));
@@ -79,10 +80,9 @@ pub(super) fn operand(
         if !s[close + 1..].trim().is_empty() {
             return Err(format!("line {line}: invalid {kind} operand '{s}'"));
         }
-        let index = s[open + 1..close]
-            .trim()
-            .parse::<usize>()
-            .map_err(|e| format!("line {line}: bad {kind} index: {e}"))?;
+        let text = s[open + 1..close].trim();
+        let index =
+            nninteger(text).ok_or_else(|| format!("line {line}: bad {kind} index '{text}'"))?;
         (s[..open].trim(), Some(index))
     } else {
         (s, None)

@@ -171,7 +171,8 @@ pub(crate) struct RunInfo<'a> {
     /// The output destination as named on the command line: a path, `"-"`
     /// for stdout, or `None` when the circuit was discarded.
     pub(crate) output_path: Option<&'a str>,
-    pub(crate) output_gate_set: GateSet,
+    /// Statement names in the emitted QASM (`u1`, not `p`; no `swap`).
+    pub(crate) output_gate_set: Vec<&'static str>,
     pub(crate) seconds: f64,
     /// Gate-level optimization was off (`--to-pbc` without `-O*`/`--passes`).
     pub(crate) gate_opts_off: bool,
@@ -382,7 +383,7 @@ pub(crate) fn render(
                     if run.pbc.is_some() && run.output_is_pbc {
                         Value::Null
                     } else {
-                        gate_set_value(run.output_gate_set)
+                        Value::Array(run.output_gate_set.iter().map(|&n| Value::str(n)).collect())
                     },
                 ),
             ]),

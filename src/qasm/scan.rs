@@ -41,7 +41,7 @@ impl<'a> Scanner<'a> {
         Ok(true)
     }
 
-    pub fn next(&mut self, allow_final_statement: bool) -> Result<Option<Statement<'a>>, String> {
+    pub fn next(&mut self) -> Result<Option<Statement<'a>>, String> {
         let bytes = self.source.as_bytes();
         loop {
             while self.pos < bytes.len() && bytes[self.pos].is_ascii_whitespace() {
@@ -131,7 +131,7 @@ impl<'a> Scanner<'a> {
             }
             None => Cow::Borrowed(&self.source[start..]),
         };
-        if !allow_final_statement && !text.trim().is_empty() {
+        if !text.trim().is_empty() {
             return Err(format!("line {line}: missing ';' or closing '}}'"));
         }
         Ok(Some(Statement { text, line, end: 0 }))
@@ -144,6 +144,15 @@ pub(super) fn identifier(s: &str) -> (&str, &str) {
         .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
         .count();
     (&s[..end], &s[end..])
+}
+
+/// OpenQASM 2 `nninteger`: ASCII digits only, so no sign is accepted.
+pub(super) fn nninteger(s: &str) -> Option<usize> {
+    let s = s.trim();
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 pub(super) fn valid_name(s: &str) -> bool {
@@ -161,5 +170,11 @@ pub(super) fn valid_name(s: &str) -> bool {
                 | "barrier"
                 | "if"
                 | "pi"
+                | "sin"
+                | "cos"
+                | "tan"
+                | "exp"
+                | "ln"
+                | "sqrt"
         )
 }

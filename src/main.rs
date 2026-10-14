@@ -394,38 +394,46 @@ fn fmt_median(median: f64) -> String {
     }
 }
 
+/// CCX/CCZ statements in the emitted QASM (CSWAP is written with one CCX).
 fn toffolis(circuit: &Circuit) -> usize {
-    circuit
-        .gates
-        .iter()
-        .filter(|g| matches!(g, Gate::ccx { .. } | Gate::ccz { .. }))
-        .count()
+    let mut count = 0;
+    for gate in &circuit.gates {
+        tzap::qasm::for_each_emitted(gate, |g| {
+            count += usize::from(matches!(g, Gate::ccx { .. } | Gate::ccz { .. }));
+        });
+    }
+    count
 }
 
 /// Reject input PBC conversion cannot take before any work is done, naming
-/// the offending instruction: resets, gates repeating a qubit, and Rz gates
-/// that no requested pass decomposes.
+/// the offending instruction: resets, gates repeating a qubit, and gates
+/// (CH, CSWAP, non-Clifford rotations) that no requested pass decomposes.
+/// Clifford gates and exact quarter-turn rotations convert directly.
 fn check_pbc_input(ui: &Ui, run: &Run, circuit: &Circuit) {
-    let decomposes_rz = run.options.decompose_rotations_enabled()
-        || run
-            .options
+    let requested = |pass| {
+        run.options
             .passes
             .as_ref()
-            .is_some_and(|p| p.contains(&tzap::optimize::PassName::DecomposeRz));
+            .is_some_and(|p| p.contains(&pass))
+    };
+    let decomposes_rz = run.options.decompose_rotations_enabled()
+        || requested(tzap::optimize::PassName::DecomposeRz);
+    let decomposes_ccx =
+        run.options.decompose_ccx || requested(tzap::optimize::PassName::DecomposeToffoli);
     for (index, gate) in circuit.gates.iter().enumerate() {
         let problem = match gate {
             Gate::reset(_) => "PBC has no resets",
-            Gate::rz(..)
-            | Gate::p(..)
-            | Gate::rx(..)
-            | Gate::ry(..)
-            | Gate::cp { .. }
-            | Gate::crx { .. }
-            | Gate::cry { .. }
-            | Gate::crz { .. }
-                if !decomposes_rz =>
+            Gate::cswap { .. } if !decomposes_ccx => {
+                "CSWAP needs --decompose-ccx (or DecomposeToffoli in --passes) before PBC conversion"
+            }
+            Gate::ch { .. } if !decomposes_rz => {
+                "CH needs --decompose-rotations (or DecomposeRotations in --passes) before PBC conversion"
+            }
+            _ if !matches!(gate, Gate::cswap { .. })
+                && !decomposes_rz
+                && tzap::pbc::needs_decomposition(gate) =>
             {
-                "Rotations need --decompose-rotations (or DecomposeRotations in --passes) before PBC conversion"
+                "Rotations at non-Clifford angles need --decompose-rotations (or DecomposeRotations in --passes) before PBC conversion"
             }
             _ => {
                 let mut qubits = tzap::circuit::qubits_of(gate);
@@ -799,15 +807,6 @@ fn main() {
     ));
     let bare_pbc = run.to_pbc && run.options.passes.as_ref().is_some_and(Vec::is_empty);
     let parsed = read_circuit(&ui, &run.input_path, bare_pbc);
-    let preserved = parsed
-        .circuit
-        .gates
-        .iter()
-        .filter(|g| matches!(g, Gate::rz(a, _) if a.is_preserved()))
-        .count();
-    if preserved != 0 {
-        ui.note(&format!("Warning: {preserved} angle expressions retained unchanged because exact representation or folding exceeded its limits"));
-    }
     // Said out loud only when the size decided it: a run nobody asked to
     // parallelize otherwise reaches the chunked progress box with no
     // explanation, and a slightly different gate count at the end.
@@ -923,7 +922,7 @@ fn main() {
             input_gate_set: parsed.circuit.gate_set(),
             parse_seconds: parsed.seconds,
             output_path: run.output_path.as_deref(),
-            output_gate_set: result.gate_set(),
+            output_gate_set: tzap::qasm::emitted_gate_names(&result),
             seconds: start.elapsed().as_secs_f64(),
             gate_opts_off: run.gate_opts_off,
             output_is_pbc: run.to_pbc,

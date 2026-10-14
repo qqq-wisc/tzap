@@ -675,11 +675,225 @@ fn errors_display_their_instruction_and_expose_their_cause() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "input gate 1: unsupported PBC input gate: Rz"
+        "input gate 1: unsupported PBC input gate: Rz; run DecomposeRotations before PBC conversion"
     );
     assert_eq!(
         err.source().unwrap().to_string(),
         PbcError::UnsupportedGate(GateKind::Rz).to_string()
     );
     assert!(PbcError::ExpansionLimit.source().is_none());
+}
+
+/// Unbounded and the weight bounds that flush the frame most often.
+const ALL_BOUNDS: [Option<NonZeroUsize>; 3] = [None, NonZeroUsize::new(1), NonZeroUsize::new(2)];
+
+/// The PBC unitary of `to_pbc(input)` under each weight bound, compared with
+/// the native floating-point interpreter (the exact reference interpreter only
+/// models the PBC input gates) up to global phase.
+fn assert_pbc_matches_native(input: &Circuit, bounds: &[Option<NonZeroUsize>]) {
+    for &max_weight in bounds {
+        let pbc = to_pbc(input, max_weight)
+            .unwrap_or_else(|e| panic!("{e} (max_weight {max_weight:?}):\n{input}"));
+        let actual =
+            crate::semantics::pbc_unitary(&pbc, crate::semantics::Limits::default()).unwrap();
+        crate::semantics::test_support::check_numeric(&actual, input);
+    }
+}
+
+/// Every statement `to_pbc` takes without a decomposition pass: each gate
+/// kind on every operand order of three qubits, every quarter-turn angle of a
+/// single-qubit rotation, and every Clifford angle of a controlled rotation
+/// over two of its periods (CR*(2*pi) is a controlled -I, not the identity).
+fn directly_convertible_statements() -> Vec<String> {
+    let mut statements = Vec::new();
+    for q in 0..3 {
+        for name in ["h", "x", "y", "z", "s", "sdg", "t", "tdg", "sx"] {
+            statements.push(format!("{name} q[{q}]"));
+        }
+        for k in -8..=8 {
+            for name in ["rz", "p", "rx", "ry"] {
+                statements.push(format!("{name}({k}*pi/4) q[{q}]"));
+            }
+        }
+    }
+    for (a, b) in [(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)] {
+        for name in ["cx", "cz", "cy", "swap"] {
+            statements.push(format!("{name} q[{a}],q[{b}]"));
+        }
+        for k in -4..=4 {
+            for name in ["cp", "crx", "cry", "crz"] {
+                statements.push(format!("{name}({k}*pi) q[{a}],q[{b}]"));
+            }
+        }
+    }
+    for (a, b, c) in [
+        (0, 1, 2),
+        (0, 2, 1),
+        (1, 0, 2),
+        (1, 2, 0),
+        (2, 0, 1),
+        (2, 1, 0),
+    ] {
+        for name in ["ccx", "ccz"] {
+            statements.push(format!("{name} q[{a}],q[{b}],q[{c}]"));
+        }
+    }
+    statements
+}
+
+#[test]
+fn every_directly_convertible_gate_has_the_native_unitary() {
+    // Superposed, phased, entangled inputs make every matrix entry count.
+    let prefix = "qreg q[3]; h q[0]; h q[1]; t q[1]; h q[2]; s q[2]; cx q[0],q[2];";
+    let statements = directly_convertible_statements();
+    let mut bounded = std::collections::HashSet::new();
+    for statement in &statements {
+        let input = Circuit::from_qasm(&format!("{prefix} {statement};")).unwrap();
+        assert!(
+            !needs_decomposition(input.gates.last().unwrap()),
+            "{statement}"
+        );
+        // Weight bounds act after lowering, so one statement per gate kind
+        // exercises them; the exact interpreter is too slow for all of them.
+        let name = statement.split(['(', ' ']).next().unwrap();
+        let bounds = if bounded.insert(name) {
+            &ALL_BOUNDS[..]
+        } else {
+            &ALL_BOUNDS[..1]
+        };
+        assert_pbc_matches_native(&input, bounds);
+    }
+    assert_eq!(statements.len(), 483);
+}
+
+#[test]
+fn every_gate_converts_after_its_suggested_decomposition() {
+    use crate::decompose::{DecomposeRotations, DecomposeToffoli};
+    let prefix = "qreg q[3]; h q[0]; h q[1]; t q[1]; h q[2]; s q[2]; cx q[0],q[2];";
+    for statement in [
+        "ch q[0],q[1]",
+        "ch q[2],q[0]",
+        "cswap q[0],q[1],q[2]",
+        "cswap q[2],q[0],q[1]",
+        // Exact non-Clifford angles decompose without approximation.
+        "crz(pi/2) q[0],q[1]",
+        "crz(-3*pi/2) q[1],q[0]",
+        "crx(pi/2) q[1],q[2]",
+        "cry(-pi/2) q[2],q[0]",
+        "cp(pi/2) q[0],q[2]",
+        "cp(3*pi/2) q[2],q[1]",
+    ] {
+        let input = Circuit::from_qasm(&format!("{prefix} {statement};")).unwrap();
+        assert!(
+            needs_decomposition(input.gates.last().unwrap()),
+            "{statement}"
+        );
+        assert!(to_pbc(&input, None).is_err(), "{statement}");
+        let decomposed = if statement.starts_with("cswap") {
+            DecomposeToffoli.run(&input)
+        } else {
+            DecomposeRotations::default().try_run(&input).unwrap()
+        };
+        let pbc = to_pbc(&decomposed, None).unwrap();
+        let actual =
+            crate::semantics::pbc_unitary(&pbc, crate::semantics::Limits::default()).unwrap();
+        // Against the original native gate, not just the decomposition.
+        crate::semantics::test_support::check_numeric(&actual, &input);
+    }
+}
+
+#[test]
+fn random_mixtures_of_convertible_gates_have_the_native_unitary() {
+    // PBC_FUZZ_CASES and PBC_FUZZ_SEED extend or replay this, as for `fuzz`.
+    let (count, seed) = fuzz::fuzz_range(30, 0x9e37_79b9_7f4a_7c15);
+    let statements = directly_convertible_statements();
+    let mut state = seed.max(1);
+    let mut next = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    for _ in 0..count {
+        let length = 4 + next(12);
+        let body: Vec<_> = (0..length)
+            .map(|_| statements[next(statements.len())].as_str())
+            .collect();
+        let input = Circuit::from_qasm(&format!("qreg q[3]; {};", body.join("; "))).unwrap();
+        assert_pbc_matches_native(&input, &ALL_BOUNDS);
+    }
+}
+
+#[test]
+fn non_clifford_gates_name_the_decomposition_they_need() {
+    for (gate, pass) in [
+        ("ch q[0],q[1]", "DecomposeRotations"),
+        ("rz(0.3) q[0]", "DecomposeRotations"),
+        ("crz(pi/2) q[0],q[1]", "DecomposeRotations"),
+        ("cp(pi/2) q[0],q[1]", "DecomposeRotations"),
+        ("crx(pi/4) q[0],q[1]", "DecomposeRotations"),
+        ("cswap q[0],q[1],q[2]", "DecomposeToffoli"),
+    ] {
+        let input = Circuit::from_qasm(&format!("qreg q[3]; h q[0]; {gate};")).unwrap();
+        assert!(needs_decomposition(&input.gates[1]), "{gate}");
+        let error = to_pbc(&input, None).unwrap_err();
+        assert!(
+            matches!(&error, PbcError::InvalidInput { index: 1, .. }),
+            "{gate}: {error}"
+        );
+        assert!(error.to_string().contains(pass), "{gate}: {error}");
+    }
+    for gate in [
+        Gate::y(0),
+        Gate::sx(0),
+        Gate::swap(0, 1),
+        Gate::cy {
+            control: 0,
+            target: 1,
+        },
+        Gate::reset(0),
+    ] {
+        assert!(!needs_decomposition(&gate), "{gate}");
+    }
+}
+
+#[test]
+fn lowered_gates_still_validate_operands_even_when_they_lower_to_nothing() {
+    let zero = crate::angle::Angle::pi_fraction(0, 1).unwrap();
+    let pi = crate::angle::Angle::pi_fraction(1, 1).unwrap();
+    for gate in [
+        Gate::y(3),
+        Gate::sx(3),
+        Gate::swap(0, 3),
+        Gate::cy {
+            control: 3,
+            target: 0,
+        },
+        Gate::rz(zero.clone(), 3),
+        Gate::p(zero.clone(), 3),
+        Gate::rx(zero.clone(), 3),
+        Gate::ry(zero.clone(), 3),
+        Gate::crz {
+            theta: zero.clone(),
+            control: 0,
+            target: 3,
+        },
+        Gate::cp {
+            lambda: pi,
+            control: 3,
+            target: 0,
+        },
+    ] {
+        let mut input = Circuit::new(3);
+        input.apply(Gate::h(0));
+        input.apply(gate.clone());
+        assert_eq!(
+            to_pbc(&input, None).unwrap_err(),
+            PbcError::InvalidInput {
+                index: 1,
+                cause: Box::new(PbcError::QubitOutOfRange(3)),
+            },
+            "{gate}"
+        );
+    }
 }

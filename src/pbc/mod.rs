@@ -27,7 +27,7 @@ mod svg;
 mod text;
 
 pub use ascii::AsciiOptions;
-pub use convert::{ToPbc, to_pbc};
+pub use convert::{ToPbc, needs_decomposition, to_pbc};
 pub use frame::CliffordFrame;
 pub use optimize::{OptimizeOptions, OptimizeStats, Strategy};
 pub(crate) use optimize::{packed_anticommutes, support_signature};
@@ -136,6 +136,23 @@ impl PbcOp {
     }
 }
 
+/// The decomposition pass that makes a rejected gate kind convertible.
+pub(crate) fn decomposition_pass(kind: GateKind) -> Option<&'static str> {
+    match kind {
+        GateKind::Rz
+        | GateKind::P
+        | GateKind::Rx
+        | GateKind::Ry
+        | GateKind::Cp
+        | GateKind::Crx
+        | GateKind::Cry
+        | GateKind::Crz
+        | GateKind::Ch => Some("DecomposeRotations"),
+        GateKind::Cswap => Some("DecomposeToffoli"),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PbcError {
     /// Invalid source instruction; index is zero-based.
@@ -163,7 +180,13 @@ impl fmt::Display for PbcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput { index, cause } => write!(f, "input gate {index}: {cause}"),
-            Self::UnsupportedGate(gate) => write!(f, "unsupported PBC input gate: {gate:?}"),
+            Self::UnsupportedGate(gate) => match decomposition_pass(*gate) {
+                Some(pass) => write!(
+                    f,
+                    "unsupported PBC input gate: {gate:?}; run {pass} before PBC conversion"
+                ),
+                None => write!(f, "unsupported PBC input gate: {gate:?}"),
+            },
             Self::TooManyQubits => f.write_str("PBC qubit count exceeds the supported u32 range"),
             Self::QubitOutOfRange(q) => write!(f, "PBC qubit {q} is out of range"),
             Self::ClassicalBitOutOfRange(c) => write!(f, "PBC classical bit {c} is out of range"),

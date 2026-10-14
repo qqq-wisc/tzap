@@ -39,18 +39,7 @@ fn binary(parser: &mut AngleParser, op: &Op, a: &Angle, b: &Angle) -> Result<Ang
         Op::Sub => ctx.sub(a, b),
         Op::Mul => ctx.mul(a, b),
         Op::Div => ctx.div(a, b),
-        Op::Pow => {
-            let exponent = b
-                .as_rational()
-                .filter(|r| r.is_integer())
-                .and_then(|r| r.as_small())
-                .map(|(n, _)| n)
-                .ok_or(AngleError::Parse {
-                    offset: 0,
-                    message: "only bounded integer exponents are supported",
-                })?;
-            ctx.pow(a, exponent)
-        }
+        Op::Pow => ctx.power(a, b),
         _ => unreachable!(),
     })
 }

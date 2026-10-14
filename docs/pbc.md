@@ -27,7 +27,10 @@ optionally followed by the rotation optimizer `PbcOpt`:
 tzap input.qasm --passes CancelGates,ToPbc,PbcOpt -o output.pbc
 ```
 
-The input must have no resets; for Rz gates, also pass `--decompose-rotations`.
+Clifford gates (including Y, SX, CY, and SWAP), T, CCX, CCZ, single-qubit
+rotations by exact multiples of π/4, and controlled rotations at Clifford angles
+(multiples of π) convert directly. The input must have no resets. CH and other
+rotations need `--decompose-rotations`, and CSWAP needs `--decompose-ccx`.
 Measurements may appear anywhere, including mid-circuit. tzap checks these
 right after parsing, naming the offending gate, before any other work.
 

@@ -107,16 +107,7 @@ impl Parser<'_, '_> {
                 }
                 b'*' => self.ctx.mul_inner(&lhs, &rhs, &mut self.budget)?,
                 b'/' => self.ctx.div_inner(&lhs, &rhs, &mut self.budget)?,
-                b'^' => {
-                    let exponent = rhs
-                        .as_rational()
-                        .ok_or_else(|| self.error("only integer exponents are supported"))?;
-                    if !exponent.is_integer() {
-                        return Err(self.error("only integer exponents are supported"));
-                    }
-                    let (exponent, _) = exponent.as_small().ok_or(Error::Limit(Resource::Work))?;
-                    self.ctx.pow_inner(&lhs, exponent, &mut self.budget)?
-                }
+                b'^' => self.ctx.power_inner(&lhs, &rhs, &mut self.budget)?,
                 _ => unreachable!(),
             };
         }

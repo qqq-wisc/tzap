@@ -14,7 +14,7 @@ mod gate_tests;
 mod inline;
 mod scan;
 
-use crate::circuit::{CBit, Circuit, Gate, Qubit};
+use crate::circuit::{CBit, Circuit, Gate, GateKind, GateSet, Qubit};
 use smallvec::SmallVec;
 
 /// Frontend resource limits for custom calls, native broadcasts, and expressions.
@@ -89,8 +89,7 @@ fn parse_with(qasm: &str, limits: ParseLimits, numeric_literals: bool) -> Result
     let mut num_cbits = 0usize;
     let mut gates = Vec::new();
     let mut seen_gate = false;
-    // Retain the legacy allowance for a final top-level statement without ';'.
-    while let Some(statement) = scanner.next(true)? {
+    while let Some(statement) = scanner.next()? {
         let line_num = statement.line;
         let text = statement.text.trim();
         if text.is_empty() && matches!(statement.end, b';' | 0) {
@@ -162,10 +161,9 @@ fn parse_with(qasm: &str, limits: ParseLimits, numeric_literals: bool) -> Result
                         "line {line_num}: duplicate or conflicting register name '{name}'"
                     ));
                 }
-                let size = rest[open + 1..close]
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|e| format!("line {line_num}: bad {keyword} size: {e}"))?;
+                let text = rest[open + 1..close].trim();
+                let size = scan::nninteger(text)
+                    .ok_or_else(|| format!("line {line_num}: bad {keyword} size '{text}'"))?;
                 let (lookup, count, noun) = if keyword == "qreg" {
                     (&mut registers, &mut num_qubits, "qubits")
                 } else {
@@ -258,20 +256,22 @@ pub(crate) fn serialize_numeric(circuit: &Circuit) -> String {
     out
 }
 
-fn write_gate(s: &mut String, gate: &Gate) {
-    use std::fmt::Write;
+/// Call `f` with each statement `serialize` writes for `gate`.
+///
+/// Gates absent from the original qelib1.inc are expanded exactly here, so
+/// metrics and gate sets computed through this function describe the emitted
+/// program rather than tzap's native gate list.
+pub fn for_each_emitted(gate: &Gate, mut f: impl FnMut(&Gate)) {
     match gate {
         Gate::sx(q) => {
             for term in [Gate::h(*q), Gate::s(*q), Gate::h(*q)] {
-                write_gate(s, &term);
+                f(&term);
             }
-            return;
         }
         Gate::swap(a, b) => {
             for (control, target) in [(*a, *b), (*b, *a), (*a, *b)] {
-                write_gate(s, &Gate::cnot { control, target });
+                f(&Gate::cnot { control, target });
             }
-            return;
         }
         Gate::crx {
             theta,
@@ -283,23 +283,20 @@ fn write_gate(s: &mut String, gate: &Gate) {
             control,
             target,
         } => {
-            if matches!(gate, Gate::cry { .. }) {
-                write_gate(s, &Gate::sdg(*target));
+            let cry = matches!(gate, Gate::cry { .. });
+            if cry {
+                f(&Gate::sdg(*target));
             }
-            write_gate(s, &Gate::h(*target));
-            write_gate(
-                s,
-                &Gate::crz {
-                    theta: theta.clone(),
-                    control: *control,
-                    target: *target,
-                },
-            );
-            write_gate(s, &Gate::h(*target));
-            if matches!(gate, Gate::cry { .. }) {
-                write_gate(s, &Gate::s(*target));
+            f(&Gate::h(*target));
+            f(&Gate::crz {
+                theta: theta.clone(),
+                control: *control,
+                target: *target,
+            });
+            f(&Gate::h(*target));
+            if cry {
+                f(&Gate::s(*target));
             }
-            return;
         }
         Gate::cswap {
             control,
@@ -308,35 +305,55 @@ fn write_gate(s: &mut String, gate: &Gate) {
         } => {
             // CSWAP is absent from the original qelib1.inc. Preserve roles and
             // every branch phase with this exact expansion.
-            for term in [
-                Gate::cnot {
-                    control: *first,
-                    target: *second,
-                },
-                Gate::ccx {
-                    control1: *control,
-                    control2: *second,
-                    target: *first,
-                },
-                Gate::cnot {
-                    control: *first,
-                    target: *second,
-                },
-            ] {
-                write_gate(s, &term);
-            }
-            return;
+            let cx = Gate::cnot {
+                control: *first,
+                target: *second,
+            };
+            f(&cx);
+            f(&Gate::ccx {
+                control1: *control,
+                control2: *second,
+                target: *first,
+            });
+            f(&cx);
+        }
+        _ => f(gate),
+    }
+}
+
+/// The statement name `serialize` writes for a kind `for_each_emitted` keeps.
+pub const fn emitted_name(kind: GateKind) -> &'static str {
+    match kind {
+        GateKind::P => "u1",
+        GateKind::Cp => "cu1",
+        kind => kind.name(),
+    }
+}
+
+/// Statement names in `serialize(circuit)`, in `GateKind` order.
+pub fn emitted_gate_names(circuit: &Circuit) -> Vec<&'static str> {
+    let mut set = GateSet::EMPTY;
+    for gate in &circuit.gates {
+        for_each_emitted(gate, |g| set.insert(g.kind()));
+    }
+    set.iter().map(emitted_name).collect()
+}
+
+fn write_gate(s: &mut String, gate: &Gate) {
+    for_each_emitted(gate, |g| write_statement(s, g));
+}
+
+fn write_statement(s: &mut String, gate: &Gate) {
+    use std::fmt::Write;
+    match gate {
+        Gate::sx(_) | Gate::swap(..) | Gate::crx { .. } | Gate::cry { .. } | Gate::cswap { .. } => {
+            unreachable!("for_each_emitted expands {}", gate.kind().name())
         }
         Gate::rz(theta, _) | Gate::rx(theta, _) | Gate::ry(theta, _) | Gate::p(theta, _) => {
-            let name = if matches!(gate, Gate::p(..)) {
-                "u1"
-            } else {
-                gate.kind().name()
-            };
-            write!(s, "{name}({theta}) ").unwrap();
+            write!(s, "{}({theta}) ", emitted_name(gate.kind())).unwrap();
         }
         Gate::cp { lambda, .. } => {
-            write!(s, "cu1({lambda}) ").unwrap();
+            write!(s, "{}({lambda}) ", emitted_name(gate.kind())).unwrap();
         }
         Gate::crz { theta, .. } => {
             write!(s, "crz({theta}) ").unwrap();
@@ -690,13 +707,13 @@ mod tests {
         let source = "include \"directory//file/*name*/.inc\"; // /* ignored; x q[0];\nh q[0];";
         let mut scanner = scan::Scanner::new(source);
         assert_eq!(
-            scanner.next(true).unwrap().unwrap().text,
+            scanner.next().unwrap().unwrap().text,
             "include \"directory//file/*name*/.inc\""
         );
-        assert_eq!(scanner.next(true).unwrap().unwrap().text, "h q[0]");
+        assert_eq!(scanner.next().unwrap().unwrap().text, "h q[0]");
         assert!(matches!(
             scan::Scanner::new("include \"directory//file.inc\";")
-                .next(true)
+                .next()
                 .unwrap()
                 .unwrap()
                 .text,
