@@ -118,7 +118,7 @@ impl Rational {
         if d.is_zero() {
             return Err(Error::DivisionByZero);
         }
-        budget.bits(n.bits().max(d.bits()) as usize)?;
+        // Charge for the reduction; the size limit applies to its result.
         budget.arithmetic(n.bits().max(d.bits()) as usize)?;
         Self::from_reduced(BigRational::new(n, d), budget)
     }

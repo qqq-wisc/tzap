@@ -658,3 +658,22 @@ fn sum_factors_have_one_representation_however_scaled() {
         assert_eq!(ctx.parse(&x.to_string()).unwrap(), x, "{source}");
     }
 }
+
+#[test]
+fn decimal_size_limits_apply_to_the_exact_coefficient() {
+    let mut ctx = AngleContext::default();
+    let big = ctx.parse("(2^30000)^2").unwrap();
+    assert_eq!(big.coefficient_bits(), 60_001);
+    // 18,062 digits: four bits per digit would overestimate it past the limit.
+    assert_eq!(ctx.parse(&big.to_string()).unwrap(), big);
+    // The limit applies to the reduced value, not the digits spelling it.
+    let one = format!("1.{}", "0".repeat(20_000));
+    assert_eq!(ctx.parse(&one).unwrap(), Angle::ONE);
+    assert_eq!(ctx.parse(&format!("{one}e0")).unwrap(), Angle::ONE);
+    // Provably oversized magnitudes are still rejected before allocating.
+    for source in ["1e20000", "1e-20000", "1e999999999", "5e-999999999"] {
+        assert_eq!(ctx.parse(source), Err(Error::Limit(Resource::Bits)), "{source}");
+    }
+    let over = ctx.parse("2^65536");
+    assert_eq!(over, Err(Error::Limit(Resource::Bits)));
+}

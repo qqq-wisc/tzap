@@ -1181,13 +1181,34 @@ impl AngleContext {
         let scale = (fraction.len() as i64)
             .checked_sub(exponent)
             .ok_or(Error::Limit(Resource::Bits))?;
-        let estimate = significant_digits
-            .checked_add(
-                usize::try_from(scale.unsigned_abs()).map_err(|_| Error::Limit(Resource::Bits))?,
-            )
-            .and_then(|n| n.checked_mul(4))
-            .ok_or(Error::Limit(Resource::Bits))?;
-        budget.bits(estimate)?;
+        let scale_digits =
+            usize::try_from(scale.unsigned_abs()).map_err(|_| Error::Limit(Resource::Bits))?;
+        // The value is a D-digit integer times 10^-scale, so its magnitude
+        // lies in [10^(D-1-scale), 10^(D-scale)). A reduced rational needs at
+        // least log2 of the larger of |value| and 1/|value| bits; reject only
+        // when that lower bound already exceeds the limit (3.321 < log2 10).
+        // The exact reduced coefficient is checked once it is built, so a
+        // spelling with more digits than its value needs is not rejected.
+        let decades = if scale <= 0 {
+            significant_digits - 1 + scale_digits
+        } else if significant_digits > scale_digits {
+            significant_digits - 1 - scale_digits
+        } else {
+            scale_digits - significant_digits
+        };
+        budget.bits(decades.checked_mul(3321).ok_or(Error::Limit(Resource::Bits))? / 1000)?;
+        // Work follows the spelled-out numerator or power of ten, whichever
+        // is longer (3.322 > log2 10).
+        let spelled = if scale <= 0 {
+            significant_digits + scale_digits
+        } else {
+            significant_digits.max(scale_digits)
+        };
+        let estimate = spelled
+            .checked_mul(3322)
+            .ok_or(Error::Limit(Resource::Bits))?
+            / 1000
+            + 1;
         budget.arithmetic(estimate)?;
         if significant_digits <= 19 && scale.unsigned_abs() <= 19 {
             let n = whole

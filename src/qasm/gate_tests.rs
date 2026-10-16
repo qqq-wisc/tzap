@@ -932,3 +932,9 @@ fn ccz_definitions_are_honoured_rather_than_rejected() {
         "conflicting gate name 'ccz'",
     );
 }
+
+#[test]
+fn exact_large_angles_round_trip_through_qasm() {
+    let circuit = parse("qreg q[1]; rz((2^30000)^2) q[0];").unwrap();
+    assert_eq!(parse(&serialize(&circuit)).unwrap().gates, circuit.gates);
+}
