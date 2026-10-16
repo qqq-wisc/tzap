@@ -350,7 +350,12 @@ def _custom(name, num_qubits, params, build):
         (_custom("rz", 1, [0.4], lambda c: c.rx(0.4, 0)), [0]),
         (_custom("cx", 2, [], lambda c: c.cz(0, 1)), [1, 0]),
         (
-            _custom("outer", 2, [], lambda c: c.append(_custom("x", 1, [], lambda d: d.h(0)), [1])),
+            _custom(
+                "outer",
+                2,
+                [],
+                lambda c: c.append(_custom("x", 1, [], lambda d: d.h(0)), [1]),
+            ),
             [0, 1],
         ),
         (CXGate(ctrl_state=0), [0, 1]),
@@ -527,9 +532,10 @@ def test_serialized_ccz_parses_as_standalone_openqasm2():
 
     # Qiskit's own parser, with no custom instruction registered for ccz.
     reparsed = qasm2.loads(output)
-    assert Operator(reparsed).equiv(Operator(qasm2.loads(source.replace(
+    expanded = source.replace(
         "ccz q[0],q[1],q[2];", "h q[2]; ccx q[0],q[1],q[2]; h q[2];"
-    ))))
+    )
+    assert Operator(reparsed).equiv(Operator(qasm2.loads(expanded)))
 
 
 def test_qiskit_exported_ccz_definition_is_accepted():
