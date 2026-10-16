@@ -353,14 +353,20 @@ impl Chunk {
 
         // The parity a rotation would land on has to be known before the term
         // cap can be checked, and the check has to happen before the block is
-        // mutated -- hence resolving the index first and only then deciding.
+        // mutated -- hence resolving the parity without admitting the qubit,
+        // which would otherwise widen the block flushed below. A fresh qubit
+        // would join holding its own starting value.
         if let Some(angle) = rotation {
-            let i = self.index_of(operands[0]);
-            let (p, k) = (self.parity[i], self.consts[i]);
+            let q = operands[0];
+            let (p, k) = match self.local[q as usize] {
+                usize::MAX => (1u128 << self.qubits.len(), false),
+                i => (self.parity[i], self.consts[i]),
+            };
             if !self.terms.contains_key(&p) && self.terms.len() >= self.max_terms {
                 self.flush(output);
                 return self.feed(gate, output);
             }
+            self.index_of(q);
             self.add_term(p, k, angle);
             self.original.push(gate.clone());
             return None;
