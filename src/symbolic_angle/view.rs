@@ -11,7 +11,6 @@ pub(crate) enum ExpressionRef<'a> {
         coefficient: &'a Rational,
         factors: &'a [Angle],
     },
-    Quotient(&'a Angle, &'a Angle),
     Power(&'a Angle, i64),
     Function(Function, &'a Angle),
 }
@@ -48,7 +47,6 @@ impl Angle {
                     coefficient,
                     factors,
                 },
-                NodeKind::Quotient(a, b) => ExpressionRef::Quotient(a, b),
                 NodeKind::Power(a, e) => ExpressionRef::Power(a, *e),
                 NodeKind::Function(fun, a) => ExpressionRef::Function(*fun, a),
             },

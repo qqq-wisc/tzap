@@ -22,7 +22,6 @@ pub(crate) fn lossy(a: &Angle) -> Result<f64, Error> {
             }
             p
         }
-        ExpressionRef::Quotient(a, b) => lossy(a)? / lossy(b)?,
         ExpressionRef::Power(a, n) => lossy(a)?.powf(n as f64),
         ExpressionRef::Function(fun, a) => {
             let x = lossy(a)?;
@@ -242,11 +241,6 @@ impl Evaluator<'_> {
                     product = self.mul(&product, &value)?;
                 }
                 product
-            }
-            ExpressionRef::Quotient(a, b) => {
-                let a = self.value(a)?;
-                let b = self.value(b)?;
-                self.div(&a, &b)?
             }
             ExpressionRef::Power(a, n) => {
                 let a = self.value(a)?;

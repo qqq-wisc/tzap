@@ -281,7 +281,6 @@ fn angle_phase(angle: &crate::angle::Angle, half: bool) -> C {
                 coefficient,
                 factors,
             } => number(coefficient) * factors.iter().map(reference).product::<f64>(),
-            ExpressionRef::Quotient(a, b) => reference(a) / reference(b),
             ExpressionRef::Power(a, n) => reference(a).powf(n as f64),
             ExpressionRef::Function(f, a) => {
                 let x = reference(a);

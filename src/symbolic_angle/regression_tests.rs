@@ -695,3 +695,59 @@ fn failed_operations_do_not_leave_empty_interner_buckets() {
     }
     assert_eq!(ctx.stats().retained_entries, 0);
 }
+
+#[test]
+fn quotients_share_the_reciprocal_power_form() {
+    let mut ctx = AngleContext::default();
+    same(&mut ctx, "-1/sin(1)", "-(1/sin(1))");
+    same(&mut ctx, "-1/sin(1)", "1/(-sin(1))");
+    same(&mut ctx, "1/sin(1)+1/sin(1)", "2/sin(1)");
+    same(&mut ctx, "1/sin(1)", "sin(1)^-1");
+    same(&mut ctx, "sin(1)*(1/sin(1))", "1");
+    same(&mut ctx, "(2*sin(1))/sin(1)", "2");
+    same(&mut ctx, "(sin(1)+cos(1))/(2*sin(1)+2*cos(1))", "1/2");
+    same(&mut ctx, "pi/(2*pi)", "1/2");
+    same(&mut ctx, "exp(1)/pi", "exp(1)*pi^-1");
+    let a = ctx.parse("1/sin(1)").unwrap();
+    let b = ctx.parse("-1/sin(1)").unwrap();
+    assert_eq!(ctx.add(&a, &b).unwrap(), Angle::ZERO);
+    // Division still requires a provably nonzero divisor.
+    assert_eq!(ctx.parse("1/(sin(1)-sin(1))"), Err(Error::DivisionByZero));
+    assert_eq!(ctx.parse("1/sin(exp(9))"), Err(Error::DomainUnproved));
+}
+
+#[test]
+fn square_roots_of_scaled_and_even_powers_simplify() {
+    let mut ctx = AngleContext::default();
+    same(&mut ctx, "sqrt((2*pi)^2)", "2*pi");
+    same(&mut ctx, "sqrt((-2*pi)^2)", "2*pi");
+    same(&mut ctx, "sqrt((2*sin(1)+2*cos(1))^2)", "2*sin(1)+2*cos(1)");
+    same(&mut ctx, "sqrt(sin(1)^4)", "sin(1)^2");
+    same(&mut ctx, "sqrt(sin(-2)^2)", "sin(2)");
+    same(&mut ctx, "sqrt((sin(1)*cos(1))^2)", "sin(1)*cos(1)");
+    same(&mut ctx, "sqrt(9*sin(1))", "3*sqrt(sin(1))");
+    same(&mut ctx, "sqrt(sin(exp(9))^4)", "sin(exp(9))^2");
+    // Unknown signs stay unsimplified rather than guessed.
+    let x = ctx.parse("sqrt(sin(exp(9))^2)").unwrap();
+    assert!(matches!(x.kind(), Some(NodeKind::Function(Function::Sqrt, _))));
+}
+
+#[test]
+fn trig_parity_uses_the_canonical_sign_of_a_sum() {
+    let mut ctx = AngleContext::default();
+    same(&mut ctx, "sin(cos(1)-sin(1))", "-sin(sin(1)-cos(1))");
+    same(&mut ctx, "cos(cos(1)-sin(1))", "cos(sin(1)-cos(1))");
+    same(&mut ctx, "sin(-1/sin(1))", "-sin(1/sin(1))");
+}
+
+#[test]
+fn supplementary_pi_multiples_reduce_into_the_first_quadrant() {
+    let mut ctx = AngleContext::default();
+    same(&mut ctx, "sin(5*pi/6)", "sin(pi/6)");
+    same(&mut ctx, "cos(2*pi/3)", "-cos(pi/3)");
+    same(&mut ctx, "sin(4*pi/5)", "sin(pi/5)");
+    same(&mut ctx, "cos(4*pi/5)", "-cos(pi/5)");
+    same(&mut ctx, "sin(-4*pi/5)", "-sin(pi/5)");
+    same(&mut ctx, "cos(-7*pi/5)", "-cos(2*pi/5)");
+    same(&mut ctx, "sin(9*pi/5)", "-sin(pi/5)");
+}

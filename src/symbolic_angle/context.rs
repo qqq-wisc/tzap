@@ -314,10 +314,6 @@ impl AngleContext {
                 }
                 meta.bits = meta.bits.max(coefficient.bits());
             }
-            NodeKind::Quotient(a, b) => {
-                child(a)?;
-                child(b)?;
-            }
             NodeKind::Power(a, e) => {
                 child(a)?;
                 meta.bits = meta
@@ -837,8 +833,11 @@ impl AngleContext {
         if let (Some(a), Some(b)) = (a.pi_coefficient(), b.pi_coefficient()) {
             return self.number(a.div(&b, budget)?, false, budget);
         }
-        let sign = sign_product(a.metadata().sign, b.metadata().sign);
-        self.intern(NodeKind::Quotient(a.clone(), b.clone()), sign, budget)
+        // a/b is a·b^-1, so that quotients share products' normal form: the
+        // divisor's coefficient and sign move into the product's coefficient,
+        // and a factor cancels against its reciprocal.
+        let reciprocal = self.pow_inner(b, -1, budget)?;
+        self.mul_inner(a, &reciprocal, budget)
     }
     pub(super) fn pow_inner(
         &mut self,
@@ -994,14 +993,8 @@ impl AngleContext {
             {
                 return self.number(root, false, budget);
             }
-            if let Some(NodeKind::Power(base, 2)) = a.kind() {
-                match base.metadata().sign {
-                    Sign::Positive | Sign::NonNegative | Sign::Zero => return Ok(base.clone()),
-                    Sign::Negative | Sign::NonPositive => {
-                        return self.scale_inner(base, &Rational::integer(-1), budget);
-                    }
-                    _ => {}
-                }
+            if let Some(root) = self.square_root(a, budget)? {
+                return Ok(root);
             }
         }
         if fun == Function::Exp {
@@ -1071,6 +1064,22 @@ impl AngleContext {
                     self.scale_inner(&value, &Rational::integer(-1), budget)
                 };
             }
+            // Reduced and sign-stripped, a pi coefficient lies in (0, 1).
+            // Fold (1/2, 1) onto (0, 1/2): sin(q*pi) = sin((1-q)*pi) and
+            // cos(q*pi) = -cos((1-q)*pi). Tan's coefficient is already there.
+            if let Some(q) = a.pi_coefficient()
+                && fun != Function::Tan
+                && q > Rational::new(1, 2)?
+            {
+                let supplement = Rational::ONE.add(&q.neg(budget)?, budget)?;
+                let supplement = self.number(supplement, true, budget)?;
+                let value = self.function_inner(fun, &supplement, budget)?;
+                return if fun == Function::Sin {
+                    Ok(value)
+                } else {
+                    self.scale_inner(&value, &Rational::integer(-1), budget)
+                };
+            }
             if fun == Function::Tan {
                 let cosine = self.function_inner(Function::Cos, a, budget)?;
                 match cosine.prove_zero() {
@@ -1105,6 +1114,54 @@ impl AngleContext {
         };
         self.intern(NodeKind::Function(fun, a.clone()), sign, budget)
     }
+    /// sqrt(a) when `a` is recognizably a square, without guessing a sign:
+    /// sqrt(x^2k) = |x|^k, sqrt(r^2*x) = r*sqrt(x) for rational r > 0, and a
+    /// positive square coefficient times squares is a square.
+    fn square_root(&mut self, a: &Angle, budget: &mut Budget) -> Result<Option<Angle>, Error> {
+        match a.kind() {
+            Some(NodeKind::Power(base, e)) if e % 2 == 0 => {
+                let k = e / 2;
+                let base = if k % 2 == 0 {
+                    base.clone()
+                } else {
+                    match base.metadata().sign {
+                        Sign::Positive | Sign::NonNegative | Sign::Zero => base.clone(),
+                        Sign::Negative | Sign::NonPositive => {
+                            self.scale_inner(base, &Rational::integer(-1), budget)?
+                        }
+                        Sign::Unknown => return Ok(None),
+                    }
+                };
+                Ok(Some(self.pow_inner(&base, k, budget)?))
+            }
+            Some(NodeKind::Sum(terms)) if terms.len() == 1 && terms[0].coefficient.signum() > 0 => {
+                let Some(root) = terms[0].coefficient.perfect_sqrt(budget)? else {
+                    return Ok(None);
+                };
+                let atom = terms[0].atom.clone();
+                let inner = self.function_inner(Function::Sqrt, &atom, budget)?;
+                Ok(Some(self.scale_inner(&inner, &root, budget)?))
+            }
+            Some(NodeKind::Product {
+                coefficient,
+                factors,
+            }) if coefficient.signum() > 0 => {
+                let Some(root) = coefficient.perfect_sqrt(budget)? else {
+                    return Ok(None);
+                };
+                let factors = factors.clone();
+                let mut result = self.number(root, false, budget)?;
+                for factor in factors.iter() {
+                    let Some(factor) = self.square_root(factor, budget)? else {
+                        return Ok(None);
+                    };
+                    result = self.mul_inner(&result, &factor, budget)?;
+                }
+                Ok(Some(result))
+            }
+            _ => Ok(None),
+        }
+    }
     fn strip_negative(&mut self, a: &Angle, budget: &mut Budget) -> Result<Option<Angle>, Error> {
         let negative = if let Some(r) = a.as_rational() {
             r.signum() < 0
@@ -1112,7 +1169,10 @@ impl AngleContext {
             r.signum() < 0
         } else {
             match a.kind() {
-                Some(NodeKind::Sum(terms)) => terms.iter().all(|t| t.coefficient.signum() < 0),
+                // A sum's sign is that of its leading term, as in
+                // `primitive_sum`: exactly one of x and -x then counts as
+                // negative, so f(x) and f(-x) reduce to one argument.
+                Some(NodeKind::Sum(terms)) => terms[0].coefficient.signum() < 0,
                 Some(NodeKind::Product { coefficient, .. }) => coefficient.signum() < 0,
                 _ => false,
             }

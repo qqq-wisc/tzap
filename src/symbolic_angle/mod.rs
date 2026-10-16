@@ -271,7 +271,6 @@ pub(super) enum NodeKind {
         coefficient: Rational,
         factors: Box<[Angle]>,
     },
-    Quotient(Angle, Angle),
     Power(Angle, i64),
     Function(Function, Angle),
 }
@@ -593,7 +592,6 @@ impl Angle {
                 NodeKind::Pi(_) => 1,
                 NodeKind::Sum(_) => 2,
                 NodeKind::Product { .. } => 3,
-                NodeKind::Quotient(..) => 4,
                 NodeKind::Power(..) => 5,
                 NodeKind::Function(..) => 6,
             },
@@ -706,7 +704,6 @@ impl fmt::Display for Angle {
                 }
                 f.write_str(")")
             }
-            ExpressionRef::Quotient(a, b) => write!(f, "({a}/{b})"),
             ExpressionRef::Power(a, e) => write!(f, "({a}^{e})"),
             ExpressionRef::Function(fun, a) => write!(f, "{}({a})", fun.name()),
         }
