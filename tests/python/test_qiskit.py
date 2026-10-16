@@ -2,11 +2,14 @@ import math
 from pathlib import Path
 
 import pytest
+import qiskit
 import tzap.qiskit as tzap_qiskit
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister, qasm2
-from qiskit.circuit import Instruction, Parameter
+from qiskit.circuit import Gate, Instruction, Parameter
+from qiskit.circuit.library import CXGate
 from qiskit.converters import circuit_to_dag, dag_to_circuit
 from qiskit.dagcircuit import DAGCircuit
+from qiskit.quantum_info import Operator
 from qiskit.transpiler import PassManager
 from qiskit.transpiler.basepasses import TransformationPass
 from qiskit.transpiler.exceptions import TranspilerError
@@ -302,38 +305,66 @@ def test_control_flow_is_rejected_as_unsupported():
         optimize(circuit, level="O1")
 
 
+@pytest.mark.skipif(
+    int(qiskit.__version__.split(".")[0]) >= 2,
+    reason="Qiskit 2 removed classically conditioned gates (c_if)",
+)
 def test_classically_conditioned_supported_gate_is_rejected():
     circuit = QuantumCircuit(1, 1)
-    operation = Instruction("x", 1, 0, [])
-    operation.condition = (circuit.cregs[0], 1)
-    circuit.append(operation, [0])
+    circuit.x(0).c_if(circuit.cregs[0], 1)
 
     with pytest.raises(TranspilerError, match="classically conditioned"):
         _dag_to_qasm(circuit_to_dag(circuit))
 
 
-def test_supported_gate_with_wrong_qubit_arity_is_rejected():
-    circuit = QuantumCircuit(2)
-    circuit.append(Instruction("x", 2, 0, []), [0, 1])
+@pytest.mark.parametrize(
+    ("operation", "qargs", "cargs"),
+    [
+        (Instruction("x", 2, 0, []), [0, 1], []),
+        (Instruction("measure", 1, 0, []), [0], []),
+        (Instruction("x", 1, 1, []), [0], [0]),
+        (Gate("x", 1, []), [0], []),
+    ],
+)
+def test_opaque_operations_with_standard_names_are_rejected(operation, qargs, cargs):
+    circuit = QuantumCircuit(2, 1)
+    circuit.append(operation, qargs, cargs)
 
-    with pytest.raises(TranspilerError, match="2 qubits, expected 1"):
+    with pytest.raises(TranspilerError, match=f"does not support.*'{operation.name}'"):
         _dag_to_qasm(circuit_to_dag(circuit))
 
 
-def test_measurement_without_classical_target_is_rejected():
-    circuit = QuantumCircuit(1)
-    circuit.append(Instruction("measure", 1, 0, []), [0])
+def _custom(name, num_qubits, params, build):
+    definition = QuantumCircuit(num_qubits)
+    build(definition)
+    gate = Gate(name, num_qubits, params)
+    gate.definition = definition
+    return gate
 
-    with pytest.raises(TranspilerError, match="exactly one classical bit"):
-        _dag_to_qasm(circuit_to_dag(circuit))
 
+@pytest.mark.parametrize(
+    ("gate", "qubits"),
+    [
+        (_custom("x", 1, [], lambda c: c.z(0)), [0]),
+        (_custom("h", 1, [], lambda c: (c.s(0), c.t(0))), [1]),
+        (_custom("rz", 1, [0.4], lambda c: c.rx(0.4, 0)), [0]),
+        (_custom("cx", 2, [], lambda c: c.cz(0, 1)), [1, 0]),
+        (
+            _custom("outer", 2, [], lambda c: c.append(_custom("x", 1, [], lambda d: d.h(0)), [1])),
+            [0, 1],
+        ),
+        (CXGate(ctrl_state=0), [0, 1]),
+    ],
+)
+def test_custom_definitions_are_inlined_rather_than_trusted_by_name(gate, qubits):
+    source = QuantumCircuit(2)
+    source.h(0)
+    source.append(gate, qubits)
+    source.t(1)
 
-def test_supported_quantum_gate_with_classical_operand_is_rejected():
-    circuit = QuantumCircuit(1, 1)
-    circuit.append(Instruction("x", 1, 1, []), [0], [0])
+    result = optimize(source, level="O1")
 
-    with pytest.raises(TranspilerError, match="classical operands"):
-        _dag_to_qasm(circuit_to_dag(circuit))
+    assert Operator(source).equiv(Operator(result))
 
 
 def test_invalid_native_options_propagate_through_direct_pass_run():

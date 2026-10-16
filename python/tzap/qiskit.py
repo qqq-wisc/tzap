@@ -7,6 +7,34 @@ from collections.abc import Iterable
 from typing import Any
 
 from qiskit import QuantumCircuit
+from qiskit.circuit import Measure, Reset
+from qiskit.circuit.library import (
+    CCXGate,
+    CCZGate,
+    CHGate,
+    CPhaseGate,
+    CRXGate,
+    CRYGate,
+    CRZGate,
+    CSwapGate,
+    CXGate,
+    CYGate,
+    CZGate,
+    HGate,
+    PhaseGate,
+    RXGate,
+    RYGate,
+    RZGate,
+    SdgGate,
+    SGate,
+    SwapGate,
+    SXGate,
+    TdgGate,
+    TGate,
+    XGate,
+    YGate,
+    ZGate,
+)
 from qiskit.converters import circuit_to_dag, dag_to_circuit
 from qiskit.dagcircuit import DAGCircuit
 from qiskit.transpiler import PassManager, TransformationPass
@@ -45,10 +73,85 @@ _ARITIES = {
     "reset": 1,
 }
 
+# Standard operations are recognized by class, never by name: any custom gate
+# may be called "x" while implementing something else.
+_STANDARD = {
+    XGate: "x",
+    HGate: "h",
+    SGate: "s",
+    SdgGate: "sdg",
+    ZGate: "z",
+    TGate: "t",
+    TdgGate: "tdg",
+    RZGate: "rz",
+    RXGate: "rx",
+    RYGate: "ry",
+    PhaseGate: "p",
+    YGate: "y",
+    SXGate: "sx",
+    SwapGate: "swap",
+    CYGate: "cy",
+    CHGate: "ch",
+    CPhaseGate: "cp",
+    CRXGate: "crx",
+    CRYGate: "cry",
+    CRZGate: "crz",
+    CSwapGate: "cswap",
+    CXGate: "cx",
+    CZGate: "cz",
+    CCXGate: "ccx",
+    CCZGate: "ccz",
+    Measure: "measure",
+    Reset: "reset",
+}
+
+# Nesting bound for inlining custom definitions, against cyclic definitions.
+_MAX_DEFINITION_DEPTH = 64
+
+
+def _standard_name(operation: Any) -> str | None:
+    """tzap's name for a standard Qiskit operation, or None for anything else.
+
+    ``base_class`` sees through Qiskit's singleton subclasses. Controlled
+    gates must use the default all-ones control state; an open control has the
+    same class but a different operator.
+    """
+
+    name = _STANDARD.get(getattr(operation, "base_class", type(operation)))
+    controls = getattr(operation, "num_ctrl_qubits", 0)
+    if controls and operation.ctrl_state != (1 << controls) - 1:
+        return None
+    return name
+
+
+def _inline_definitions(dag: DAGCircuit, depth: int = 0) -> None:
+    """Replace every non-standard operation that has a definition by it."""
+
+    for node in dag.op_nodes():
+        if _standard_name(node.op) is not None:
+            continue
+        if getattr(node.op, "condition", None) is not None:
+            continue  # rejected with a clear error during serialization
+        try:
+            definition = node.op.definition
+        except Exception:  # noqa: BLE001 - opaque operations may raise
+            definition = None
+        if definition is None:
+            continue  # rejected with a clear error during serialization
+        if depth >= _MAX_DEFINITION_DEPTH:
+            raise TranspilerError(
+                f"custom operation {node.op.name!r} nests definitions more than "
+                f"{_MAX_DEFINITION_DEPTH} levels deep"
+            )
+        inner = circuit_to_dag(definition)
+        _inline_definitions(inner, depth + 1)
+        dag.substitute_node_with_dag(node, inner)
+
 
 def _dag_to_qasm(dag: DAGCircuit) -> str:
     """Serialize exactly tzap's gate subset, with flat stable bit indices."""
 
+    _inline_definitions(dag)
     qubit_indices = {bit: index for index, bit in enumerate(dag.qubits)}
     cbit_indices = {bit: index for index, bit in enumerate(dag.clbits)}
     lines = [
@@ -72,11 +175,12 @@ def _dag_to_qasm(dag: DAGCircuit) -> str:
     )
     for node in nodes:
         operation = node.op
-        name = operation.name
-        if name not in _ARITIES:
+        name = _standard_name(operation)
+        if name is None:
             raise TranspilerError(
-                f"tzap does not support Qiskit operation {name!r}; transpile to the "
-                f"basis {list(_ARITIES)} before running TzapPass"
+                f"tzap does not support Qiskit operation {operation.name!r} "
+                f"({type(operation).__name__}) without a definition; transpile "
+                f"to the standard gates {list(_ARITIES)} before running TzapPass"
             )
         if getattr(operation, "condition", None) is not None:
             raise TranspilerError(
