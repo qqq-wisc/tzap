@@ -305,3 +305,13 @@ fn printed_circuits_reparse_within_the_expression_depth_limit() {
     let output = crate::qasm::parse(&input.to_qasm()).unwrap();
     assert_eq!(output.gates, input.gates);
 }
+#[test]
+fn differently_scaled_sum_products_cancel() {
+    let inverse = crate::qasm::parse(
+        "qreg q[1]; rz(2*(sin(1)+cos(1))*sin(2)) q[0]; rz(-(sin(1)+cos(1))*(2*sin(2))) q[0];",
+    )
+    .unwrap();
+    for p in passes() {
+        assert!(p.run(&inverse).gates.is_empty(), "{}", p.name());
+    }
+}

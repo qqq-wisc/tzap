@@ -634,3 +634,27 @@ fn displayed_expressions_reparse_at_the_depth_limit() {
     assert!(a.expression_depth() >= ctx.limits().max_depth - 1);
     assert_eq!(ctx.parse(&a.to_string()).unwrap(), a);
 }
+
+#[test]
+fn sum_factors_have_one_representation_however_scaled() {
+    let mut ctx = AngleContext::default();
+    let a = ctx.parse("(sin(1)+cos(1))*(2*sin(2))").unwrap();
+    let printed = a.to_string();
+    let reparsed = ctx.parse(&printed).unwrap();
+    assert_eq!(reparsed, a, "{printed} reparsed as {reparsed}");
+    assert_eq!(ctx.prove_equal(&a, &reparsed).unwrap(), Proof::Proven);
+    same(&mut ctx, "(sin(1)+cos(1))*(2*sin(2))", "2*(sin(1)+cos(1))*sin(2)");
+    same(&mut ctx, "(sin(1)+cos(1))*(2*sin(2))", "(2*sin(1)+2*cos(1))*sin(2)");
+    same(&mut ctx, "(-sin(1)-cos(1))*sin(2)", "-((sin(1)+cos(1))*sin(2))");
+    same(&mut ctx, "(2*sin(1)+2*cos(1))^2", "4*(sin(1)+cos(1))^2");
+    same(&mut ctx, "(2*sin(1)+2*cos(1))*(sin(1)+cos(1))", "2*(sin(1)+cos(1))^2");
+    same(&mut ctx, "(sin(1)/3+cos(1)/3)^-1*(sin(1)+cos(1))", "3");
+    for source in [
+        "(sin(1)+cos(1))*(2*sin(2))",
+        "(2*sin(1)+2*cos(1))^3*exp(1)",
+        "-(pi/3+sin(1))*(5/7*cos(2)+exp(1))",
+    ] {
+        let x = ctx.parse(source).unwrap();
+        assert_eq!(ctx.parse(&x.to_string()).unwrap(), x, "{source}");
+    }
+}

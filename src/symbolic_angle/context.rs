@@ -673,7 +673,7 @@ impl AngleContext {
         let mut coefficient = Rational::ONE;
         let mut factors = Vec::new();
         for value in [a, b] {
-            push_factor(value, &mut coefficient, &mut factors, budget)?;
+            self.push_factor(value, &mut coefficient, &mut factors, budget)?;
         }
         // Simplifying a merged power (sqrt(x)^2 = x) can expose a coefficient
         // or a base shared with another factor, so regroup until stable. Each
@@ -709,7 +709,7 @@ impl AngleContext {
                         combined.push(factor);
                     } else {
                         regroup |= factor.as_rational().is_none();
-                        push_factor(&factor, &mut coefficient, &mut combined, budget)?;
+                        self.push_factor(&factor, &mut coefficient, &mut combined, budget)?;
                     }
                 } else {
                     combined.extend(factors[index..end].iter().cloned());
@@ -742,6 +742,64 @@ impl AngleContext {
             sign,
             budget,
         )
+    }
+    /// Add a multiplicand to a product in normal form: rational and pi
+    /// coefficients, nested products, single scaled terms, and the content of
+    /// a sum are all moved into the product's coefficient.
+    fn push_factor(
+        &mut self,
+        value: &Angle,
+        coefficient: &mut Rational,
+        factors: &mut Vec<Angle>,
+        budget: &mut Budget,
+    ) -> Result<(), Error> {
+        budget.charge(1)?;
+        if let Some(r) = value.as_rational() {
+            *coefficient = coefficient.mul(&r, budget)?;
+        } else if let Some(r) = value.pi_coefficient() {
+            *coefficient = coefficient.mul(&r, budget)?;
+            factors.push(Angle::PI);
+        } else if let Some((content, primitive)) = self.primitive_sum(value, budget)? {
+            *coefficient = coefficient.mul(&content, budget)?;
+            factors.push(primitive);
+        } else {
+            match value.kind() {
+                Some(NodeKind::Product {
+                    coefficient: c,
+                    factors: f,
+                }) => {
+                    *coefficient = coefficient.mul(c, budget)?;
+                    factors.extend(f.iter().cloned());
+                }
+                Some(NodeKind::Sum(terms)) if terms.len() == 1 => {
+                    *coefficient = coefficient.mul(&terms[0].coefficient, budget)?;
+                    self.push_factor(&terms[0].atom, coefficient, factors, budget)?;
+                }
+                _ => factors.push(value.clone()),
+            }
+        }
+        Ok(())
+    }
+    /// Split a sum of two or more terms into its content and a primitive sum
+    /// whose leading term has coefficient one, unless it already is one.
+    /// Sums stay distributed on their own (`2*(a+b)` is `2a+2b`), but as a
+    /// factor or a power's base a sum is primitive, so that `2*(a+b)*c` and
+    /// `(a+b)*(2*c)` share one representation.
+    fn primitive_sum(
+        &mut self,
+        a: &Angle,
+        budget: &mut Budget,
+    ) -> Result<Option<(Rational, Angle)>, Error> {
+        let Some(NodeKind::Sum(terms)) = a.kind() else {
+            return Ok(None);
+        };
+        if terms.len() < 2 || terms[0].coefficient.is_one() {
+            return Ok(None);
+        }
+        let content = terms[0].coefficient.clone();
+        let inverse = Rational::ONE.div(&content, budget)?;
+        let primitive = self.scale_inner(a, &inverse, budget)?;
+        Ok(Some((content, primitive)))
     }
     pub(super) fn div_inner(
         &mut self,
@@ -816,6 +874,11 @@ impl AngleContext {
         {
             let coefficient = terms[0].coefficient.pow(e, budget)?;
             let power = self.pow_inner(&terms[0].atom, e, budget)?;
+            return self.scale_inner(&power, &coefficient, budget);
+        }
+        if let Some((content, primitive)) = self.primitive_sum(a, budget)? {
+            let coefficient = content.pow(e, budget)?;
+            let power = self.pow_inner(&primitive, e, budget)?;
             return self.scale_inner(&power, &coefficient, budget);
         }
         // A proven nonzero product has proven nonzero factors, so negative
@@ -1164,39 +1227,6 @@ impl AngleContext {
         let r = Rational::from_big(n, d, budget)?;
         self.number(r, false, budget)
     }
-}
-
-/// Add a multiplicand to a product in normal form: rational and pi
-/// coefficients, nested products, and single scaled terms are flattened.
-fn push_factor(
-    value: &Angle,
-    coefficient: &mut Rational,
-    factors: &mut Vec<Angle>,
-    budget: &mut Budget,
-) -> Result<(), Error> {
-    budget.charge(1)?;
-    if let Some(r) = value.as_rational() {
-        *coefficient = coefficient.mul(&r, budget)?;
-    } else if let Some(r) = value.pi_coefficient() {
-        *coefficient = coefficient.mul(&r, budget)?;
-        factors.push(Angle::PI);
-    } else {
-        match value.kind() {
-            Some(NodeKind::Product {
-                coefficient: c,
-                factors: f,
-            }) => {
-                *coefficient = coefficient.mul(c, budget)?;
-                factors.extend(f.iter().cloned());
-            }
-            Some(NodeKind::Sum(terms)) if terms.len() == 1 => {
-                *coefficient = coefficient.mul(&terms[0].coefficient, budget)?;
-                push_factor(&terms[0].atom, coefficient, factors, budget)?;
-            }
-            _ => factors.push(value.clone()),
-        }
-    }
-    Ok(())
 }
 
 fn power_factor(a: &Angle) -> (&Angle, i64) {
