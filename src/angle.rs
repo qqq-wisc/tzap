@@ -376,6 +376,10 @@ pub(crate) fn real_token(value: f64) -> String {
     out
 }
 /// Lower only certified quarter-turns; preserve every other angle verbatim.
+///
+/// The result equals the input only up to global phase: `rz(kπ/4)` becomes
+/// named phase gates (`rz(π)` becomes `z`, a factor of `-i` apart). Apply it to
+/// a whole circuit, never to a subcircuit that is later controlled.
 pub fn lower_exact_rotations(circuit: &Circuit) -> Circuit {
     let mut out = Circuit::with_cbits(circuit.num_qubits, circuit.num_cbits);
     for g in &circuit.gates {
