@@ -237,7 +237,7 @@ fn pauli_folding_is_selectable_and_handles_native_cross_axis_rotations() {
             assert_success(&result, "native Pauli folding");
             let text = fs::read_to_string(&output).unwrap();
             let actual = tzap::circuit::Circuit::from_qasm(&text).unwrap();
-            assert_eq!(actual.gates, expected);
+            assert_eq!(actual.gates(), expected);
             let original = tzap::circuit::Circuit::from_qasm(&source).unwrap();
             assert_eq!(
                 (actual.num_qubits, actual.num_cbits),

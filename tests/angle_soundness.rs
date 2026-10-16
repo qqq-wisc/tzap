@@ -44,7 +44,7 @@ fn circuit(angles: &[f64]) -> Circuit {
     c
 }
 fn residual_sum(c: &Circuit) -> BigRational {
-    c.gates
+    c.gates()
         .iter()
         .map(|g| match g {
             Gate::rz(a, _) => a.as_rational().expect("numeric rotation").to_big_rational(),
@@ -106,7 +106,7 @@ fn finite_inputs_and_fraction_boundaries() {
     ] {
         let mut c = Circuit::new(1);
         c.apply(Gate::rz(Angle::pi_fraction(n, d).unwrap(), 0));
-        assert_eq!(qasm::parse(&c.to_qasm()).unwrap().gates, c.gates);
+        assert_eq!(qasm::parse(&c.to_qasm()).unwrap().gates(), c.gates());
     }
 }
 #[test]
@@ -195,19 +195,22 @@ fn parsing_pi_context_mixed_limits_fallback_and_multiline() {
         ("-pi/2", -1, 2),
     ] {
         let c = qasm::parse(&format!("OPENQASM 2.0; qreg q[1]; rz(\n{source}\n) q[0];")).unwrap();
-        let Gate::rz(a, _) = &c.gates[0] else {
+        let Gate::rz(a, _) = &c.gates()[0] else {
             panic!()
         };
         assert_eq!(a.components().unwrap().0, PiFraction::new(n, d).unwrap());
         let roundtrip = qasm::parse(&c.to_qasm()).unwrap();
-        assert_eq!(roundtrip.gates, c.gates);
+        assert_eq!(roundtrip.gates(), c.gates());
     }
     let mut ctx = tzap::angle::AngleContext::default();
     for expression in ["pi/4+0.3", "pi/9223372036854775808", "pi*pi/4", "0.1+0.2"] {
         let c = qasm::parse(&format!("qreg q[1]; rz({expression}) q[0];")).unwrap();
-        assert_eq!(c.gates[0].angle().unwrap(), &ctx.parse(expression).unwrap());
-        assert!(!c.gates[0].angle().unwrap().used_numeric_fallback());
-        assert_eq!(qasm::parse(&c.to_qasm()).unwrap().gates, c.gates);
+        assert_eq!(
+            c.gates()[0].angle().unwrap(),
+            &ctx.parse(expression).unwrap()
+        );
+        assert!(!c.gates()[0].angle().unwrap().used_numeric_fallback());
+        assert_eq!(qasm::parse(&c.to_qasm()).unwrap().gates(), c.gates());
     }
     for expression in ["(1/0)-(1/0)", "(1/0)*pi"] {
         assert!(qasm::parse(&format!("qreg q[1]; rz({expression}) q[0];")).is_err());
@@ -246,13 +249,14 @@ fn exact_pi_and_long_named_sequences() {
         &CnotMin::default(),
     ] {
         let out = pass.run(&input);
-        assert_eq!(out.gates.len(), 1);
+        assert_eq!(out.gates().len(), 1);
         assert!(
-            matches!(&out.gates[0],Gate::rz(a,_) if a.components().unwrap().0==PiFraction::new(3,7).unwrap())
+            matches!(&out.gates()[0],Gate::rz(a,_) if a.components().unwrap().0==PiFraction::new(3,7).unwrap())
         );
     }
     let mut input = Circuit::new(1);
-    input.gates = vec![Gate::t(0); 10000];
+    input =
+        Circuit::from_gates(input.num_qubits, input.num_cbits, vec![Gate::t(0); 10000]).unwrap();
     for pass in [
         &PhaseFoldRand as &dyn Pass,
         &PhaseFoldPauli,
@@ -260,7 +264,7 @@ fn exact_pi_and_long_named_sequences() {
     ] {
         let out = pass.run(&input);
         let quarters: u32 = out
-            .gates
+            .gates()
             .iter()
             .map(|g| match g {
                 Gate::t(_) => 1,
@@ -277,7 +281,7 @@ fn exact_pi_and_long_named_sequences() {
     assert!(
         PhaseFoldRand
             .run(&c)
-            .gates
+            .gates()
             .iter()
             .any(|g| matches!(g,Gate::rz(a,_) if a.affine_coefficients().is_some_and(|(_,r)|r.to_big_rational()==BigRational::new(5.into(),10000000.into()))))
     );
@@ -321,7 +325,7 @@ fn synthesis_errors_and_exact_lowering() {
     assert!(optimize(&preserved, &options).is_ok());
     let exact = qasm::parse("qreg q[1]; rz(pi/4) q[0];").unwrap();
     let (out, report) = optimize(&exact, &options).unwrap();
-    assert_eq!(out.gates, vec![Gate::t(0)]);
+    assert_eq!(out.gates(), vec![Gate::t(0)]);
     assert_eq!(report.numerical.uncertified_syntheses, 0);
     for epsilon in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(
@@ -357,7 +361,7 @@ fn signed_failed_merges_and_coefficient_limits_are_transactional() {
     let sum = |c: &Circuit| {
         let mut flip = false;
         let mut radians = BigRational::from_integer(BigInt::from(0));
-        for gate in &c.gates {
+        for gate in c.gates() {
             match gate {
                 Gate::x(_) => flip = !flip,
                 Gate::rz(angle, _) => {
@@ -382,22 +386,23 @@ fn signed_failed_merges_and_coefficient_limits_are_transactional() {
     ] {
         assert_eq!(sum(&pass.run(&input)), sum(&input), "{}", pass.name());
     }
-    let input = Circuit {
-        num_qubits: 1,
-        num_cbits: 0,
-        gates: vec![
+    let input = Circuit::from_gates(
+        1,
+        0,
+        vec![
             Gate::rz(Angle::pi_fraction(1, i64::MAX).unwrap(), 0),
             Gate::rz(Angle::pi_fraction(1, i64::MAX - 1).unwrap(), 0),
         ],
-    };
+    )
+    .unwrap();
     for pass in [
         &PhaseFoldRand as &dyn Pass,
         &PhaseFoldPauli,
         &CnotMin::default(),
     ] {
         let output = pass.run(&input);
-        assert_eq!(output.gates.len(), 1, "{}", pass.name());
-        let Gate::rz(a, _) = &output.gates[0] else {
+        assert_eq!(output.gates().len(), 1, "{}", pass.name());
+        let Gate::rz(a, _) = &output.gates()[0] else {
             panic!("expected exact rotation")
         };
         assert_eq!(

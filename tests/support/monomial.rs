@@ -154,7 +154,7 @@ pub fn semantics(circuit: &Circuit) -> Vec<(usize, Phase)> {
     assert_eq!(circuit.num_cbits, 0);
     assert!(circuit.num_qubits <= 4);
     // Decode each phase once; the state interpreter only uses exact integers.
-    let gates = diagonalize(&circuit.gates);
+    let gates = diagonalize(circuit.gates());
     let phases: Vec<_> = gates.iter().map(phase).collect();
     (0..1usize << circuit.num_qubits)
         .map(|input| {

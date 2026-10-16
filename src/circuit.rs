@@ -428,14 +428,44 @@ impl PartialEq for Gate {
 }
 /// An ordered sequence of [`Gate`]s over a fixed number of qubits.
 ///
-/// Gate metadata is derived from `gates` rather than cached beside it. This
-/// keeps the public `gates` vector safe to mutate without silently leaving
-/// optimizer policy decisions out of sync with the actual circuit.
+/// Invariant: no gate names one qubit as two of its operands. A gate such as
+/// `cnot(q, q)` has no unitary meaning, so [`Circuit::apply`],
+/// [`Circuit::from_gates`] and the QASM parser all reject one, and passes may
+/// assume every multi-qubit gate acts on distinct wires.
+///
+/// Gate metadata is derived from `gates` rather than cached beside it, so
+/// mutating the gate list never leaves optimizer policy decisions out of sync
+/// with the actual circuit.
 #[derive(Clone, Debug)]
 pub struct Circuit {
     pub num_qubits: usize,
     pub num_cbits: usize,
-    pub gates: Vec<Gate>,
+    /// Crate code mutates this directly and must preserve the invariant;
+    /// callers outside the crate read it through [`Circuit::gates`].
+    pub(crate) gates: Vec<Gate>,
+}
+
+/// A gate that names one qubit as two of its operands, such as `cnot(q, q)`.
+/// No [`Circuit`] contains one.
+#[derive(Clone, Debug)]
+pub struct RepeatedOperand(pub Gate);
+
+impl fmt::Display for RepeatedOperand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "gate operands must be distinct: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for RepeatedOperand {}
+
+/// Whether a gate's qubit operands are pairwise distinct.
+fn has_distinct_operands(gate: &Gate) -> bool {
+    let (n, qs) = qubit_operands(gate);
+    match n {
+        2 => qs[0] != qs[1],
+        3 => qs[0] != qs[1] && qs[0] != qs[2] && qs[1] != qs[2],
+        _ => true,
+    }
 }
 
 impl Circuit {
@@ -469,9 +499,51 @@ impl Circuit {
             ..self.empty_like()
         }
     }
+    /// A circuit holding `gates`, which must each act on distinct qubits.
+    pub fn from_gates(
+        num_qubits: usize,
+        num_cbits: usize,
+        gates: Vec<Gate>,
+    ) -> Result<Self, RepeatedOperand> {
+        if let Some(gate) = gates.iter().find(|gate| !has_distinct_operands(gate)) {
+            return Err(RepeatedOperand(gate.clone()));
+        }
+        Ok(Self {
+            num_qubits,
+            num_cbits,
+            gates,
+        })
+    }
+
     /// Append `gate`.
+    ///
+    /// # Panics
+    ///
+    /// If `gate` repeats a qubit operand. See [`Circuit::try_apply`].
+    #[track_caller]
     pub fn apply(&mut self, gate: Gate) {
+        if let Err(error) = self.try_apply(gate) {
+            panic!("{error}");
+        }
+    }
+
+    /// Append `gate`, or reject it if it repeats a qubit operand.
+    pub fn try_apply(&mut self, gate: Gate) -> Result<(), RepeatedOperand> {
+        if !has_distinct_operands(&gate) {
+            return Err(RepeatedOperand(gate));
+        }
         self.gates.push(gate);
+        Ok(())
+    }
+
+    /// The gates, in order.
+    pub fn gates(&self) -> &[Gate] {
+        &self.gates
+    }
+
+    /// Take the gates, in order.
+    pub fn into_gates(self) -> Vec<Gate> {
+        self.gates
     }
 
     /// Gate kinds currently present, derived from the circuit's actual gates.
@@ -777,6 +849,16 @@ impl fmt::Display for Gate {
             }
             Gate::measure { qubit, cbit } => write!(f, "measure q{qubit} -> c{cbit}"),
             Gate::reset(q) => write!(f, "reset q{q}"),
+        }
+    }
+}
+
+/// Append each gate as [`Circuit::apply`] does, panicking on a repeated operand.
+impl Extend<Gate> for Circuit {
+    #[track_caller]
+    fn extend<I: IntoIterator<Item = Gate>>(&mut self, gates: I) {
+        for gate in gates {
+            self.apply(gate);
         }
     }
 }

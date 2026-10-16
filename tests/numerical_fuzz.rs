@@ -101,9 +101,8 @@ impl Random {
                 } else {
                     format!("pi/{}+({})", [4, 7, 8][self.index(3)], self.float())
                 };
-                let mut parsed =
-                    qasm::parse(&format!("qreg q[1]; rz({expression}) q[0];")).unwrap();
-                match parsed.gates.pop().unwrap() {
+                let parsed = qasm::parse(&format!("qreg q[1]; rz({expression}) q[0];")).unwrap();
+                match parsed.into_gates().pop().unwrap() {
                     Gate::rz(a, _) => a,
                     _ => unreachable!(),
                 }
@@ -119,27 +118,32 @@ fn generate(seed: u64, case: usize) -> Circuit {
     let numeric = |v| Gate::rz_f64(v, 0).unwrap();
     // Mandatory adversarial prefixes force repeated failed merges rather than
     // relying on uniformly random exponent bits to create difficult sums.
-    circuit.gates = match case % 6 {
-        0 => vec![numeric(1e16), numeric(1.0), numeric(-1e16)],
-        1 => vec![numeric(1e308), numeric(1e308), numeric(-1e308)],
-        2 => vec![
-            Gate::rz(Angle::pi_fraction(1, i64::MAX).unwrap(), 0),
-            Gate::rz(Angle::pi_fraction(1, i64::MAX - 1).unwrap(), 0),
-        ],
-        3 => vec![numeric(5e-7), numeric(std::f64::consts::PI / 4.0)],
-        4 => vec![
-            numeric(1e16),
-            Gate::x(0),
-            numeric(1.0),
-            Gate::x(0),
-            numeric(-1e16),
-        ],
-        _ => vec![
-            numeric(f64::MAX),
-            numeric(-f64::MAX),
-            numeric(f64::from_bits(1)),
-        ],
-    };
+    circuit = Circuit::from_gates(
+        circuit.num_qubits,
+        circuit.num_cbits,
+        match case % 6 {
+            0 => vec![numeric(1e16), numeric(1.0), numeric(-1e16)],
+            1 => vec![numeric(1e308), numeric(1e308), numeric(-1e308)],
+            2 => vec![
+                Gate::rz(Angle::pi_fraction(1, i64::MAX).unwrap(), 0),
+                Gate::rz(Angle::pi_fraction(1, i64::MAX - 1).unwrap(), 0),
+            ],
+            3 => vec![numeric(5e-7), numeric(std::f64::consts::PI / 4.0)],
+            4 => vec![
+                numeric(1e16),
+                Gate::x(0),
+                numeric(1.0),
+                Gate::x(0),
+                numeric(-1e16),
+            ],
+            _ => vec![
+                numeric(f64::MAX),
+                numeric(-f64::MAX),
+                numeric(f64::from_bits(1)),
+            ],
+        },
+    )
+    .unwrap();
     for _ in 0..12 + r.index(24) {
         let q = r.index(n) as u32;
         let mut operands: Vec<_> = (0..n as u32).collect();
@@ -171,7 +175,7 @@ fn generate(seed: u64, case: usize) -> Circuit {
             7 => circuit.apply(Gate::tdg(q)),
             8 => {
                 let a = r.angle();
-                circuit.gates.extend([
+                circuit.extend([
                     Gate::rz(a.clone(), q),
                     Gate::x(q),
                     Gate::rz(a, q),
@@ -253,7 +257,7 @@ fn run_cases(seed: u64, start: usize, cases: usize) -> Coverage {
                 coverage.nonfinite += report.numerical.skipped_nonfinite_folds;
                 coverage.coefficient += report.numerical.skipped_coefficient_limit_folds;
                 coverage.preserved += report.numerical.preserved_expressions;
-                coverage.reduced += usize::from(output.gates.len() < input.gates.len());
+                coverage.reduced += usize::from(output.gates().len() < input.gates().len());
             }
             // A different composition and repeated application exercise changed
             // axes and replacement history after a previous pass's successful fold.
@@ -302,12 +306,17 @@ fn exact_oracle_detects_numeric_errors_and_ignores_only_global_phase() {
     t.apply(Gate::t(0));
     assert!(!equivalent(&semantics(&quarter), &t));
     let mut global = Circuit::new(1);
-    global.gates = vec![
-        Gate::x(0),
-        Gate::rz_f64(0.3, 0).unwrap(),
-        Gate::x(0),
-        Gate::rz_f64(0.3, 0).unwrap(),
-    ];
+    global = Circuit::from_gates(
+        global.num_qubits,
+        global.num_cbits,
+        vec![
+            Gate::x(0),
+            Gate::rz_f64(0.3, 0).unwrap(),
+            Gate::x(0),
+            Gate::rz_f64(0.3, 0).unwrap(),
+        ],
+    )
+    .unwrap();
     assert!(equivalent(&expected, &global));
     let mut two_qubits = Circuit::new(2);
     let expected = semantics(&two_qubits);

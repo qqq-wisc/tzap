@@ -299,17 +299,6 @@ impl Chunk {
             Gate::z(q) => (Some(Angle::turns(4)), std::slice::from_ref(q)),
             Gate::rz(theta, q) => (Some(theta.clone()), std::slice::from_ref(q)),
             Gate::x(q) => (None, std::slice::from_ref(q)),
-            // A degenerate two-qubit gate (control == target) is not
-            // well-formed, but callers can construct one, and interpreting it
-            // would zero a qubit's parity -- destroying the basis this pass's
-            // whole representation rests on, and with it the invertibility
-            // `linear_synth` needs. Treat it the way an uninterpretable gate
-            // is treated: end the block and copy it through untouched, so
-            // whatever the rest of tzap takes it to mean is preserved exactly.
-            Gate::cnot { control, target } | Gate::cz { control, target } if control == target => {
-                self.flush(output);
-                return Some(gate);
-            }
             Gate::cnot { control, target } | Gate::cz { control, target } => {
                 (None, &[*control, *target])
             }
@@ -1923,55 +1912,6 @@ mod tests {
         }
         let out = cnot_min(&c);
         assert_eq!(out.gates.len(), 0);
-    }
-
-    #[test]
-    fn degenerate_two_qubit_gates_pass_through_untouched() {
-        // `cx q,q` is ill-formed but appeared in the removed Feynman
-        // benchmark cycle_17_3. Interpreting it would zero a parity and leave the
-        // block's linear map singular, so it must be copied through verbatim
-        // and act as a block boundary.
-        for degenerate in [
-            Gate::cnot {
-                control: 1,
-                target: 1,
-            },
-            Gate::cz {
-                control: 1,
-                target: 1,
-            },
-        ] {
-            let mut c = Circuit::new(3);
-            c.apply(Gate::cnot {
-                control: 0,
-                target: 1,
-            });
-            c.apply(Gate::t(1));
-            c.apply(degenerate.clone());
-            c.apply(Gate::cnot {
-                control: 1,
-                target: 2,
-            });
-            c.apply(Gate::t(2));
-            let out = cnot_min(&c);
-            assert_eq!(
-                out.gates.iter().filter(|g| **g == degenerate).count(),
-                1,
-                "{degenerate:?} was not preserved"
-            );
-        }
-    }
-
-    #[test]
-    fn a_circuit_of_only_degenerate_gates_is_unchanged() {
-        let mut c = Circuit::new(2);
-        for _ in 0..3 {
-            c.apply(Gate::cnot {
-                control: 0,
-                target: 0,
-            });
-        }
-        assert_eq!(cnot_min(&c).gates, c.gates);
     }
 
     #[test]

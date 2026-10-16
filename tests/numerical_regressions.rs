@@ -74,13 +74,18 @@ fn all_short_diagonal_failures_across_passes_levels_and_parallel_execution() {
     // Numeric pi has no symbolic provenance, even one rounding step away from S.
     let numeric = std::f64::consts::FRAC_PI_2 + 5e-10;
     let mut input = Circuit::new(2);
-    input.gates = vec![
-        Gate::cnot {
-            control: 0,
-            target: 1
-        };
-        2
-    ];
+    input = Circuit::from_gates(
+        input.num_qubits,
+        input.num_cbits,
+        vec![
+            Gate::cnot {
+                control: 0,
+                target: 1
+            };
+            2
+        ],
+    )
+    .unwrap();
     input.apply(Gate::rz_f64(numeric, 0).unwrap());
     check_every_exact_pipeline(&input);
 }
@@ -96,23 +101,28 @@ fn large_numeric_sums_are_preserved_for_each_single_qubit_axis() {
             vec![0.125, 0.25],
         ] {
             let mut input = Circuit::new(1);
-            input.gates = values
-                .iter()
-                .map(|v| {
-                    let a = Angle::from_f64(*v).unwrap();
-                    match kind {
-                        "rx" => Gate::rx(a, 0),
-                        "ry" => Gate::ry(a, 0),
-                        "rz" => Gate::rz(a, 0),
-                        "p" => Gate::p(a, 0),
-                        _ => unreachable!(),
-                    }
-                })
-                .collect();
+            input = Circuit::from_gates(
+                input.num_qubits,
+                input.num_cbits,
+                values
+                    .iter()
+                    .map(|v| {
+                        let a = Angle::from_f64(*v).unwrap();
+                        match kind {
+                            "rx" => Gate::rx(a, 0),
+                            "ry" => Gate::ry(a, 0),
+                            "rz" => Gate::rz(a, 0),
+                            "p" => Gate::p(a, 0),
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect(),
+            )
+            .unwrap();
             let expected: BigRational = values.iter().map(|v| binary(*v)).sum();
             let sum = |output: &Circuit| -> BigRational {
                 output
-                    .gates
+                    .gates()
                     .iter()
                     .map(|g| {
                         let angle = match (kind, g) {
@@ -145,14 +155,19 @@ fn large_numeric_sums_are_preserved_for_each_single_qubit_axis() {
 #[test]
 fn decimal_chain_preserves_exact_sum_of_ten_thousand_accepted_values() {
     let mut input = Circuit::new(1);
-    input.gates = vec![Gate::rz_f64(0.0001, 0).unwrap(); 10_000];
+    input = Circuit::from_gates(
+        input.num_qubits,
+        input.num_cbits,
+        vec![Gate::rz_f64(0.0001, 0).unwrap(); 10_000],
+    )
+    .unwrap();
     check_every_exact_pipeline(&input);
 }
 
 fn repeated_signed_rotations(count: usize) -> Circuit {
     let mut input = Circuit::new(1);
     for _ in 0..count {
-        input.gates.extend([
+        input.extend([
             Gate::rz_f64(9e-7, 0).unwrap(),
             Gate::y(0),
             Gate::rz_f64(-9e-7, 0).unwrap(),
@@ -164,7 +179,7 @@ fn repeated_signed_rotations(count: usize) -> Circuit {
 fn repeated_phase_rotations(count: usize) -> Circuit {
     let mut input = Circuit::new(1);
     for _ in 0..count {
-        input.gates.extend([
+        input.extend([
             Gate::p_f64(3e-6, 0).unwrap(),
             Gate::p_f64(3e-6, 0).unwrap(),
             Gate::x(0),
@@ -203,7 +218,7 @@ fn cnot_chunk_rolls_back_after_partial_cz_phase_updates() {
     ))
     .unwrap();
     let output = CnotMin::default().run(&input);
-    assert!(output.gates.len() <= input.gates.len());
+    assert!(output.gates().len() <= input.gates().len());
     assert!(equivalent(&semantics(&input), &output));
 }
 
@@ -230,16 +245,24 @@ fn controlled_phases_use_literal_angles_before_decomposition() {
         .try_run(&tiny)
         .unwrap();
     assert!(
-        output.gates.is_empty(),
+        output.gates().is_empty(),
         "tiny gate is removed only by a certified approximate pass"
     );
     check_every_exact_pipeline(&tiny);
     // A later unsupported expression must discard an earlier successful synthesis.
     let unsupported = qasm::parse("qreg q[2]; crz(exp(2000)) q[0],q[1];").unwrap();
-    tiny.gates = vec![Gate::rz_f64(0.3, 0).unwrap(), unsupported.gates[0].clone()];
+    tiny = Circuit::from_gates(
+        tiny.num_qubits,
+        tiny.num_cbits,
+        vec![
+            Gate::rz_f64(0.3, 0).unwrap(),
+            unsupported.gates()[0].clone(),
+        ],
+    )
+    .unwrap();
     let pass = DecomposeRotations { epsilon: 1e-20 };
     assert!(pass.try_run(&tiny).unwrap_err().0.contains("gate 1"));
-    assert_eq!(pass.run(&tiny).gates, tiny.gates);
+    assert_eq!(pass.run(&tiny).gates(), tiny.gates());
 }
 
 #[test]
@@ -256,7 +279,7 @@ fn large_angle_synthesis_is_certified_at_tight_epsilon() {
     .unwrap();
     assert!(
         output
-            .gates
+            .gates()
             .iter()
             .all(|g| matches!(g, Gate::h(_) | Gate::t(_) | Gate::s(_) | Gate::x(_)))
     );
@@ -269,10 +292,10 @@ fn large_angle_synthesis_is_certified_at_tight_epsilon() {
 #[test]
 fn parser_rounding_is_separate_from_optimizer_rounding() {
     let input = qasm::parse("qreg q[1]; rz((1e17+1)-1e17) q[0];").unwrap();
-    assert_eq!(input.gates[0].angle().unwrap(), &Angle::ONE);
+    assert_eq!(input.gates()[0].angle().unwrap(), &Angle::ONE);
     let preserved_pi = qasm::parse("qreg q[1]; rz((1e17+pi)-1e17) q[0];").unwrap();
     assert_eq!(
-        preserved_pi.gates[0]
+        preserved_pi.gates()[0]
             .angle()
             .unwrap()
             .components()
@@ -301,7 +324,7 @@ fn invalid_operands_and_precision_limits_are_transactional_errors() {
     invalid.apply(Gate::rz_f64(0.2, 1).unwrap());
     let pass = DecomposeRotations { epsilon: 1e-20 };
     assert!(pass.try_run(&invalid).unwrap_err().0.contains("gate 1"));
-    assert_eq!(pass.run(&invalid).gates, invalid.gates);
+    assert_eq!(pass.run(&invalid).gates(), invalid.gates());
     assert!(
         DecomposeRotations { epsilon: 1e-100 }
             .try_run(&valid)
@@ -309,13 +332,13 @@ fn invalid_operands_and_precision_limits_are_transactional_errors() {
             .0
             .contains("precision limit")
     );
-    let mut aliased = Circuit::new(1);
-    aliased.apply(Gate::crz {
+    // An aliased controlled rotation cannot reach the pass at all.
+    let aliased = Gate::crz {
         theta: Angle::pi_fraction(2, 1).unwrap(),
         control: 0,
         target: 0,
-    });
-    assert!(pass.try_run(&aliased).is_err());
+    };
+    assert!(Circuit::new(1).try_apply(aliased).is_err());
 }
 
 #[test]
@@ -338,7 +361,7 @@ fn every_native_rotation_has_a_certified_tight_epsilon_path() {
                 },
             )
             .unwrap();
-            assert!(!output.gates.is_empty());
+            assert!(!output.gates().is_empty());
             assert_eq!(report.numerical.certified_syntheses, 1, "{gate}");
             assert_eq!(report.numerical.uncertified_syntheses, 0);
             assert_eq!(report.numerical.failed_certifications, 0);
@@ -350,7 +373,12 @@ fn every_native_rotation_has_a_certified_tight_epsilon_path() {
 #[test]
 fn synthesis_bounds_accumulate_outward_and_remain_per_run() {
     let mut input = Circuit::new(1);
-    input.gates = vec![Gate::rz_f64(0.3, 0).unwrap(); 100];
+    input = Circuit::from_gates(
+        input.num_qubits,
+        input.num_cbits,
+        vec![Gate::rz_f64(0.3, 0).unwrap(); 100],
+    )
+    .unwrap();
     let epsilon = 1e-20;
     for parallel in [false, true] {
         let options = Options {
@@ -445,7 +473,7 @@ fn certified_tiny_controlled_identity_is_counted_and_is_never_an_exact_fold() {
                     },
                 )
                 .unwrap();
-                assert_eq!(output.gates, input.gates);
+                assert_eq!(output.gates(), input.gates());
                 assert_eq!(report.numerical.certified_syntheses, 0);
             }
             let (output, report) = optimize(
@@ -457,7 +485,7 @@ fn certified_tiny_controlled_identity_is_counted_and_is_never_an_exact_fold() {
                 },
             )
             .unwrap();
-            assert!(output.gates.is_empty());
+            assert!(output.gates().is_empty());
             assert_eq!(report.numerical.certified_syntheses, 1);
             assert!(report.numerical.certified_error_bound.unwrap() >= 1e-20);
         }
@@ -473,7 +501,7 @@ fn certified_tiny_controlled_identity_is_counted_and_is_never_an_exact_fold() {
         },
     )
     .unwrap();
-    assert!(output.gates.is_empty());
+    assert!(output.gates().is_empty());
     assert_eq!(report.numerical.certified_syntheses, 1);
     assert_eq!(report.numerical.uncertified_syntheses, 0);
 }

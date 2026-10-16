@@ -25,7 +25,7 @@ fn cli_optimizes_across_custom_call_boundaries_and_emits_flat_qasm() {
     );
     let flat = fs::read_to_string(output).unwrap();
     assert!(!flat.contains("gate "));
-    assert!(qasm::parse(&flat).unwrap().gates.is_empty());
+    assert!(qasm::parse(&flat).unwrap().gates().is_empty());
 }
 
 #[test]
@@ -58,5 +58,5 @@ fn configurable_limits_apply_to_expansion_but_not_flat_circuits() {
     };
     assert!(qasm::parse_with_limits("gate g a { x a; x a; } qreg q[1]; g q[0];", limits).is_err());
     let flat = qasm::parse_with_limits("qreg q[1]; x q[0]; x q[0];", limits).unwrap();
-    assert_eq!(flat.gates, vec![Gate::x(0), Gate::x(0)]);
+    assert_eq!(flat.gates(), vec![Gate::x(0), Gate::x(0)]);
 }

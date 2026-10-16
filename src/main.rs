@@ -114,7 +114,7 @@ impl Observer for Terminal {
             recording.passes.push(PassRecord {
                 stage,
                 name: name.to_string(),
-                input_gates: input.gates.len(),
+                input_gates: input.gates().len(),
                 output_gates: metrics.gates,
                 seconds: elapsed.as_secs_f64(),
             })
@@ -128,7 +128,7 @@ impl Observer for Terminal {
             "  {}\n\t{} {} → {} gates · {} 2q gates · {} T/Tdg{} · {} depth · {:.3}s",
             name,
             self.ui.elbow(true),
-            fmt_num(input.gates.len()),
+            fmt_num(input.gates().len()),
             fmt_num(metrics.gates),
             fmt_num(metrics.two_qubit),
             fmt_num(metrics.t),
@@ -397,7 +397,7 @@ fn fmt_median(median: f64) -> String {
 /// CCX/CCZ statements in the emitted QASM (CSWAP is written with one CCX).
 fn toffolis(circuit: &Circuit) -> usize {
     let mut count = 0;
-    for gate in &circuit.gates {
+    for gate in circuit.gates() {
         tzap::qasm::for_each_emitted(gate, |g| {
             count += usize::from(matches!(g, Gate::ccx { .. } | Gate::ccz { .. }));
         });
@@ -420,7 +420,7 @@ fn check_pbc_input(ui: &Ui, run: &Run, circuit: &Circuit) {
         || requested(tzap::optimize::PassName::DecomposeRz);
     let decomposes_ccx =
         run.options.decompose_ccx || requested(tzap::optimize::PassName::DecomposeToffoli);
-    for (index, gate) in circuit.gates.iter().enumerate() {
+    for (index, gate) in circuit.gates().iter().enumerate() {
         let problem = match gate {
             Gate::reset(_) => "PBC has no resets",
             Gate::cswap { .. } if !decomposes_ccx => {
@@ -659,7 +659,7 @@ fn read_circuit(ui: &Ui, path: &str, metrics: bool) -> Parsed {
         "\t{} {} · {}",
         ui.elbow(false),
         count(circuit.num_qubits, "qubit"),
-        count(circuit.gates.len(), "gate"),
+        count(circuit.gates().len(), "gate"),
     ));
     if metrics {
         let m = Metrics::of(&circuit);
@@ -813,7 +813,7 @@ fn main() {
     if run.to_pbc || run.visualize_pbc.is_some() {
         check_pbc_input(&ui, &run, &parsed.circuit);
     }
-    if run.resolve_parallel(parsed.circuit.gates.len()) && !run.gate_opts_off {
+    if run.resolve_parallel(parsed.circuit.gates().len()) && !run.gate_opts_off {
         ui.note(&format!(
             "  Optimizing chunks in parallel ({}+ gates) · --no-parallel to disable",
             fmt_num(AUTO_PARALLEL_GATES)
