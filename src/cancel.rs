@@ -46,6 +46,13 @@ struct Scratch {
     /// The previous sweep's gate buffer, reused as the next sweep's output
     /// instead of allocating and freeing one gate list per sweep.
     spare: Vec<Gate>,
+    /// Per gate position, the next position holding the same commuting pair
+    /// (`usize::MAX` if none), and the map that computes it; kept to reuse
+    /// their allocations.
+    next_same: Vec<usize>,
+    latest: rustc_hash::FxHashMap<CommutingPair, usize>,
+    /// Gates examined by commuting-pair walks, which tests bound.
+    walked: usize,
 }
 
 impl Scratch {
@@ -59,6 +66,9 @@ impl Scratch {
             stamp: 0,
             replace: vec![None; gate_count],
             spare: Vec::new(),
+            next_same: Vec::new(),
+            latest: rustc_hash::FxHashMap::default(),
+            walked: 0,
         }
     }
 
@@ -438,7 +448,7 @@ fn reduce_hadamards_pass(gates: &[Gate], scratch: &mut Scratch) -> Option<Vec<Ga
     Some(out)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum CommutingPair {
     Cnot(Qubit, Qubit),
     Cz(Qubit, Qubit),
@@ -529,17 +539,41 @@ fn cancel_commuting_pairs(mut gates: Vec<Gate>, scratch: &mut Scratch) -> (Vec<G
 fn cancel_commuting_pairs_pass(gates: &[Gate], scratch: &mut Scratch) -> Option<Vec<Gate>> {
     let stamp = scratch.begin();
     scratch.ensure_tracks(gates);
-    let Scratch { tracks, delete, .. } = &mut *scratch;
+    let Scratch {
+        tracks,
+        delete,
+        next_same,
+        latest,
+        walked,
+        ..
+    } = &mut *scratch;
+    // A gate can only cancel with the next live gate holding the same
+    // canonical pair, so index those first: a gate without one is skipped
+    // outright, and a walk never runs past its partner.
+    next_same.clear();
+    next_same.resize(gates.len(), usize::MAX);
+    latest.clear();
+    for (i, gate) in gates.iter().enumerate().rev() {
+        if let Some(pair) = CommutingPair::from_gate(gate) {
+            next_same[i] = latest.insert(pair, i).unwrap_or(usize::MAX);
+        }
+    }
     let mut fired = false;
 
     for i in 0..gates.len() {
         if delete[i] == stamp {
             continue;
         }
-        let pair = match CommutingPair::from_gate(&gates[i]) {
-            Some(pair) => pair,
-            _ => continue,
+        let Some(pair) = CommutingPair::from_gate(&gates[i]) else {
+            continue;
         };
+        let mut partner = next_same[i];
+        while partner != usize::MAX && delete[partner] == stamp {
+            partner = next_same[partner];
+        }
+        if partner == usize::MAX {
+            continue;
+        }
         let (arity, operands) = pair.operands();
         let mut cursors = [0usize; 3];
         for operand in 0..arity {
@@ -549,38 +583,42 @@ fn cancel_commuting_pairs_pass(gates: &[Gate], scratch: &mut Scratch) -> Option<
                 .expect("gate missing from operand track")
                 + 1;
         }
-        let mut cancel_at: Option<usize> = None;
 
-        loop {
-            let mut next = [None; 3];
+        // Every gate between the two on an operand's track must commute with
+        // the pair. Step the tracks in turn, so that a blocker on one track
+        // ends the walk before a long shared track (a CNOT fan-out's control)
+        // is scanned to the end. The partner is live and on every track, so
+        // each cursor reaches it.
+        let mut reached = [false; 3];
+        let mut pending = arity;
+        let mut blocked = false;
+        while pending != 0 && !blocked {
             for operand in 0..arity {
+                if reached[operand] {
+                    continue;
+                }
                 let track = &tracks[operands[operand] as usize];
-                while cursors[operand] < track.len() && delete[track[cursors[operand]]] == stamp {
+                while delete[track[cursors[operand]]] == stamp {
                     cursors[operand] += 1;
                 }
-                next[operand] = track.get(cursors[operand]).copied();
-            }
-            let Some(j) = next[..arity].iter().flatten().copied().min() else {
-                break;
-            };
-
-            if pair.matches(&gates[j]) {
-                cancel_at = Some(j);
-                break;
-            }
-            if !pair.commutes_with(&gates[j]) {
-                break;
-            }
-            for operand in 0..arity {
-                if next[operand] == Some(j) {
+                let j = track[cursors[operand]];
+                *walked += 1;
+                if j == partner {
+                    reached[operand] = true;
+                    pending -= 1;
+                } else if pair.commutes_with(&gates[j]) {
                     cursors[operand] += 1;
+                } else {
+                    blocked = true;
+                    break;
                 }
             }
         }
 
-        if let Some(j) = cancel_at {
+        if !blocked {
+            debug_assert!(pair.matches(&gates[partner]));
             delete[i] = stamp;
-            delete[j] = stamp;
+            delete[partner] = stamp;
             fired = true;
         }
     }
@@ -3430,6 +3468,29 @@ mod tests {
                     "unsound commutation: {native:?} across {gate:?}"
                 );
             }
+        }
+    }
+
+    /// A CNOT fan-out shares one control track; walking it from every gate
+    /// is quadratic. No partner means no walk, and a blocker on the short
+    /// track ends a walk before the shared one is scanned.
+    #[test]
+    fn commuting_pair_walks_stay_linear_on_cnot_fan_outs() {
+        let n = 4000u32;
+        let fan = || {
+            (1..=n).map(|q| Gate::cnot {
+                control: 0,
+                target: q,
+            })
+        };
+        let lone: Vec<Gate> = fan().collect();
+        let blocked: Vec<Gate> = fan().chain((1..=n).map(Gate::h)).chain(fan()).collect();
+        for gates in [lone, blocked] {
+            let mut scratch = Scratch::new(n as usize + 1, gates.len());
+            let (output, changed) = cancel_commuting_pairs(gates.clone(), &mut scratch);
+            assert!(!changed);
+            assert_eq!(output.len(), gates.len());
+            assert!(scratch.walked <= 2 * gates.len(), "{}", scratch.walked);
         }
     }
 }
