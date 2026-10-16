@@ -390,3 +390,15 @@ fn scaled_synthesis_cache_keeps_literal_sign_and_scale() {
         );
     }
 }
+
+#[test]
+fn tiny_rationals_with_long_denominators_synthesize_to_the_identity() {
+    let angle: Angle = "1e-600".parse().unwrap();
+    assert!(angle.coefficient_bits() > MAX_BITS - 128);
+    assert_eq!(synthesize(&angle, 1e-10).unwrap(), Vec::<char>::new());
+    let circuit = crate::qasm::parse("qreg q[1]; rz(1e-600) q[0];").unwrap();
+    let output = crate::decompose::DecomposeRotations::default()
+        .try_run(&circuit)
+        .unwrap();
+    assert!(output.gates.is_empty(), "{:?}", output.gates);
+}

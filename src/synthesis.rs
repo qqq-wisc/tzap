@@ -129,11 +129,7 @@ pub(crate) fn verify_controlled(input: &Gate, gates: &[Gate], epsilon: f64) -> R
     };
     let exact = controlled_word(gates, control, target)?;
     let accuracy = (-epsilon.min(1.0).log2()).ceil() as usize;
-    let mut bits = angle
-        .coefficient_bits()
-        .max(64)
-        .saturating_add(accuracy + 128)
-        .min(MAX_BITS);
+    let mut bits = initial_bits(angle, accuracy);
     loop {
         match verify_controlled_at_precision(input, angle, &exact, epsilon, bits) {
             Ok(ControlledVerification::Verified) => return Ok(()),
@@ -300,6 +296,24 @@ fn verify_controlled_at_precision(
         Ok(ControlledVerification::Inconclusive)
     }
 }
+/// First fixed-point precision to try. Rationals enclose exactly at any
+/// precision, so only an angle's magnitude (which scales pi's error during
+/// period reduction) needs extra bits, not the length of its denominator.
+/// Symbolic expressions fall back to their coefficient size. Callers widen on
+/// an inconclusive enclosure, up to `MAX_BITS`.
+fn initial_bits(angle: &Angle, accuracy: usize) -> usize {
+    let magnitude = match angle.as_rational().or_else(|| angle.pi_coefficient()) {
+        Some(r) => {
+            let r = r.to_big_rational();
+            r.numer().bits().saturating_sub(r.denom().bits()) as usize + 2
+        }
+        None => angle.coefficient_bits(),
+    };
+    magnitude
+        .max(64)
+        .saturating_add(accuracy + 128)
+        .min(MAX_BITS)
+}
 fn dyadic(integer: &BigInt, bits: usize, precision: usize) -> FBig<HalfEven> {
     // Integer spelling is exact; never reinterpret an f64 decimal as the target.
     FBig::from_parts(
@@ -333,13 +347,7 @@ pub(crate) fn synthesize_scaled(
         return Ok(word.clone());
     }
     let accuracy_bits = (-epsilon.min(1.0).log2()).ceil() as usize;
-    let mut bits = angle
-        .coefficient_bits()
-        .max(64)
-        .saturating_add(accuracy_bits + 128);
-    if bits > MAX_BITS {
-        return Err(Failure::Limit("certification precision limit reached"));
-    }
+    let mut bits = initial_bits(angle, accuracy_bits);
     let target = loop {
         match prepare_scaled_with_period(angle, bits, 2, scale) {
             Ok(target)
