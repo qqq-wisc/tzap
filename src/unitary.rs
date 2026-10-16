@@ -258,6 +258,21 @@ fn angle_phase(angle: &crate::angle::Angle, half: bool) -> C {
             .expect("finite reference scalar")
     }
     fn reference(a: &crate::angle::Angle) -> f64 {
+        // A trigonometric argument affine in pi is reduced exactly first.
+        if let ExpressionRef::Function(f @ (Function::Sin | Function::Cos | Function::Tan), a) =
+            a.expression()
+            && let Some((p, r)) = a.affine_coefficients()
+        {
+            let p = p.to_big_rational();
+            let turns =
+                num_rational::BigRational::new(p.numer() % (p.denom() * 2), p.denom().clone());
+            let x = turns.to_f64().unwrap() * PI + reduced(&r.to_big_rational(), 2);
+            return match f {
+                Function::Sin => x.sin(),
+                Function::Cos => x.cos(),
+                _ => x.tan(),
+            };
+        }
         match a.expression() {
             ExpressionRef::Rational(r) => number(&r),
             ExpressionRef::Pi(r) => number(&r) * PI,
@@ -300,6 +315,10 @@ fn angle_phase(angle: &crate::angle::Angle, half: bool) -> C {
             ExpressionRef::Sum(terms) => terms.fold(C::ONE, |phase, (c, a)| {
                 phase * phase_of(a, &(scale * c.to_big_rational()), half)
             }),
+            ExpressionRef::Rational(r) => C::polar(
+                1.0,
+                reduced(&(r.to_big_rational() * scale), if half { 4 } else { 2 }) / divisor,
+            ),
             _ => C::polar(1.0, reference(a) * scale.to_f64().unwrap() / divisor),
         }
     }
@@ -309,6 +328,57 @@ fn angle_phase(angle: &crate::angle::Angle, half: bool) -> C {
         half,
     )
 }
+/// `x` reduced exactly modulo `period`·π, then rounded. Rounding a large exact
+/// rational first would discard every bit below its binary64 spacing,
+/// including any O(1) offset that was added to it.
+fn reduced(x: &num_rational::BigRational, period: u32) -> f64 {
+    use num_integer::Integer;
+    use num_traits::ToPrimitive;
+    let magnitude = x.numer().bits().saturating_sub(x.denom().bits()) as usize;
+    if magnitude <= 8 {
+        return x.to_f64().expect("finite reference scalar");
+    }
+    let precision = magnitude + 96;
+    let tau = machin_pi(precision) * period;
+    let scaled = (x.numer() << precision).div_floor(x.denom());
+    let half: num_bigint::BigInt = &tau >> 1;
+    let turns = (&scaled + half).div_floor(&tau);
+    num_rational::BigRational::new(
+        scaled - turns * tau,
+        num_bigint::BigInt::from(1) << precision,
+    )
+    .to_f64()
+    .expect("reduced reference scalar")
+}
+
+/// pi·2^bits by Machin's formula, independent of the interval kernel that the
+/// oracle checks. Each series truncation errs by at most one unit, which the
+/// guard bits absorb.
+fn machin_pi(bits: usize) -> num_bigint::BigInt {
+    use num_bigint::BigInt;
+    use num_traits::Zero;
+    let guard = 32;
+    let unit = BigInt::from(1) << (bits + guard);
+    let arctan_inverse = |x: u32| {
+        let square = BigInt::from(x * x);
+        let mut power = &unit / x;
+        let mut sum = BigInt::zero();
+        let mut k = 0u32;
+        while !power.is_zero() {
+            let term = &power / (2 * k + 1);
+            if k.is_multiple_of(2) {
+                sum += term;
+            } else {
+                sum -= term;
+            }
+            power /= &square;
+            k += 1;
+        }
+        sum
+    };
+    (arctan_inverse(5) * 16 - arctan_inverse(239) * 4) >> guard
+}
+
 fn gate_matrix_p(theta: &crate::angle::Angle) -> [[C; 2]; 2] {
     [[C::ONE, C::ZERO], [C::ZERO, angle_phase(theta, false)]]
 }
@@ -449,27 +519,25 @@ pub fn circuits_equiv(a: &Circuit, b: &Circuit, tol: f64) -> bool {
     let ub = circuit_unitary(b);
     let dim = ua.len();
 
-    // find global phase: first entry where both are nonzero
-    // phase = conj(ua[r][c]) * ub[r][c] / |ua[r][c]|^2
-    let mut phase = None;
+    // Take the global phase at the largest entry of `ua`. A unitary has one of
+    // modulus at least 1/sqrt(dim), so the pivot cannot amplify an entry's
+    // error the way a barely-nonzero one would. Only the phase is used: a
+    // magnitude mismatch at the pivot must still fail the comparison below.
+    let mut pivot = (0, 0);
     for r in 0..dim {
         for c in 0..dim {
-            let nsq = ua[r][c].norm_sq();
-            if nsq > tol * tol {
-                // phase such that ub = phase * ua
-                let p = ub[r][c] * ua[r][c].conj() * (1.0 / nsq);
-                phase = Some(p);
-                break;
+            if ua[r][c].norm_sq() > ua[pivot.0][pivot.1].norm_sq() {
+                pivot = (r, c);
             }
         }
-        if phase.is_some() {
-            break;
-        }
     }
-
-    let phase = match phase {
-        Some(p) => p,
-        None => return true, // both zero matrices
+    let (r, c) = pivot;
+    let overlap = ub[r][c] * ua[r][c].conj();
+    let norm = overlap.norm_sq().sqrt();
+    let phase = if norm > 0.0 {
+        overlap * (1.0 / norm)
+    } else {
+        C::ONE
     };
 
     // check: ub[r][c] ≈ phase * ua[r][c] for all r,c
@@ -1321,4 +1389,39 @@ fn floating_reference_detects_lost_symbolic_quarter_turns() {
         }],
     };
     assert!(!circuits_equiv(&branch_phase, &Circuit::new(2), 1e-12));
+}
+
+#[test]
+fn global_phase_pivot_does_not_amplify_small_entry_errors() {
+    let a = Circuit::from_qasm("qreg q[1]; ry(pi-0.003) q[0];").unwrap();
+    let b = Circuit::from_qasm("qreg q[1]; ry(pi-0.0028) q[0];").unwrap();
+    assert!(circuits_equiv(&a, &b, 1e-3));
+    assert!(!circuits_equiv(&a, &b, 1e-5));
+    // A pivot that matches only in magnitude must not rescale the matrix.
+    let c = Circuit::from_qasm("qreg q[1]; ry(pi-0.003) q[0]; rz(0.5) q[0];").unwrap();
+    assert!(!circuits_equiv(&a, &c, 1e-3));
+}
+
+#[test]
+fn large_exact_rationals_reduce_before_rounding() {
+    let folded = Circuit::from_qasm("qreg q[1]; rz(1e20) q[0]; rz(1-1e20) q[0];").unwrap();
+    let one = Circuit::from_qasm("qreg q[1]; rz(1) q[0];").unwrap();
+    assert!(circuits_equiv(&folded, &one, 1e-9));
+    assert!(!circuits_equiv(&folded, &Circuit::new(1), 1e-9));
+    for (large, small) in [
+        ("p(1e30+1/3) q[0]; p(-1e30) q[0];", "p(1/3) q[0];"),
+        ("rx(5e40+2) q[0]; rx(-5e40) q[0];", "rx(2) q[0];"),
+        ("p(sin(1e25*pi+1)) q[0];", "p(sin(1)) q[0];"),
+        (
+            "p(cos(1e25+1/2)-cos(1e25)) q[0];",
+            "p(cos(1e25+1/2)-cos(1e25)) q[0];",
+        ),
+    ] {
+        let a = Circuit::from_qasm(&format!("qreg q[1]; {large}")).unwrap();
+        let b = Circuit::from_qasm(&format!("qreg q[1]; {small}")).unwrap();
+        assert!(circuits_equiv(&a, &b, 1e-9), "{large}");
+    }
+    let shifted = Circuit::from_qasm("qreg q[1]; p(cos(1e25+1/2)) q[0];").unwrap();
+    let unshifted = Circuit::from_qasm("qreg q[1]; p(cos(1e25)) q[0];").unwrap();
+    assert!(!circuits_equiv(&shifted, &unshifted, 1e-3));
 }
