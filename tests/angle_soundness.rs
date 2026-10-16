@@ -340,7 +340,7 @@ fn synthesis_errors_and_exact_lowering() {
 
 #[test]
 fn parser_complexity_is_bounded_without_changing_normal_expressions() {
-    let nested = format!("{}pi{}", "(".repeat(200), ")".repeat(200));
+    let nested = format!("{}pi{}", "(".repeat(300), ")".repeat(300));
     let chain = (1..=300)
         .map(|n| format!("sin({n}/1000)"))
         .collect::<Vec<_>>()

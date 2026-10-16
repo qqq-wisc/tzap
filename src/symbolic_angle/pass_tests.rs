@@ -281,3 +281,27 @@ fn seeded_general_expression_streams_preserve_formal_phases() {
         }
     }
 }
+#[test]
+fn normalized_inverses_and_pythagorean_sums_fold_to_identity() {
+    let inverse =
+        crate::qasm::parse("qreg q[1]; rz(2*pi*sin(1)) q[0]; rz(-2*pi*sin(1)) q[0];").unwrap();
+    for p in passes() {
+        assert!(p.run(&inverse).gates.is_empty(), "{}", p.name());
+    }
+    let pythagorean =
+        crate::qasm::parse("qreg q[1]; rz(-1) q[0]; rz(sin(1)^2) q[0]; rz(cos(1)^2) q[0];")
+            .unwrap();
+    for p in passes().into_iter().skip(1) {
+        assert!(p.run(&pythagorean).gates.is_empty(), "{}", p.name());
+    }
+}
+#[test]
+fn printed_circuits_reparse_within_the_expression_depth_limit() {
+    let mut angle = "1".to_string();
+    for _ in 0..16 {
+        angle = format!("sin(1+{angle})");
+    }
+    let input = crate::qasm::parse(&format!("qreg q[1]; rz({angle}) q[0];")).unwrap();
+    let output = crate::qasm::parse(&input.to_qasm()).unwrap();
+    assert_eq!(output.gates, input.gates);
+}

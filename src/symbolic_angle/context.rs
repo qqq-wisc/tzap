@@ -554,14 +554,33 @@ impl AngleContext {
         if merged.is_empty() {
             return Ok(Angle::ZERO);
         }
-        if merged.len() == 2
-            && merged[0].coefficient == merged[1].coefficient
-            && let (Some((a, x)), Some((b, y))) =
-                (trig_square(&merged[0].atom), trig_square(&merged[1].atom))
-            && a != b
-            && x == y
-        {
-            return self.number(merged[0].coefficient.clone(), false, budget);
+        // c*sin(x)^2 + c*cos(x)^2 = c, wherever the pair occurs in the sum.
+        let squares: Vec<usize> = (0..merged.len())
+            .filter(|&i| trig_square(&merged[i].atom).is_some())
+            .collect();
+        if squares.len() >= 2 {
+            budget.charge(squares.len() * squares.len())?;
+            let pair = squares.iter().enumerate().find_map(|(k, &i)| {
+                let (a, x) = trig_square(&merged[i].atom)?;
+                squares[k + 1..]
+                    .iter()
+                    .copied()
+                    .find(|&j| {
+                        merged[i].coefficient == merged[j].coefficient
+                            && trig_square(&merged[j].atom).is_some_and(|(b, y)| a != b && x == y)
+                    })
+                    .map(|j| (i, j))
+            });
+            if let Some((i, j)) = pair {
+                // i < j, so removing j first leaves i in place.
+                merged.swap_remove(j);
+                let Term { coefficient, .. } = merged.swap_remove(i);
+                merged.push(Term {
+                    coefficient,
+                    atom: Angle::ONE,
+                });
+                return self.sum(merged, budget);
+            }
         }
         if merged.len() == 1 {
             let term = merged.pop().unwrap();
@@ -654,60 +673,54 @@ impl AngleContext {
         let mut coefficient = Rational::ONE;
         let mut factors = Vec::new();
         for value in [a, b] {
-            if let Some(NodeKind::Product {
-                coefficient: c,
-                factors: f,
-            }) = value.kind()
-            {
-                coefficient = coefficient.mul(c, budget)?;
-                factors.extend(f.iter().cloned());
-            } else if let Some(NodeKind::Sum(terms)) = value
-                .kind()
-                .filter(|kind| matches!(kind,NodeKind::Sum(terms) if terms.len()==1))
-            {
-                coefficient = coefficient.mul(&terms[0].coefficient, budget)?;
-                factors.push(terms[0].atom.clone());
-            } else {
-                factors.push(value.clone());
-            }
+            push_factor(value, &mut coefficient, &mut factors, budget)?;
         }
-        if factors.len() > budget.limits.max_terms {
-            return Err(Error::Limit(Resource::Terms));
-        }
-        self.sort_budget(
-            factors.len(),
-            factors.iter().map(Angle::expression_nodes).sum(),
-            budget,
-        )?;
-        factors.sort_unstable_by(|a, b| power_factor(a).0.cmp(power_factor(b).0));
-        let mut combined = Vec::with_capacity(factors.len());
-        let mut index = 0;
-        while index < factors.len() {
-            let (base, exponent) = power_factor(&factors[index]);
-            let mut exponent = exponent as i128;
-            let mut end = index + 1;
-            while end < factors.len() && power_factor(&factors[end]).0 == base {
-                exponent += power_factor(&factors[end]).1 as i128;
-                end += 1;
+        // Simplifying a merged power (sqrt(x)^2 = x) can expose a coefficient
+        // or a base shared with another factor, so regroup until stable. Each
+        // regrouping removes a square root, which bounds the iterations.
+        let mut combined = loop {
+            if factors.len() > budget.limits.max_terms {
+                return Err(Error::Limit(Resource::Terms));
             }
-            // Keep valid factors when their combined exponent exceeds i64;
-            // normalization must not reject a representable exact expression.
-            let factor = if end - index == 1 {
-                factors[index].clone()
-            } else if let Ok(exponent) = i64::try_from(exponent) {
-                self.pow_inner(base, exponent, budget)?
-            } else {
-                combined.extend(factors[index..end].iter().cloned());
+            self.sort_budget(
+                factors.len(),
+                factors.iter().map(Angle::expression_nodes).sum(),
+                budget,
+            )?;
+            factors.sort_unstable_by(|a, b| power_factor(a).0.cmp(power_factor(b).0));
+            let mut combined = Vec::with_capacity(factors.len());
+            let mut regroup = false;
+            let mut index = 0;
+            while index < factors.len() {
+                let (base, exponent) = power_factor(&factors[index]);
+                let mut exponent = exponent as i128;
+                let mut end = index + 1;
+                while end < factors.len() && power_factor(&factors[end]).0 == base {
+                    exponent += power_factor(&factors[end]).1 as i128;
+                    end += 1;
+                }
+                // Keep valid factors when their combined exponent exceeds i64;
+                // normalization must not reject a representable exact expression.
+                if end - index == 1 {
+                    combined.push(factors[index].clone());
+                } else if let Ok(exponent) = i64::try_from(exponent) {
+                    let factor = self.pow_inner(base, exponent, budget)?;
+                    if factor.as_rational().is_none() && power_factor(&factor).0 == base {
+                        combined.push(factor);
+                    } else {
+                        regroup |= factor.as_rational().is_none();
+                        push_factor(&factor, &mut coefficient, &mut combined, budget)?;
+                    }
+                } else {
+                    combined.extend(factors[index..end].iter().cloned());
+                }
                 index = end;
-                continue;
-            };
-            if let Some(r) = factor.as_rational() {
-                coefficient = coefficient.mul(&r, budget)?;
-            } else {
-                combined.push(factor);
             }
-            index = end;
-        }
+            if !regroup {
+                break combined;
+            }
+            factors = combined;
+        };
         if combined.is_empty() {
             return self.number(coefficient, false, budget);
         }
@@ -786,15 +799,38 @@ impl AngleContext {
             return self.number(r.pow(e, budget)?, false, budget);
         }
         if let Some(NodeKind::Function(Function::Sqrt, arg)) = a.kind()
-            && e == 2
+            && e % 2 == 0
         {
-            return Ok(arg.clone());
+            return self.pow_inner(arg, e / 2, budget);
+        }
+        // Distribute over rational coefficients: (c*x)^e = c^e * x^e.
+        if let Some(r) = a.pi_coefficient()
+            && !r.is_one()
+        {
+            let coefficient = r.pow(e, budget)?;
+            let power = self.pow_inner(&Angle::PI, e, budget)?;
+            return self.scale_inner(&power, &coefficient, budget);
         }
         if let Some(NodeKind::Sum(terms)) = a.kind()
             && terms.len() == 1
         {
             let coefficient = terms[0].coefficient.pow(e, budget)?;
             let power = self.pow_inner(&terms[0].atom, e, budget)?;
+            return self.scale_inner(&power, &coefficient, budget);
+        }
+        // A proven nonzero product has proven nonzero factors, so negative
+        // exponents distribute as well.
+        if let Some(NodeKind::Product {
+            coefficient,
+            factors,
+        }) = a.kind()
+        {
+            let coefficient = coefficient.pow(e, budget)?;
+            let mut power = Angle::ONE;
+            for factor in factors {
+                let factor = self.pow_inner(factor, e, budget)?;
+                power = self.mul_inner(&power, &factor, budget)?;
+            }
             return self.scale_inner(&power, &coefficient, budget);
         }
         if let Some(NodeKind::Power(base, old)) = a.kind()
@@ -1128,6 +1164,39 @@ impl AngleContext {
         let r = Rational::from_big(n, d, budget)?;
         self.number(r, false, budget)
     }
+}
+
+/// Add a multiplicand to a product in normal form: rational and pi
+/// coefficients, nested products, and single scaled terms are flattened.
+fn push_factor(
+    value: &Angle,
+    coefficient: &mut Rational,
+    factors: &mut Vec<Angle>,
+    budget: &mut Budget,
+) -> Result<(), Error> {
+    budget.charge(1)?;
+    if let Some(r) = value.as_rational() {
+        *coefficient = coefficient.mul(&r, budget)?;
+    } else if let Some(r) = value.pi_coefficient() {
+        *coefficient = coefficient.mul(&r, budget)?;
+        factors.push(Angle::PI);
+    } else {
+        match value.kind() {
+            Some(NodeKind::Product {
+                coefficient: c,
+                factors: f,
+            }) => {
+                *coefficient = coefficient.mul(c, budget)?;
+                factors.extend(f.iter().cloned());
+            }
+            Some(NodeKind::Sum(terms)) if terms.len() == 1 => {
+                *coefficient = coefficient.mul(&terms[0].coefficient, budget)?;
+                push_factor(&terms[0].atom, coefficient, factors, budget)?;
+            }
+            _ => factors.push(value.clone()),
+        }
+    }
+    Ok(())
 }
 
 fn power_factor(a: &Angle) -> (&Angle, i64) {

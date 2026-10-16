@@ -536,3 +536,101 @@ fn merging_powers_preserves_valid_expressions_when_exponents_exceed_i64() {
     let text = over.to_expression_string(1000).unwrap();
     assert_eq!(ctx.parse(&text).unwrap(), over);
 }
+
+fn same(ctx: &mut AngleContext, a: &str, b: &str) {
+    let x = ctx.parse(a).unwrap();
+    let y = ctx.parse(b).unwrap();
+    assert_eq!(x, y, "{a} => {x} but {b} => {y}");
+    assert_eq!(ctx.sub(&x, &y).unwrap(), Angle::ZERO, "{a} - {b}");
+}
+
+#[test]
+fn pi_coefficients_are_extracted_from_products_and_powers() {
+    let mut ctx = AngleContext::default();
+    let positive = ctx.parse("2*pi*sin(1)").unwrap();
+    let negated = ctx.neg(&positive).unwrap();
+    assert_eq!(negated, ctx.parse("-2*pi*sin(1)").unwrap());
+    same(&mut ctx, "2*pi*sin(1)", "2*sin(1)*pi");
+    same(&mut ctx, "2*pi*sin(1)", "sin(1)*(pi*2)");
+    same(&mut ctx, "(2*pi)*(3*pi)", "6*pi^2");
+    same(&mut ctx, "(-pi)^2", "pi^2");
+    same(&mut ctx, "(pi/2)^3", "pi^3/8");
+    same(&mut ctx, "(pi/2)^-1*pi", "2");
+}
+
+#[test]
+fn simplified_powers_are_renormalized_inside_products() {
+    let mut ctx = AngleContext::default();
+    same(
+        &mut ctx,
+        "(sqrt(sin(1))*sin(1))*sqrt(sin(1))",
+        "(sqrt(sin(1))*sqrt(sin(1)))*sin(1)",
+    );
+    same(&mut ctx, "(sqrt(sin(1))*sin(1))*sqrt(sin(1))", "sin(1)^2");
+    same(
+        &mut ctx,
+        "(sqrt(2*sin(1))*cos(1))*sqrt(2*sin(1))",
+        "2*sin(1)*cos(1)",
+    );
+    same(
+        &mut ctx,
+        "(sqrt(sin(1)*cos(1))*exp(1))*sqrt(sin(1)*cos(1))",
+        "sin(1)*cos(1)*exp(1)",
+    );
+    same(&mut ctx, "(sqrt(2*pi)*cos(1))*sqrt(2*pi)", "2*pi*cos(1)");
+    let x = ctx.parse("(sqrt(sin(1))*sin(1))*sqrt(sin(1))").unwrap();
+    assert_eq!(ctx.parse(&x.to_string()).unwrap(), x);
+}
+
+#[test]
+fn even_powers_of_square_roots_simplify() {
+    let mut ctx = AngleContext::default();
+    same(&mut ctx, "(sqrt(2)^3)*sqrt(2)", "4");
+    same(&mut ctx, "sqrt(sin(1))^4", "sin(1)^2");
+    same(&mut ctx, "sqrt(sin(1))^-2", "sin(1)^-1");
+    same(&mut ctx, "sqrt(sin(1))^-2*sin(1)", "1");
+}
+
+#[test]
+fn pythagorean_identity_applies_in_longer_sums() {
+    let mut ctx = AngleContext::default();
+    same(&mut ctx, "1 + sin(1)^2 + cos(1)^2", "2");
+    same(&mut ctx, "sin(1)^2 + cos(1)^2 + 1", "2");
+    same(&mut ctx, "exp(1) + 3*sin(1)^2 + 3*cos(1)^2", "exp(1) + 3");
+    same(
+        &mut ctx,
+        "sin(1)^2 + cos(2)^2 + sin(2)^2 + cos(1)^2 + pi",
+        "2 + pi",
+    );
+    let a = ctx.parse("-1").unwrap();
+    let b = ctx.parse("sin(1)^2").unwrap();
+    let c = ctx.parse("cos(1)^2").unwrap();
+    let mut acc = PhaseAccumulator::new(RotationPeriod::TwoPi, Limits::default());
+    for x in [&a, &b, &c] {
+        acc.add(&mut ctx, x).unwrap();
+    }
+    assert_eq!(acc.finish(&mut ctx).unwrap(), Angle::ZERO);
+}
+
+#[test]
+fn displayed_expressions_reparse_at_the_depth_limit() {
+    let mut ctx = AngleContext::default();
+    let mut source = "1".to_string();
+    for _ in 0..16 {
+        source = format!("sin(1+{source})");
+    }
+    let mut a = ctx.parse(&source).unwrap();
+    assert_eq!(ctx.parse(&a.to_string()).unwrap(), a);
+    // Grow to the scalar depth limit, mixing every displayed node kind.
+    loop {
+        let next = ctx
+            .parse(&format!("-1/3*pi + 2/3*sin(-5/7 + (2*pi/3)*exp({a})^-3)"))
+            .or_else(|_| ctx.parse(&format!("sin(1/2+{a})")));
+        match next {
+            Ok(next) => a = next,
+            Err(_) => break,
+        }
+    }
+    assert!(a.expression_depth() >= ctx.limits().max_depth - 1);
+    assert_eq!(ctx.parse(&a.to_string()).unwrap(), a);
+}

@@ -59,8 +59,12 @@ impl Parser<'_, '_> {
         Ok(())
     }
     fn expression(&mut self, min_binding: u8) -> Result<Angle, Error> {
+        // Display spends at most four nested parser frames per expression
+        // level (a sum's parentheses, `+` and `*` operands), so this frame
+        // bound accepts every printed scalar. The value's own depth is still
+        // checked against `max_depth`.
         self.depth += 1;
-        if self.depth > self.budget.limits.max_depth {
+        if self.depth > self.budget.limits.max_depth.saturating_mul(4) {
             return Err(Error::Limit(Resource::Depth));
         }
         self.budget.charge(1)?;
