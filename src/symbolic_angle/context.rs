@@ -361,25 +361,37 @@ impl AngleContext {
         hash: u64,
         budget: &mut Budget,
     ) -> Result<Option<Angle>, Error> {
-        if let Some(bucket) = self.nodes.get_mut(&hash) {
+        let Some(bucket) = self.nodes.get_mut(&hash) else {
+            return Ok(None);
+        };
+        let stats = &mut self.stats;
+        let mut scan = || {
             let mut index = 0;
             while index < bucket.len() {
                 budget.charge(1)?;
                 if let Some(node) = bucket[index].upgrade() {
                     budget.charge(node.meta.nodes)?;
                     if &node.kind == kind {
-                        self.stats.hits = self.stats.hits.saturating_add(1);
+                        stats.hits = stats.hits.saturating_add(1);
                         return Ok(Some(Angle(Value::Shared(node))));
                     }
                     index += 1;
                 } else {
                     bucket.swap_remove(index);
-                    self.stats.retained_entries -= 1;
-                    self.stats.pruned = self.stats.pruned.saturating_add(1);
+                    stats.retained_entries -= 1;
+                    stats.pruned = stats.pruned.saturating_add(1);
                 }
             }
+            Ok(None)
+        };
+        let result = scan();
+        // Pruning can empty the bucket, including on a scan that then fails a
+        // charge. Never keep an empty bucket: automatic pruning counts only
+        // retained entries, so empty buckets would accumulate unbounded.
+        if bucket.is_empty() {
+            self.nodes.remove(&hash);
         }
-        Ok(None)
+        result
     }
 
     #[inline]

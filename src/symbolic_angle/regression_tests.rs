@@ -677,3 +677,21 @@ fn decimal_size_limits_apply_to_the_exact_coefficient() {
     let over = ctx.parse("2^65536");
     assert_eq!(over, Err(Error::Limit(Resource::Bits)));
 }
+
+#[test]
+fn failed_operations_do_not_leave_empty_interner_buckets() {
+    let mut ctx = AngleContext::with_limits(Limits {
+        max_nodes: 2,
+        max_work: 4,
+        ..Limits::default()
+    });
+    for n in 1..=10_000 {
+        let a = Angle::rational(n, 1).unwrap();
+        drop(ctx.sin(&a).unwrap());
+        // The lookup prunes the expired node, then rebuilding runs out of work.
+        assert!(ctx.sin(&a).is_err());
+        assert!(ctx.nodes.values().all(|bucket| !bucket.is_empty()));
+        assert!(ctx.nodes.len() <= ctx.limits().max_nodes, "{n}");
+    }
+    assert_eq!(ctx.stats().retained_entries, 0);
+}
