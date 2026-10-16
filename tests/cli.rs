@@ -1559,7 +1559,10 @@ fn gate_lines_from(stdout: &str) -> Vec<String> {
     stdout
         .lines()
         .filter(|l| {
-            !l.starts_with("OPENQASM") && !l.starts_with("include") && !l.starts_with("qreg")
+            !l.starts_with("OPENQASM")
+                && !l.starts_with("include")
+                && !l.starts_with("gate ")
+                && !l.starts_with("qreg")
         })
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())

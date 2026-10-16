@@ -113,13 +113,18 @@ pub(super) struct Budget {
 }
 
 /// Avoid expression/descriptor machinery for ordinary indexed native gates.
+/// A name the program defined itself takes the general path.
 pub(super) fn native_indexed(
     name: &str,
     rest: &str,
     line: usize,
+    registry: &definitions::Registry,
     registers: &[(String, usize, usize)],
     gates: &mut Vec<Gate>,
 ) -> Result<bool, String> {
+    if registry.contains(name) {
+        return Ok(false);
+    }
     let Some(native) = definitions::Native::lookup(name) else {
         return Ok(false);
     };

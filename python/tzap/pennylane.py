@@ -203,7 +203,9 @@ def _output_operations(
     with qml.QueuingManager.stop_recording():
         for raw_line in qasm.splitlines():
             line = raw_line.strip()
-            if not line or line.startswith(("OPENQASM", "include ", "qreg ", "creg ")):
+            if not line or line.startswith(
+                ("OPENQASM", "include ", "gate ", "qreg ", "creg ")
+            ):
                 continue
 
             statement = line.removesuffix(";")

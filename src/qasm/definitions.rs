@@ -75,6 +75,11 @@ impl Native {
             _ => return None,
         })
     }
+    /// A tzap shortcut that neither the language nor `qelib1.inc` declares,
+    /// so a program may define the name itself (as Qiskit does for `ccz`).
+    pub fn definable(self) -> bool {
+        matches!(self, Self::Ccz)
+    }
     pub fn signature(self) -> (usize, usize) {
         match self {
             Self::Rz | Self::P | Self::Rx | Self::Ry => (1, 1),
@@ -215,7 +220,8 @@ pub(super) struct Definition {
 #[derive(Default)]
 pub(super) struct Registry {
     pub definitions: Vec<Definition>,
-    names: HashMap<String, usize>,
+    /// Every defined name. A definition shadows a definable native shortcut.
+    names: HashMap<String, Callable>,
 }
 
 impl Registry {
@@ -223,16 +229,12 @@ impl Registry {
         self.names.contains_key(name)
     }
     pub fn lookup(&self, name: &str, line: usize) -> Result<Callable, String> {
-        if let Some(native) = Native::lookup(name) {
-            return Ok(Callable::Native(native));
+        if let Some(&callee) = self.names.get(name) {
+            return Ok(callee);
         }
-        self.names
-            .get(name)
-            .copied()
-            .map(Callable::Custom)
-            .ok_or_else(|| {
-                format!("line {line}: unsupported: {name} (unknown gate or forward reference)")
-            })
+        Native::lookup(name).map(Callable::Native).ok_or_else(|| {
+            format!("line {line}: unsupported: {name} (unknown gate or forward reference)")
+        })
     }
     pub fn signature(&self, callee: Callable) -> (usize, usize) {
         match callee {
@@ -267,7 +269,8 @@ impl Registry {
         if !valid_name(name) {
             return Err(format!("line {line}: invalid gate name '{name}'"));
         }
-        if Native::lookup(name).is_some()
+        let native = Native::lookup(name);
+        if native.is_some_and(|native| !native.definable())
             || self.contains(name)
             || registers
                 .iter()
@@ -374,7 +377,18 @@ impl Registry {
                 line: statement.line,
             });
         }
-        self.names.insert(name.to_owned(), self.definitions.len());
+        // Keep the native gate only when the definition provably denotes it;
+        // any other body is inlined like an ordinary custom gate.
+        if let Some(native @ Native::Ccz) = native
+            && parameters.is_empty()
+            && qubits.len() == 3
+            && is_ccz(&body)
+        {
+            self.names.insert(name.to_owned(), Callable::Native(native));
+            return Ok(());
+        }
+        self.names
+            .insert(name.to_owned(), Callable::Custom(self.definitions.len()));
         self.definitions.push(Definition {
             name: name.to_owned(),
             parameters,
@@ -385,6 +399,23 @@ impl Registry {
         });
         Ok(())
     }
+}
+
+/// Whether a three-qubit body is `h x; ccx y,z,x; h x` for some ordering of
+/// its formals, which is CCZ: CCZ is symmetric in its three qubits.
+fn is_ccz(body: &[BodyCall]) -> bool {
+    let [first, middle, last] = body else {
+        return false;
+    };
+    let hadamard = |call: &BodyCall| {
+        matches!(call.callee, Callable::Native(Native::H)) && call.parameters.is_empty()
+    };
+    hadamard(first)
+        && hadamard(last)
+        && first.qubits == last.qubits
+        && matches!(middle.callee, Callable::Native(Native::Ccx))
+        && middle.parameters.is_empty()
+        && middle.qubits.get(2) == first.qubits.first()
 }
 
 pub(super) fn comma_list(s: &str) -> impl Iterator<Item = &str> {

@@ -195,7 +195,9 @@ fn parse_with(qasm: &str, limits: ParseLimits, numeric_literals: bool) -> Result
             }
             _ => {
                 seen_gate = true;
-                if inline::native_indexed(keyword, rest, line_num, &registers, &mut gates)? {
+                if inline::native_indexed(
+                    keyword, rest, line_num, &registry, &registers, &mut gates,
+                )? {
                     continue;
                 }
                 inline::call(
@@ -218,12 +220,20 @@ fn parse_with(qasm: &str, limits: ParseLimits, numeric_literals: bool) -> Result
     Ok(circuit)
 }
 
+/// The definition [`serialize`] emits for `ccz`, which the parser maps back to
+/// the native gate.
+pub(crate) const CCZ_DEFINITION: &str = "gate ccz a,b,c { h c; ccx a,b,c; h c; }";
+
 /// Serialize a circuit to OpenQASM 2.0.
 pub fn serialize(circuit: &Circuit) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     writeln!(s, "OPENQASM 2.0;").unwrap();
     writeln!(s, "include \"qelib1.inc\";").unwrap();
+    // qelib1.inc does not declare ccz; define it so the output is standalone.
+    if circuit.has_ccz() {
+        writeln!(s, "{CCZ_DEFINITION}").unwrap();
+    }
     writeln!(s, "qreg q[{}];", circuit.num_qubits).unwrap();
     if circuit.num_cbits > 0 {
         writeln!(s, "creg c[{}];", circuit.num_cbits).unwrap();

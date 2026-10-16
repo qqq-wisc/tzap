@@ -60,7 +60,8 @@ fn arbitrary_custom_arity_empty_calls_and_flat_output() {
         ]
     );
     let output = serialize(&c);
-    assert!(!output.contains("gate "));
+    // Custom definitions are flattened; only ccz, which qelib1.inc lacks, is defined.
+    assert!(!output.replace(CCZ_DEFINITION, "").contains("gate "));
     assert_eq!(parse(&output).unwrap().gates, c.gates);
     fails(
         "qreg q[1]; gate empty a {} empty q[0]; qreg later[1];",
@@ -841,7 +842,11 @@ fn reports_describe_the_emitted_statements_for_every_native_gate() {
     );
     let mut names: Vec<_> = emitted
         .lines()
-        .skip(4)
+        .filter(|l| {
+            !["OPENQASM", "include", "gate ", "qreg", "creg"]
+                .iter()
+                .any(|header| l.starts_with(header))
+        })
         .map(|l| scan::identifier(l).0)
         .collect();
     names.sort_unstable();
@@ -852,4 +857,78 @@ fn reports_describe_the_emitted_statements_for_every_native_gate() {
     for absent in ["p", "cp", "sx", "swap", "crx", "cry", "cswap"] {
         assert!(!reported.contains(&absent), "{absent}");
     }
+}
+
+#[test]
+fn serialized_ccz_is_standalone_and_round_trips_as_native() {
+    let ccz = Gate::ccz {
+        control1: 2,
+        control2: 0,
+        target: 1,
+    };
+    let circuit = Circuit::from_gates(3, 0, vec![ccz.clone(), Gate::h(0)]).unwrap();
+    let text = serialize(&circuit);
+    assert!(text.contains(CCZ_DEFINITION));
+    assert_eq!(gates(&text), vec![ccz, Gate::h(0)]);
+    // Without a CCZ, there is no definition.
+    assert!(!serialize(&Circuit::new(1)).contains("gate "));
+}
+
+#[test]
+fn ccz_definitions_are_honoured_rather_than_rejected() {
+    let ccz = |a, b, c| Gate::ccz {
+        control1: a,
+        control2: b,
+        target: c,
+    };
+    // Qiskit's export, and any ordering of the symmetric H-CCX-H body, is CCZ.
+    for body in [
+        "h q2; ccx q0,q1,q2; h q2;",
+        "h q0; ccx q2,q1,q0; h q0;",
+    ] {
+        let source = format!(
+            "include \"qelib1.inc\"; gate ccz q0,q1,q2 {{ {body} }} qreg q[3]; ccz q[0],q[1],q[2];"
+        );
+        assert_eq!(gates(&source), vec![ccz(0, 1, 2)], "{body}");
+    }
+    // Any other body is what the name means, on every call path.
+    let source = "gate ccz a,b,c { x a; cx b,c; } qreg q[3]; qreg r[3]; \
+                  ccz q[2],q[0],q[1]; ccz q,r[0],r[1]; gate w a,b,c { ccz c,b,a; } w q[0],q[1],q[2];";
+    assert_eq!(
+        gates(source),
+        vec![
+            Gate::x(2),
+            Gate::cnot {
+                control: 0,
+                target: 1
+            },
+            Gate::x(0),
+            Gate::cnot {
+                control: 3,
+                target: 4
+            },
+            Gate::x(1),
+            Gate::cnot {
+                control: 3,
+                target: 4
+            },
+            Gate::x(2),
+            Gate::cnot {
+                control: 3,
+                target: 4
+            },
+            Gate::x(2),
+            Gate::cnot {
+                control: 1,
+                target: 0
+            },
+        ]
+    );
+    // Names that qelib1.inc declares still cannot be redefined, nor can a
+    // definition be repeated.
+    fails("gate ccx a,b,c { h a; } qreg q[3];", "conflicting gate name 'ccx'");
+    fails(
+        "gate ccz a,b,c { h c; ccx a,b,c; h c; } gate ccz a,b,c { x a; } qreg q[3];",
+        "conflicting gate name 'ccz'",
+    );
 }

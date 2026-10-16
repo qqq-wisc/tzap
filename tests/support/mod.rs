@@ -249,6 +249,7 @@ pub fn gate_lines(qasm: &str) -> Vec<String> {
             !line.is_empty()
                 && !line.starts_with("OPENQASM")
                 && !line.starts_with("include")
+                && !line.starts_with("gate ")
                 && !line.starts_with("qreg")
                 && !line.starts_with("creg")
         })

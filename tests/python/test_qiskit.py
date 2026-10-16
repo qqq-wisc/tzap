@@ -518,3 +518,28 @@ def test_native_standard_gate_transport_preserves_unitary(name):
             {"p", "cp", "crx", "cry", "crz", "rz", "rx", "ry"}
         )
         assert Operator(circuit).equiv(Operator(lowered), atol=1e-4)
+
+
+def test_serialized_ccz_parses_as_standalone_openqasm2():
+    source = 'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[3];\nccz q[0],q[1],q[2];\n'
+
+    output = optimize_qasm(source, level="O1").qasm
+
+    # Qiskit's own parser, with no custom instruction registered for ccz.
+    reparsed = qasm2.loads(output)
+    assert Operator(reparsed).equiv(Operator(qasm2.loads(source.replace(
+        "ccz q[0],q[1],q[2];", "h q[2]; ccx q[0],q[1],q[2]; h q[2];"
+    ))))
+
+
+def test_qiskit_exported_ccz_definition_is_accepted():
+    circuit = QuantumCircuit(3)
+    circuit.h(0)
+    circuit.ccz(0, 1, 2)
+    circuit.ccz(2, 0, 1)
+    source = qasm2.dumps(circuit)
+    assert "gate ccz" in source
+
+    output = optimize_qasm(source, level="O1").qasm
+
+    assert Operator(qasm2.loads(output)).equiv(Operator(circuit))

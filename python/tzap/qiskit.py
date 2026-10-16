@@ -226,7 +226,9 @@ def _rebuild_on_original_bits(
     flat = QuantumCircuit(original.num_qubits, original.num_clbits)
     for raw_line in optimized_qasm.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith(("OPENQASM", "include ", "qreg ", "creg ")):
+        if not line or line.startswith(
+            ("OPENQASM", "include ", "gate ", "qreg ", "creg ")
+        ):
             continue
         statement = line.removesuffix(";")
         if statement.startswith("measure "):
