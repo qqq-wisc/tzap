@@ -402,3 +402,15 @@ fn tiny_rationals_with_long_denominators_synthesize_to_the_identity() {
         .unwrap();
     assert!(output.gates.is_empty(), "{:?}", output.gates);
 }
+
+#[test]
+fn composite_angles_start_at_the_base_precision_and_still_certify() {
+    let small: Angle = "pi/3+1e-600".parse().unwrap();
+    assert!(small.coefficient_bits() > 1900);
+    assert!(initial_bits(&small, 34) < 256);
+    let word = synthesize(&small, 1e-10).unwrap();
+    assert!(!word.is_empty());
+    // A large composite magnitude widens adaptively instead.
+    let large: Angle = "10^200*sin(1)".parse().unwrap();
+    assert!(synthesize(&large, 1e-6).is_ok());
+}

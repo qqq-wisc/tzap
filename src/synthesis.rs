@@ -299,15 +299,16 @@ fn verify_controlled_at_precision(
 /// First fixed-point precision to try. Rationals enclose exactly at any
 /// precision, so only an angle's magnitude (which scales pi's error during
 /// period reduction) needs extra bits, not the length of its denominator.
-/// Symbolic expressions fall back to their coefficient size. Callers widen on
-/// an inconclusive enclosure, up to `MAX_BITS`.
+/// A composite expression's magnitude is not known without evaluating it, so
+/// it starts at the base precision. Enclosures are sound at every precision,
+/// and callers double it on an inconclusive enclosure, up to `MAX_BITS`.
 fn initial_bits(angle: &Angle, accuracy: usize) -> usize {
     let magnitude = match angle.as_rational().or_else(|| angle.pi_coefficient()) {
         Some(r) => {
             let r = r.to_big_rational();
             r.numer().bits().saturating_sub(r.denom().bits()) as usize + 2
         }
-        None => angle.coefficient_bits(),
+        None => 0,
     };
     magnitude
         .max(64)
