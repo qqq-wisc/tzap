@@ -160,3 +160,54 @@ fn reorder_keeps_anticommuting_operations_in_order() {
         "Z1 commutes with both and joins the first column"
     );
 }
+
+fn z_item(row: usize, kind: Kind) -> Item {
+    Item {
+        top: row,
+        bottom: row,
+        letters: vec!["Z"],
+        factors: vec![(row as u32, Pauli::Z)],
+        kind,
+    }
+}
+fn measure(row: usize, cbit: &str) -> Item {
+    z_item(
+        row,
+        Kind::Measure {
+            negative: false,
+            target: Some(cbit.into()),
+        },
+    )
+}
+
+#[test]
+fn measurements_writing_one_classical_bit_keep_their_order() {
+    let x0 = Item {
+        factors: vec![(0, Pauli::X)],
+        ..z_item(0, rotation(1, false, None))
+    };
+    let items = [x0, measure(0, "c0"), measure(1, "c0"), measure(2, "c1")];
+    for columns in [
+        reordered_columns(3, &items),
+        program_columns(3, &items, true),
+    ] {
+        assert!(columns[2] > columns[1], "{columns:?}");
+        // A different bit is unconstrained.
+        assert_eq!(columns[3], 0, "{columns:?}");
+    }
+}
+
+#[test]
+fn packed_conditional_rotations_follow_the_measurements_they_read() {
+    let items = [
+        measure(0, "c0"),
+        z_item(1, rotation(2, false, Some("if m0".into()))),
+        z_item(2, rotation(1, false, None)),
+    ];
+    for columns in [
+        reordered_columns(3, &items),
+        program_columns(3, &items, true),
+    ] {
+        assert_eq!(columns, [0, 1, 2]);
+    }
+}

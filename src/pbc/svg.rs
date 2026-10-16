@@ -93,19 +93,13 @@ struct Item {
 
 impl Item {
     /// Whether the two operations must keep their order: their axes
-    /// anticommute, or one of them is conditional or the frame.
+    /// anticommute, one of them is conditional or the frame, or both are
+    /// measurements writing the same classical bit.
     fn ordered_with(&self, other: &Item) -> bool {
-        let barrier = |item: &Item| {
-            matches!(
-                item.kind,
-                Kind::Frame
-                    | Kind::Rotation {
-                        condition: Some(_),
-                        ..
-                    }
-            )
-        };
-        if barrier(self) || barrier(other) {
+        if self.is_barrier() || other.is_barrier() {
+            return true;
+        }
+        if self.cbit().is_some() && self.cbit() == other.cbit() {
             return true;
         }
         let mut differing = 0;
@@ -123,6 +117,27 @@ impl Item {
             }
         }
         differing % 2 == 1
+    }
+
+    /// Ordered with every other operation. A condition may read any earlier
+    /// measurement.
+    fn is_barrier(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Frame
+                | Kind::Rotation {
+                    condition: Some(_),
+                    ..
+                }
+        )
+    }
+
+    /// The classical bit a measurement writes.
+    fn cbit(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Measure { target, .. } => target.as_deref(),
+            _ => None,
+        }
     }
 }
 
@@ -311,27 +326,37 @@ fn reordered_columns(n: usize, items: &[Item]) -> Vec<usize> {
 }
 
 /// Columns in program order: with packing, one past the latest column whose
-/// rows overlap; otherwise one column per item.
+/// rows overlap, or that writes the same classical bit; otherwise one column
+/// per item. Barriers (the frame and conditional rotations) are drawn after
+/// everything before them, and before everything after.
 fn program_columns(n: usize, items: &[Item], pack: bool) -> Vec<usize> {
-    // Column assignment: one past the latest column whose occupied rows
-    // overlap (with packing), or strictly sequential.
     let mut next_free = vec![0usize; n.max(1)];
+    // One past the column of the latest write to each classical bit.
+    let mut written: Vec<(&str, usize)> = Vec::new();
     let mut columns = Vec::with_capacity(items.len());
     let mut sequential = 0;
+    let mut floor = 0;
     for item in items {
-        let column = if matches!(item.kind, Kind::Frame) {
-            // The output Clifford comes after everything.
+        let column = if item.is_barrier() || !pack {
             sequential
-        } else if pack {
+        } else {
+            let bit = item
+                .cbit()
+                .and_then(|c| written.iter().find(|(w, _)| *w == c))
+                .map_or(0, |&(_, free)| free);
             (item.top..=item.bottom)
                 .map(|r| next_free[r])
-                .max()
-                .unwrap_or(0)
-        } else {
-            sequential
+                .fold(floor.max(bit), usize::max)
         };
         for free in &mut next_free[item.top..=item.bottom] {
             *free = column + 1;
+        }
+        if let Some(c) = item.cbit() {
+            written.retain(|(w, _)| *w != c);
+            written.push((c, column + 1));
+        }
+        if item.is_barrier() {
+            floor = column + 1;
         }
         sequential = sequential.max(column + 1);
         columns.push(column);
