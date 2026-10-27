@@ -8,7 +8,7 @@ change to schedule for the next API release.
 ## Current symbolic implementation
 
 The historical accepted-angle implementation below has been superseded by the
-[symbolic integration](symbolic-angle-core.md#pass-integration). Every native
+symbolic integration. Every native
 angle parameter now stores the same exact symbolic `Angle`. Scalar equality is
 literal; rotation periods are explicit and controlled RX/RY/RZ retain `4*pi`.
 Decimal QASM is exact rather than binary64 evaluation. Arithmetic promotes

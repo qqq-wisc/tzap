@@ -81,7 +81,6 @@ period explicitly. Controlled RX/RY/RZ use `4*pi` to retain relative phases.
 Each optimization pipeline owns an arithmetic context; parallel workers own
 independent contexts. `Pass::run_with_state` accepts a `PassState` for shared
 interning and configurable `Limits`. Values survive that context's destruction.
-See [the symbolic core](docs/symbolic-angle-core.md).
 
 ### QASM I/O
 
@@ -294,13 +293,12 @@ A custom pass only needs to supply `name` and `run`.
 
 Every optimization level runs `PhaseFoldPauli` right after `PhaseFoldRand`:
 `PhaseFoldRand` also merges S, S† and Z phases, and `PhaseFoldPauli` then finds
-the folds across H. It handles every gate kind (see the guide), and also runs
+the folds across H. It handles every gate kind, and also runs
 independently on the original circuit. The CLI equivalent for the combined
 pipeline is `--passes CancelGates,PhaseFoldRand,PhaseFoldPauli`. Axis equality is exact;
 random fingerprints only locate possible matches, and intervening commutation
 is checked exactly. Arbitrary Rz angles use exact symbolic addition. Rz angles
-close to a Clifford+T angle are not rounded to it. See
-[the implementation guide](docs/phase-fold-pauli.md).
+close to a Clifford+T angle are not rounded to it.
 
 ### Running passes
 
