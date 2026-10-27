@@ -55,14 +55,6 @@ Qiskit optimization pass or PennyLane transform. See the
 [Qiskit API guide](https://github.com/qqq-wisc/tzap/blob/main/docs/qiskit.md) or
 [PennyLane API guide](https://github.com/qqq-wisc/tzap/blob/main/docs/pennylane.md) for framework-specific setup.
 
-> [!WARNING]
-> tzap does not track global phase: an optimized circuit equals its input only
-> up to an unknown phase. That is unobservable on its own, but becomes a
-> relative phase once the circuit is controlled (`QuantumCircuit.control()`,
-> `qml.ctrl`). Add controls *before* optimizing, never after.
-
-
-
 ## Running tzap
 
 The standard command-line workflow is described below.
