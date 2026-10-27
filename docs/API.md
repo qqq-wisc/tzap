@@ -69,8 +69,7 @@ A numeric `PI/4` is not inferred to be an exact pi fraction. Default folding
 never adds rounding, snaps a small rotation to zero, or wraps a float modulo
 a floating approximation to pi. Arithmetic promotes to arbitrary-precision
 coefficients when needed. A resource limit or unproved rewrite leaves the affected
-gates intact. Named T/S/Z gates retain exact discrete arithmetic. See
-[the migration notes](docs/angle-soundness-migration.md).
+gates intact. Named T/S/Z gates retain exact discrete arithmetic.
 
 Use `AngleContext` to construct general expressions, for example
 `ctx.parse("sin(pi/7) + sqrt(2)/3")?`. All eight parameterized gate families

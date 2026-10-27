@@ -1,4 +1,4 @@
-#![doc = include_str!("../API.md")]
+#![doc = include_str!("../docs/API.md")]
 
 pub mod angle;
 mod angle_export;

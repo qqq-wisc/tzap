@@ -47,7 +47,7 @@ curl -LsSf https://github.com/qqq-wisc/tzap/releases/latest/download/tzap-opt-in
 ```
 
 You can also build and install tzap from [crates.io](https://crates.io/crates/tzap-opt) (`cargo install tzap-opt`) or build from source (`cargo install --path .`).
-You can also use tzap through the Rust API; see the [Rust API documentation](https://github.com/qqq-wisc/tzap/blob/main/API.md).
+You can also use tzap through the Rust API; see the [Rust API documentation](https://github.com/qqq-wisc/tzap/blob/main/docs/API.md).
 
 ### Integrations with Qiskit and PennyLane
 You can also use tzap as a Python library and apply it as a
