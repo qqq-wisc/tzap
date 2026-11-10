@@ -342,11 +342,7 @@ fn options_value(options: &Options, run: &RunInfo<'_>) -> Value {
 /// A pass's canonical `--passes` spelling, so the names in a JSON report are
 /// the same strings that can be fed back in on the command line.
 fn pass_name(pass: PassName) -> &'static str {
-    PassName::ALL
-        .iter()
-        .find(|(_, candidate, _)| *candidate == pass)
-        .map(|(name, _, _)| *name)
-        .unwrap_or("unknown")
+    pass.label()
 }
 
 /// Render a completed run as a JSON object, newline-terminated.
@@ -647,6 +643,9 @@ mod tests {
     fn every_pass_name_round_trips_through_the_cli_spelling() {
         for (name, pass, _) in PassName::ALL {
             assert_eq!(pass_name(pass), name);
+            assert_eq!(PassName::parse(pass_name(pass)), Some(pass));
+        }
+        for pass in [PassName::PhaseFoldSparse, PassName::PhaseFoldDense] {
             assert_eq!(PassName::parse(pass_name(pass)), Some(pass));
         }
     }

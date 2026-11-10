@@ -17,6 +17,7 @@ use crate::cancel::CancelGates;
 use crate::circuit::{Circuit, Gate, GateKind, GateSet, qubit_operands};
 use crate::cnot_min::CnotMin;
 use crate::decompose::{DecomposeCz, DecomposeRotations, DecomposeToffoli};
+use crate::experimental::{PhaseFoldDense, PhaseFoldSparse};
 use crate::pass::{Pass, PassState};
 use crate::phase_fold_pauli::PhaseFoldPauli;
 use crate::phase_fold_rand::PhaseFoldRand;
@@ -105,6 +106,8 @@ pub enum PassName {
     CancelGates,
     SuperOpt,
     PhaseFoldRand,
+    PhaseFoldSparse,
+    PhaseFoldDense,
     PhaseFoldPauli,
     CnotMin,
 }
@@ -143,14 +146,20 @@ impl PassName {
     pub const DecomposeRz: Self = Self::DecomposeRotations;
     /// The name this pass is selected by in [`Options::passes`].
     pub fn label(self) -> &'static str {
+        match self {
+            Self::PhaseFoldSparse => return "PhaseFoldGlobalExpr",
+            Self::PhaseFoldDense => return "PhaseFoldBitVecExact",
+            _ => {}
+        }
         Self::ALL
             .iter()
             .find(|(_, p, _)| *p == self)
             .map_or("pass", |(name, _, _)| name)
     }
 
-    /// All passes — `(name, variant, description)` — in a stable order
-    /// suitable for listing to a user.
+    /// Advertised passes — `(name, variant, description)` — in a stable order
+    /// suitable for listing to a user. Experimental passes are intentionally
+    /// omitted.
     pub const ALL: [(&'static str, PassName, &'static str); 8] = [
         (
             "DecomposeToffoli",
@@ -196,8 +205,11 @@ impl PassName {
 
     /// Look up a pass by its canonical name or a compatibility alias.
     pub fn parse(s: &str) -> Option<PassName> {
-        if s == "DecomposeRz" {
-            return Some(Self::DecomposeRotations);
+        match s {
+            "DecomposeRz" => return Some(Self::DecomposeRotations),
+            "PhaseFoldGlobalExpr" | "PhaseFoldSparse" => return Some(Self::PhaseFoldSparse),
+            "PhaseFoldBitVecExact" | "PhaseFoldDense" => return Some(Self::PhaseFoldDense),
+            _ => {}
         }
         Self::ALL
             .iter()
@@ -205,7 +217,7 @@ impl PassName {
             .map(|(_, p, _)| *p)
     }
 
-    /// Comma-separated list of canonical names (for help / error messages).
+    /// Comma-separated list of advertised canonical names (for help / errors).
     pub fn all_names() -> String {
         Self::ALL
             .iter()
@@ -996,6 +1008,8 @@ fn run_explicit_pass(
         ),
         PassName::CancelGates => map_pass!(CancelGates),
         PassName::PhaseFoldRand => map_pass!(PhaseFoldRand),
+        PassName::PhaseFoldSparse => map_pass!(PhaseFoldSparse),
+        PassName::PhaseFoldDense => map_pass!(PhaseFoldDense),
         PassName::PhaseFoldPauli => map_pass!(PhaseFoldPauli),
         PassName::CnotMin => map_pass!(CnotMin::default()),
         PassName::SuperOpt => {

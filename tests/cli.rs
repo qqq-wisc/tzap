@@ -1313,6 +1313,35 @@ const ALL_PASS_NAMES: [&str; 8] = [
     "CnotMin",
 ];
 
+#[test]
+fn experimental_phase_folders_are_selectable_but_not_advertised() {
+    let help = tzap().arg("--help").output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for pass in [
+        "PhaseFoldGlobalExpr",
+        "PhaseFoldBitVecExact",
+        "PhaseFoldSparse",
+        "PhaseFoldDense",
+    ] {
+        assert!(!help.contains(pass), "{pass} must stay out of --help");
+        let out = tzap_run(&[
+            TEST_QASM,
+            "--no-parallel",
+            "--passes",
+            pass,
+            "-o",
+            "-",
+            "-q",
+        ]);
+        assert_success(&out, &format!("--passes {pass}"));
+        assert!(
+            tzap::qasm::parse(&String::from_utf8_lossy(&out.stdout)).is_ok(),
+            "{pass} output must be valid QASM"
+        );
+    }
+}
+
 /// Exercises every decomposition pass: a Toffoli, a CZ, and an Rz rotation,
 /// plus cancellable H·H and foldable T·T pairs.
 const MIXED_QASM: &str = "\
