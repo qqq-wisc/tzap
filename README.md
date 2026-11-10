@@ -162,8 +162,6 @@ If you use tzap in your research, please cite the following papers:
 }
 ```
 
-See [POPL 2027 reproduction commands](docs/POPL27.md) to reproduce the tzap results from the paper.
-
 ```bibtex
 @misc{cryptoeprint:2026/2115,
       author = {Aws Albarghouthi},

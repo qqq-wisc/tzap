@@ -8,7 +8,7 @@ The paper's main benchmark suites are under `benchmarks/`:
 
 `benchmarks/qft/` is an additional corpus and was not used in the POPL paper.
 
-The very large RQ2 Cobble and Tower scaling instances were generated for the experiment and are not checked in. The synthetic RQ3 HWB-like family is generated as follows; the paper uses 16 qubits and five gates per stage:
+The RQ2 Cobble and Tower scaling instances contain up to hundreds of millions of gates and are too large to include in the repository; they were generated for the experiment. The synthetic RQ3 HWB-like family is generated as follows; the paper uses 16 qubits and five gates per stage:
 
 Generate an HWB-like scaling circuit (16 qubits, 40,000 stages, 200,000 gates):
 
