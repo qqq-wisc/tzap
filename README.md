@@ -1,163 +1,97 @@
-# ⚡️ tzap
+# tzap, `pauli-eval` branch
 
-[![CI](https://github.com/qqq-wisc/tzap/actions/workflows/ci.yml/badge.svg)](https://github.com/qqq-wisc/tzap/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/tzap-opt.svg)](https://crates.io/crates/tzap-opt)
-[![PyPI](https://img.shields.io/pypi/v/tzap.svg)](https://pypi.org/project/tzap/)
-![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
-![Lean 4](https://img.shields.io/badge/Lean_4-black?logo=lean&logoColor=white)
-![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)
-[![arXiv](https://img.shields.io/badge/arXiv-2605.13929-b31b1b.svg)](https://arxiv.org/abs/2605.13929)
+This branch holds the code for the paper *Pauli Abstractions for Quantum Circuits*:
 
-[**Installation**](#installation) · [**Using tzap**](#running-tzap) &nbsp;**|**&nbsp;  [Qiskit integration](https://github.com/qqq-wisc/tzap/blob/main/docs/qiskit.md) · [PennyLane integration](https://github.com/qqq-wisc/tzap/blob/main/docs/pennylane.md)
+- **PauliAbs**, the Pauli-abstraction phase-folding pass (`PhaseFoldPauli` in tzap);
+- our Rust port of Feynman's **state folding** (`StateFold1`, `StateFold2`, `StateFoldInf`);
+- phase folding over **programs with control flow** (the `tzap-prog` binary);
+- the **Lean development** that mechanizes the paper (`lean-paulifold/`).
 
-A super fast, Rust-based optimizer for large Clifford+T/Rz circuits, with
-optional conversion to optimized Pauli-based computation (PBC) circuits.
-- tzap is state-of-the-art in *speed*, *scalability*, and *gate-count reduction*.
-- tzap **minimizes T-count** with a new linear-time phase folding algorithm, based on [this paper](https://arxiv.org/abs/2605.13929).
-- tzap implements a new and fast **superoptimization** pass, based on [this paper](https://ia.cr/2026/2115).
-- A **formally verified** Lean port of tzap is available in [`lean`](lean/).
+For tzap in general, see the README on the `main` branch.
 
-tzap is **multiple orders of magnitude** faster than other optimizers&mdash;and **linearly** **scales** to **millions** of gates!
-Here's a runtime comparison to two powerful optimizers on increasingly larger circuits.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/qqq-wisc/tzap/main/assets/comparison.svg"
-       alt="Runtime comparison of tzap, VOQC, and QuiZX on GF multipliers"
-       style="width: 90%; height: auto;">
-</p>
-
-## Installation
-
-You can use tzap as a command-line utility or a library.
-
-### Install the binary
-
-These options install the standalone native `tzap` executable.
-
-**Homebrew** (macOS/Linux):
+## Build
 
 ```bash
-brew install qqq-wisc/tap/tzap
+cargo build --release
 ```
 
-**Prebuilt release binary** (macOS/Linux):
+This builds `target/release/tzap` (circuits) and `target/release/tzap-prog` (programs).
+
+## Circuits (RQ1)
+
+Each configuration runs one pass alone on a Clifford+T(+Rz) OpenQASM circuit:
 
 ```bash
-curl -LsSf https://github.com/qqq-wisc/tzap/releases/latest/download/tzap-opt-installer.sh | sh
+tzap input.qasm --passes <PASS> --no-parallel -q --json -o output.qasm
 ```
 
-You can also build and install tzap from [crates.io](https://crates.io/crates/tzap-opt) (`cargo install tzap-opt`) or build from source (`cargo install --path .`).
-You can also use tzap through the Rust API; see the [Rust API documentation](https://github.com/qqq-wisc/tzap/blob/main/API.md).
-
-### Integrations with Qiskit and PennyLane
-You can also use tzap as a Python library and apply it as a
-Qiskit optimization pass or PennyLane transform. See the
-[Qiskit API guide](https://github.com/qqq-wisc/tzap/blob/main/docs/qiskit.md) or
-[PennyLane API guide](https://github.com/qqq-wisc/tzap/blob/main/docs/pennylane.md) for framework-specific setup.
-
-
-
-## Running tzap
-
-The standard command-line workflow is described below.
-
-**Optimize a circuit**
-
-```bash
-tzap input.qasm -o output.qasm
-```
-
-For example, using a benchmark in this repo:
-
-```console
-$ tzap benchmarks/feynman/hwb12.qasm -o optimized.qasm
-⚡️ tzap v0.6.1
-  Parsed benchmarks/feynman/hwb12.qasm (5.5 MB) in 0.079s
-	├─ 20 qubits · 514,412 gates
-	└─ Circuit gates: {h, x, t, tdg, cx}
-  Optimizing input circuit
-  Loaded MURM in 0.039s
-	└─ Synthesis basis: {h, x, z, s, sdg, t, tdg, cx}
-
-  Converged after 6 rounds
-
-  ┌─ Final result · 44.6% fewer gates · 1.379s ────────────────┐
-  │ Gates    ━━━━━━━━━╸──────────── ↓44.6% · 514,412 → 284,848 │
-  │ 2q gates ━━━━╸───────────────── ↓22.1% · 191,803 → 149,500 │
-  │ T/Tdg    ━━━━━━━━━━╸─────────── ↓49.9% · 171,465 →  85,889 │
-  │ Depth    ━━━━━━╸─────────────── ↓28.4% · 274,781 → 196,865 │
-  └────────────────────────────────────────────────────────────┘
-  wrote optimized.qasm
-```
-
-**Optimization levels**
-
-| Level | Description |
+| Paper name | `<PASS>` |
 |---|---|
-| `-O1` | phase folding + basic gate cancellation. Fastest; captures most of the T-gate reduction. |
-| `-O2` | Adds superoptimization to `-O1`. |
-| **`-O3`** | **Default.** Repeats `-O2` until reaching a fixpoint.  |
-| `-Osuper` | Like `-O3`, but with more superoptimization power (slower on first use). |
+| PauliAbs | `PhaseFoldPauli` |
+| StateFold(1) | `StateFold1` |
+| StateFold(2) | `StateFold2` |
+| StateFold(∞) | `StateFoldInf` |
+| Linear | `PhaseFoldRand` |
+
+`--json` prints the gate counts and the pass time. For example:
 
 ```bash
-tzap benchmarks/feynman/hwb12.qasm -O1 -o optimized.qasm
+target/release/tzap benchmarks/feynman/hwb12.qasm --passes PhaseFoldPauli --no-parallel -q --json -o out.qasm
 ```
 
-**Optional decomposition**
-
-CCX, CCZ, CZ, and Rz stay native by default. To decompose them, use:
-
-- `--decompose-ccx` to decompose CCX and CCZ
-- `--decompose-cz` to decompose CZ into CX+H
-- `--decompose-rz` to decompose Rz via gridsynth
-
-**PBC circuits**
-
-Use `--to-pbc` to convert a circuit to PBC and optimize its Pauli rotations:
+Benchmarks with Toffoli gates must be expanded into Clifford+T first:
 
 ```bash
-tzap input.qasm --to-pbc -o output.pbc
+tzap input.qasm --passes DecomposeToffoli -q -o expanded.qasm
 ```
 
-Use `--decompose-rz` when the input contains Rz gates; resets are unsupported.
-See the [PBC guide](docs/pbc.md) for the format, options, and examples.
+### PauliAbs knobs
 
-## Circuit support
+`PhaseFoldPauli` reads three environment variables, used for the ablations:
 
-tzap supports a subset of OpenQASM 2.0:
+| Variable | Effect |
+|---|---|
+| `TZAP_PFP_BUDGET=<n>` | cap each fold attempt at `n` steps (default: unbounded, as in the paper) |
+| `TZAP_PFP_INDEX=0` | turn off the fingerprint index (search all earlier axes) |
+| `TZAP_PFP_SUPPORT=0` | turn off support lists for the commutation check |
 
-- **Gates:** `h`, `x`, `z`, `s`, `sdg`, `t`, `tdg`, `rz`, `cx`, `ccx`, `ccz`, `cz`, `measure`, `reset`
-- **Declarations:** `qreg`, `creg`
-- **Not supported:** classical conditionals (`if`), custom gate definitions (`gate`), barriers, `include` files (besides `qelib1.inc`, which is ignored)
-- Unrecognized lines produce an error
+## Programs with control flow (RQ2)
 
-## Correctness
-
-1. **Fuzzing and equivalence verification** on small random circuits and benchmark circuits.
-2. **Lean port:** the core optimizer is implemented and proven sound in Lean 4 — see [`lean/`](lean/).
-
-## Citation
-
-If you use tzap in your research, please cite the following papers:
-
-```bibtex
-@misc{albarghouthi2026tzap,
-      title={Linear-Time T-Gate Optimization via Random Abstraction}, 
-      author={Aws Albarghouthi},
-      year={2026},
-      eprint={2605.13929},
-      archivePrefix={arXiv},
-      primaryClass={cs.PL},
-      url={https://arxiv.org/abs/2605.13929}, 
-}
+```bash
+tzap-prog <CONFIG> program.qasm [--print]
 ```
 
-```bibtex
-@misc{cryptoeprint:2026/2115,
-      author = {Aws Albarghouthi},
-      title = {Fast Quantum-Circuit Superoptimization},
-      howpublished = {Cryptology {ePrint} Archive, Paper 2026/2115},
-      year = {2026},
-      url = {https://eprint.iacr.org/2026/2115}
-}
+It prints the qubit count, the static T count before and after, and the time as JSON; `--print`
+also prints the optimized program.
+
+| Paper name | `<CONFIG>` |
+|---|---|
+| PauliAbs (as reported) | `pauli-full` |
+| PauliAbs, plain | `pauli` |
+| StateFold(1), (2), (∞) | `statefold1`, `statefold2`, `statefold0` |
+
+`pauli-full` keeps up to 100 abstract relations before joining and uses eigenstate facts after
+resets and measurements; `pauli-disj` and `pauli-zero` turn on only one of the two, and
+`pauli-full<k>` keeps up to `k` relations. The programs of Amy and Lunderville are in
+`benchmarks/amy-lunderville/`, for example:
+
+```bash
+target/release/tzap-prog pauli-full benchmarks/amy-lunderville/loop-simple.qasm
 ```
+
+## Feynman baseline
+
+The paper also runs Feynman's own state folding, with inputs treated as unknown states:
+
+```bash
+feynopt -purecircuit -statefold <d> input.qasm   # d = 1, 2, or 0 for unbounded
+```
+
+## Lean
+
+```bash
+cd lean-paulifold
+lake build
+```
+
+See `lean-paulifold/README.md` for how the Lean names map to the paper.
