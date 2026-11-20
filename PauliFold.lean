@@ -19,3 +19,11 @@ import PauliFold.Join
 import PauliFold.Disjunctive
 import PauliFold.FoldRule
 import PauliFold.Alpha
+import PauliFold.Paper.Basic
+import PauliFold.Paper.Relation
+import PauliFold.Paper.Circuits
+import PauliFold.Paper.Programs
+import PauliFold.Paper.PhaseFolding
+import PauliFold.Paper.Extras
+import PauliFold.Paper.Comparison
+import PauliFold.Paper.Claims
