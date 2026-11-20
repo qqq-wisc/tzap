@@ -5,10 +5,10 @@ import PauliFold.Paper.Circuits
 
 * Projectors `Π^q_b = (I + (-1)^b Z_q)/2` (`proj`), Definition 6.1 (`alphaMeas`, `alphaReset`),
   Lemma 6.2 (`lemma_6_2_*`), Example 6.3 (`Examples.example_6_3*`).
-* Definitions 6.4 and 6.5 (relations with unknowns, concretization) are the core's `Dom`,
-  `Models`, `ARel.F` and `Dom.gamma` (`Paper/Relation.lean`); composition with `⊤` is `Dom.comp`.
-* Section 6.2 (unknown constraints): the example `⋆ ↦ Z₂` (`Examples.unknowns_example`) and the
-  claim that Lemma 4.5 still holds for known weakest preconditions (`lemma_4_5_unknowns`, which is
+* Definitions 6.4 and 6.5 (`⊤`, composition with `⊤`) are the core's `Dom`, `Dom.gamma` and
+  `Dom.comp` (`Paper/Relation.lean`).
+* Section 4.2 (partial tableaux): the example without a constraint on `Z₂` (`Examples.unknowns_example`)
+  and the claim that Lemma 4.5 still holds where the weakest precondition is defined (`lemma_4_5_unknowns`, which is
   the core's `Cons.wp_toMatrix`).
 * Definition 6.6 (join, `Dom.join`, notation `σ₁ ⊔ σ₂`), Lemma 6.7 (`lemma_6_7`), the join has a
   model (`Dom.Sat.join_left`, `Dom.Sat.join_right`), Example 6.8 (`Examples.example_6_8*`).
@@ -101,26 +101,25 @@ theorem lemma_6_2 (q : Fin n) :
       (Xq q).toMatrix * proj q 1 ∈ (alphaReset q).gamma :=
   ⟨lemma_6_2_measure q, lemma_6_2_reset_zero q, lemma_6_2_reset_one q⟩
 
-/-! ## Unknown constraints (Section 6.2) -/
+/-! ## Partial tableaux (Sections 4.1 and 4.2) -/
 
-/-- Paper, Section 6.2: the weakest precondition is unknown as soon as one of the constraints it
-uses is unknown (and only then). -/
+/-- Paper, Definition 4.4: the weakest precondition is undefined as soon as one of the constraints it
+uses is dropped (and only then). -/
 theorem wp_eq_none_iff (Γ : Cons n) (P : PP n) :
     Γ.wp P = none ↔ ∃ r, Γ.w r (P.letter r) = none := by
   rw [← Option.not_isSome_iff_eq_none, Cons.wp_isSome_iff]
   push Not
   simp only [ne_eq, Option.not_isSome_iff_eq_none]
 
-/-- Paper, Section 6.2: `wp(⋆) = ⋆` (composition binds an unknown constraint to an unknown). -/
+/-- Paper, Definition 4.11: composition keeps a dropped constraint dropped. -/
 @[simp] theorem wp_unknown (Γ : Cons n) : (none : Option (PP n)).bind Γ.wp = none := rfl
 
-/-- **Paper, Section 6.2: Lemma 4.5 still holds for known weakest preconditions.** If `V ⊨ Γ`
-and `wp_Γ(P) ≠ ⋆`, then `wp_Γ(P) = Vᴴ P V`. (This is the core's `Cons.wp_toMatrix`.) -/
+/-- **Paper, Lemma 4.5, where the weakest precondition is defined.** If `V ⊨ Γ` and `wp_Γ(P)` is defined, then `wp_Γ(P) = Vᴴ P V`. (This is the core's `Cons.wp_toMatrix`.) -/
 theorem lemma_4_5_unknowns {Γ : Cons n} {V : Density n} (hV : Models V Γ) {P B : PP n}
     (h : Γ.wp P = some B) : B.toMatrix = Vᴴ * P.toMatrix * V :=
   Cons.wp_toMatrix hV h
 
-/-- Paper, Section 6.2: `σ₂ ∘ σ₁ = ⊤` when `⋆ ∈ wp_{Γ₁}(𝒜₂)`, and `⊤ ∘ σ = σ ∘ ⊤ = ⊤`
+/-- Paper, Definition 6.5: `σ₂ ∘ σ₁ = ⊤` when `wp_{Γ₁}(A)` is undefined for some `A ∈ 𝒜₂`, and `⊤ ∘ σ = σ ∘ ⊤ = ⊤`
 (the core's `ARel.comp` and `Dom.comp`). -/
 theorem comp_eq_top {σ₁ σ₂ : ARel n} (h : ∃ A ∈ σ₂.axes, σ₁.cons.wp A = none) :
     (.rel σ₂ : Dom n) ⊚ .rel σ₁ = .top ∧ ∀ σ : Dom n, .top ⊚ σ = .top ∧ σ ⊚ .top = .top := by
@@ -249,7 +248,7 @@ end Dom
 
 /-! ## Join (Definition 6.6, Lemma 6.7) -/
 
-/-- Paper, Definition 6.6, for one generator `W`: `Γ₁(W)` if `Γ₁(W) = Γ₂(W)`, and `⋆` otherwise. -/
+/-- Paper, Definition 6.6, for one generator `W`: `Γ₁(W)` if `Γ₁(W) = Γ₂(W)`, and dropped otherwise. -/
 def joinV (a b : Option (PP n)) : Option (PP n) := if a = b then a else none
 
 /-- Paper, Definition 6.6: the join of constraints, generator by generator. -/
@@ -446,8 +445,8 @@ theorem joinV_toNat_lt {a b : Option (PP n)} (h : joinV a b ≠ a) :
 theorem known_join_le (Γ Γ' : Cons n) : (Γ.join Γ').known ≤ Γ.known :=
   Finset.sum_le_sum fun _ _ => Nat.add_le_add (joinV_toNat_le _ _) (joinV_toNat_le _ _)
 
-/-- The join can only make constraints unknown: if it changes the constraints, it decreases the
-number of known ones. -/
+/-- The join can only drop constraints: if it changes the constraints, it decreases their
+number. -/
 theorem known_join_lt {Γ Γ' : Cons n} (h : Γ.join Γ' ≠ Γ) : (Γ.join Γ').known < Γ.known := by
   have : ∃ q, joinV (Γ.x q) (Γ'.x q) ≠ Γ.x q ∨ joinV (Γ.z q) (Γ'.z q) ≠ Γ.z q := by
     by_contra hc
@@ -750,7 +749,7 @@ theorem loopFix_spec (N : ℕ) (f : List (Dom n) → List (Dom n))
       exact (LeL.of_subset fun σ hσ => List.mem_append_left _ hσ).trans (le_collapse N _)
 
 /-- The fuel of the loop iteration (enough rounds of up to `N` steps for each of the `2n`
-constraints to become unknown; soundness does not depend on it). -/
+constraints to be dropped; soundness does not depend on it). -/
 def fuel (N n : ℕ) : ℕ := (2 * n + 3) * (N + 2)
 
 /-- **The disjunctive analysis** with bound `N`: the abstract state after running `C` from the
@@ -917,10 +916,10 @@ theorem example_6_3_reset_F :
     obtain ⟨h1, h2⟩ := (comm_X_Z_iff P 0).2 h
     exact ⟨B, hB, (comm_wp_iff hm hB hX).2 h1, (comm_wp_iff hm hB hZ).2 h2⟩
 
-/-- Paper, Section 6.2: with `⋆ ↦ Z₂` and every other constraint that of the identity. -/
+/-- Paper, Section 4.2: no constraint on `Z₂`, and every other constraint that of the identity. -/
 def consUnk : Cons 2 := ⟨![some (Xq 0), some (Xq 1)], ![some (Zq 0), none]⟩
 
-/-- **Paper, Section 6.2**: `wp(X₂) = X₂`, but `wp(Z₁Z₂) = ⋆`. -/
+/-- **Paper, Section 4.2**: `wp(X₂) = X₂`, but `wp(Z₁Z₂)` is undefined. -/
 theorem unknowns_example :
     consUnk.wp (Xq 1) = some (Xq 1) ∧ consUnk.wp ((Zq 0).mul (Zq 1)) = none := by decide
 
@@ -928,7 +927,7 @@ theorem unknowns_example :
 def hMeasIf : Program 2 := seq hMeas (ifThen (gate (gX 1)))
 
 /-- The relation after the conditional (Example 6.8 and Section 2.4):
-`Z₁ ↦ X₁, X₁ ↦ Z₁, X₂ ↦ X₂, ⋆ ↦ Z₂`, `𝒜 = {X₁}`. -/
+`Z₁ ↦ X₁, X₁ ↦ Z₁, X₂ ↦ X₂` (no constraint on `Z₂`), `𝒜 = {X₁}`. -/
 def sigmaJoin : ARel 2 := ⟨⟨![some (Zq 0), some (Xq 1)], ![some (Xq 0), none]⟩, [Xq 0]⟩
 
 /-- **Paper, Example 6.8**: the `if` branch changes `Z₂ ↦ Z₂` to `-Z₂ ↦ Z₂`, the `else` branch
@@ -960,12 +959,12 @@ def loopCX : Program 2 := loop (gate cx12)
 /-- Loop-simple of Amy and Lunderville, `T₁; while (*) {CX_{1,2}}; T₁†`. -/
 def loopSimple : Program 2 := seq (seq (rz 0 (Real.pi / 4)) loopCX) (rz 0 (-(Real.pi / 4)))
 
-/-- `σ₁` of Example 6.13: `⋆ ↦ X₁`, `⋆ ↦ Z₂`, the other constraints those of the identity, no
-axes. -/
+/-- `σ₁` of Example 6.13: no constraints on `X₁` and `Z₂`, the other constraints those of the
+identity, no axes. -/
 def sigmaLoop : Dom 2 := .rel ⟨⟨![none, some (Xq 1)], ![some (Zq 0), none]⟩, []⟩
 
 /-- **Paper, Example 6.13**: `σ₀ = α(I)`; `α(CX_{1,2})` disagrees with the identity on the constraint on `X₁` and
-the constraint on `Z₂`, so `σ₁` makes them unknown; and `σ₂ = σ₁`. -/
+the constraint on `Z₂`, so `σ₁` drops them; and `σ₂ = σ₁`. -/
 theorem example_6_13_iterates :
     loopIter (gate cx12).alpha 0 = alphaI 2 ∧
     (gate cx12).alpha = .rel ⟨⟨![some ((Xq 0).mul (Xq 1)), some (Xq 1)],
@@ -1022,7 +1021,7 @@ relations `α(I)` and `α(CX_{1,2})` apart instead of joining them. -/
 theorem disj_loopCX :
     Disj.run Disj.implBound loopCX [alphaI 2] = [alphaI 2, (gate cx12).alpha] := by decide
 
-/-- The single relation `σ₁` does not track `X₁` (`⋆ ↦ X₁`). -/
+/-- The single relation `σ₁` does not track `X₁` (it has no constraint on `X₁`). -/
 theorem sigmaLoop_X1 : ∀ s, sigmaLoop = .rel s → Xq 0 ∉ s.F := by
   rintro s ⟨⟩; decide
 

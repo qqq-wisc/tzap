@@ -22,8 +22,8 @@ import PauliFold.StateFold.Exact
   stands gives back the linear abstraction:
   `SF.alphaGamma (SF.run gs) = γ_L(ρ) = affGamma gs` (`alphaGamma_run_eq_gammaL`,
   `alphaGamma_run_eq_affGamma`).
-* **Section 2.2, dropping constraints**: after `H₁; CX_{1,2}; T₂` with `⋆ ↦ X₂`, another
-  `CX_{1,2}` makes the constraint on `X₁` unknown too (`overview_drop_CX`); the dropped constraints are sound
+* **Section 2.2, dropping constraints**: after `H₁; CX_{1,2}; T₂` with the constraint on `X₂` dropped,
+  another `CX_{1,2}` drops the constraint on `X₁` too (`overview_drop_CX`); the dropped constraints are sound
   before and after the `CX` (`overview_drop_sound`, `overview_drop_CX_sound`).
 
 Qubits are 0-indexed: the paper's qubits 1 and 2 are the Lean qubits `0` and `1`.
@@ -356,26 +356,26 @@ theorem linear_not_exact_HH :
     have := congrFun h 0
     simp at this
 
-/-! ## Section 2.2: unknowns are contagious -/
+/-! ## Section 2.2: dropping is contagious -/
 
 namespace Examples
 
 /-- Paper, Section 2.2, cut 2 of `H₁; CX_{1,2}; T₂` with the constraint `T₂` breaks dropped:
-the tableau of `H₁; CX_{1,2}` with `⋆ ↦ X₂` (Lean `x 1 = none`):
-`Z₁X₂ ↦ X₁, X₁ ↦ Z₁, ⋆ ↦ X₂, X₁Z₂ ↦ Z₂`. -/
+the tableau of `H₁; CX_{1,2}` without the constraint on `X₂` (Lean `x 1 = none`):
+`Z₁X₂ ↦ X₁, X₁ ↦ Z₁, X₁Z₂ ↦ Z₂`. -/
 def consDrop : Cons 2 := ⟨![some Z1X2, none], ![some (Xq 0), some X1Z2]⟩
 
 theorem consDrop_eq : consDrop = { exCons with x := Function.update exCons.x 1 none } := by
   decide
 
-/-- The constraints after one more `CX_{1,2}`: `⋆ ↦ X₁, X₁ ↦ Z₁, ⋆ ↦ X₂, Z₂ ↦ Z₂`. -/
+/-- The constraints after one more `CX_{1,2}`: `X₁ ↦ Z₁, Z₂ ↦ Z₂`. -/
 def consDropCX : Cons 2 := ⟨![none, none], ![some (Xq 0), some (Zq 1)]⟩
 
 /-- **Paper, Section 2.2**: "a later `CX_{1,2}` mixes the constraint on `X₂` into the one on `X₁`,
-making it unknown too." Composing the dropped constraints of cut 2 with `α(CX_{1,2})` (Lean `CX_{0,1}`): the
-`CX` has `X₁X₂ ↦ X₁`, whose weakest precondition needs the unknown constraint on `X₂`, so the
-constraint on `X₁` becomes `⋆ ↦ X₁` (Lean `x 0 = none`); the constraint on `X₂` stays unknown, and
-the constraints on `Z₁` and `Z₂` stay known (`X₁ ↦ Z₁`, and `Z₂ ↦ Z₂` since
+so that one must go too." Composing the partial tableau of cut 2 with `α(CX_{1,2})` (Lean `CX_{0,1}`): the
+`CX` has `X₁X₂ ↦ X₁`, whose weakest precondition needs the dropped constraint on `X₂`, so the
+constraint on `X₁` is dropped (Lean `x 0 = none`); the constraint on `X₂` stays dropped, and
+the constraints on `Z₁` and `Z₂` remain (`X₁ ↦ Z₁`, and `Z₂ ↦ Z₂` since
 `wp(Z₁Z₂) = X₁ · X₁Z₂ = Z₂`). Without the drop, the constraint on `X₁` would be `Z₁ ↦ X₁` (since
 `CX_{1,2}; CX_{1,2}` is the identity). At the level of abstract relations, the composition is
 `(consDropCX, ∅)`. -/
@@ -391,9 +391,9 @@ theorem overview_drop_CX :
 /-- `consDrop` only forgets constraints of the tableau of `H₁; CX_{1,2}`. -/
 theorem exCons_le_consDrop : exCons.Le consDrop := by decide
 
-/-- **Paper, Section 2.2**: forgetting the broken constraint (`⋆ ↦ X₂`) is sound: `⟦H₁; CX_{1,2}; T₂⟧` is in the
+/-- **Paper, Section 2.2**: dropping the broken constraint on `X₂` is sound: `⟦H₁; CX_{1,2}; T₂⟧` is in the
 concretization of the dropped constraints (no axes). A string tracked by `consDrop` has `I` or
-`Z` on qubit 2 (Lean `1`), since `⋆ ↦ X₂`, so it commutes with `T₂`. -/
+`Z` on qubit 2 (Lean `1`), since the constraint on `X₂` is dropped, so it commutes with `T₂`. -/
 theorem overview_drop_sound :
     Circuit.sem exCirc ∈ (Dom.rel ⟨consDrop, []⟩ : Dom 2).gamma := by
   have hs := Circuit.soundness exCirc

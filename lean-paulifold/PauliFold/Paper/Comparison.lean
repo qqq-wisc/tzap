@@ -1,5 +1,6 @@
 import PauliFold.Paper.Circuits
 import PauliFold.Alpha
+import PauliFold.StateFold.DegreeTwo
 import Mathlib.Algebra.Field.ZMod
 import Mathlib.LinearAlgebra.Dual.Lemmas
 
@@ -1021,11 +1022,92 @@ theorem polynomial_more_precise (d : ℕ) (hd : 1 ≤ d) :
   ⟨Xq_mat_unitary 0, midA_X_mem, Xq_takes_Zq_neg 0, fun h =>
     not_takes_of_anticomm (Xq_Zq_anticomm 0) (midA_polynomial d hd _ h).1⟩
 
+/-! ### The polynomial abstraction is more precise at degree `≥ 2`: compute, use, uncompute -/
+
+/-- The circuit `g :: gs`, as left-nested sequential compositions. -/
+def CTCirc.ofList : CTGate n → List (CTGate n) → CTCirc n
+  | g, [] => .gate g
+  | g, g' :: gs => .seq (.gate g) (CTCirc.ofList g' gs)
+
+theorem CTCirc.toList_ofList : ∀ (g : CTGate n) (gs : List (CTGate n)),
+    (CTCirc.ofList g gs).toList = g :: gs
+  | _, [] => rfl
+  | g, g' :: gs => by simp [CTCirc.ofList, CTCirc.toList_ofList g' gs]
+
+/-- The circuit `G; T†₁; G` of Section 7.2 between the two outer `T₁` gates (`SF.midE`), where
+`G` is a relative-phase Toffoli gate with target `q₁` (Lean `0`) and controls `q₂, q₃`: it
+computes `x₁ ⊕ x₂x₃` into `q₁`, rotates it, and uncomputes it. -/
+def midEC : CTCirc 3 := CTCirc.ofList (.h 0) SF.midE.tail
+
+theorem midEC_toList : midEC.toList = SF.midE := by
+  rw [midEC, CTCirc.toList_ofList]; rfl
+
+/-- Section 7.2: the Pauli abstraction of `G; T†₁; G` has the constraints of the identity (the
+Clifford gates of the two blocks cancel), and the first `T†` of the first block, right after its
+Hadamard gate, records the axis `X₁`. Since `Z₁` does not commute with `X₁`, the abstraction does
+not track `Z₁`. -/
+theorem midE_alpha :
+    (alphaRel midEC.toPaper).cons = Cons.id 3 ∧ Xq 0 ∈ (alphaRel midEC.toPaper).axes ∧
+      Zq 0 ∉ (alpha midEC.toPaper).F := by
+  have hc : (alphaRel midEC.toPaper).cons = Cons.id 3 := by decide
+  have hx : Xq 0 ∈ (alphaRel midEC.toPaper).axes := by decide
+  refine ⟨hc, hx, ?_⟩
+  rw [alpha_eq_rel, Dom.F_rel]
+  decide
+
+/-- Section 7.2: `γ(α(G; T†₁; G))` contains `X₁`, which takes `Z₁` to `-Z₁`. -/
+theorem midE_X_mem : (Xq (0 : Fin 3)).toMatrix ∈ (alpha midEC.toPaper).gamma := by
+  obtain ⟨hc, hx, -⟩ := midE_alpha
+  rw [alpha_eq_rel, Dom.gamma_rel]
+  intro P B hB hcomm
+  rw [hc, Cons.wp_id] at hB
+  cases hB
+  exact (hcomm _ hx).toMatrix.symm
+
+/-- Section 7.2: at every degree `d ≥ 2`, two HH rewrites (`SF.midE_proves`) let the polynomial
+abstraction derive `y₁ = v₁` for `G; T†₁; G`: every operator in its concretization takes `Z₁` to
+`Z₁`. -/
+theorem midE_polynomial (d : ℕ) (hd : 2 ≤ d) (U : Density 3)
+    (hU : U ∈ alphaGammaC d midEC.toList) :
+    Takes U (Zq 0) (Zq 0) ∧ ∀ st ∈ supp U, st.2 0 = st.1 0 := by
+  rw [midEC_toList] at hU
+  have hp : SF.Proves d (SF.run SF.midE) (BoolPolynomial.var 0) 0 false := by
+    obtain ⟨C, f', g', htr, heq⟩ := SF.midE_proves
+    exact ⟨C, f', g', htr.mono hd, heq⟩
+  have hmem : (zString {(0 : Fin 3)} false, zString {0} false) ∈ sfFacts d SF.midE :=
+    ⟨0, 0, false, rfl, rfl, hp⟩
+  have hf := alpha_refines_sf d SF.midE hU _ hmem
+  simp only [Holds, conj] at hf
+  have hUU : Uᴴ * U = 1 := mul_eq_one_comm.mp hU.1
+  have hc : U * (zString {(0 : Fin 3)} false).toMatrix = (zString {0} false).toMatrix * U := by
+    calc U * (zString {(0 : Fin 3)} false).toMatrix
+        = U * (zString {(0 : Fin 3)} false).toMatrix * (Uᴴ * U) := by rw [hUU, Matrix.mul_one]
+      _ = _ := by rw [← Matrix.mul_assoc, hf]
+  have hZ : (zString {(0 : Fin 3)} false).toMatrix = (Zq 0).toMatrix := by
+    rw [← PP.toMatrix_ofS, ← Zset_singleton]; rfl
+  refine ⟨by rw [Takes, ← hZ]; exact hc, fun st hst => ?_⟩
+  have e := (takes_zString_iff U {0} {0} false false).1 hc st.1 st.2 hst
+  simp only [parity, Finset.sum_singleton, bit, Bool.false_eq_true, if_false, add_zero] at e
+  revert e; cases st.2 0 <;> cases st.1 0 <;> simp [zmod2_one_ne_zero.symm]
+
+/-- **Paper, Section 7.2 ("The polynomial abstraction is more precise")**: on the
+compute-use-uncompute circuit `G; T†₁; G`, at every degree `d ≥ 2`, the unitary `X₁` is in
+`γ(α(C))` but not in the polynomial abstraction's concretization. So the polynomial abstraction
+merges the two outer `T₁` gates of `T₁; G; T†₁; G; T₁`, and the Pauli abstraction does not. -/
+theorem polynomial_more_precise_deg2 (d : ℕ) (hd : 2 ≤ d) :
+    (Xq (0 : Fin 3)).toMatrix ∈ Unitaries 3 ∧
+      (Xq (0 : Fin 3)).toMatrix ∈ (alpha midEC.toPaper).gamma ∧
+      Takes (Xq (0 : Fin 3)).toMatrix (Zq 0) (Zq 0).neg ∧
+      (Xq (0 : Fin 3)).toMatrix ∉ alphaGammaC d midEC.toList :=
+  ⟨Xq_mat_unitary 0, midE_X_mem, Xq_takes_Zq_neg 0, fun h =>
+    not_takes_of_anticomm (Xq_Zq_anticomm 0) (midE_polynomial d hd _ h).1⟩
+
 /-- **Paper, Section 7.2: "Neither abstraction refines the other, at any degree `d ≥ 1`."**
 For every `d ≥ 1` there is a circuit with a unitary in the polynomial abstraction's
 concretization `alphaGammaC d` but not in the Pauli abstraction's `γ(α(C))`
 (`CX_{1,2}; H₁; H₂; CX_{2,1}; H₂`, with `X₂`), and one with a unitary in `γ(α(C))` but not in
-`alphaGammaC d` (`H; T; T†; H`, with `X₁`).
+`alphaGammaC d` (`H; T; T†; H`, with `X₁`). For `d ≥ 2`, `polynomial_more_precise_deg2` gives a
+second witness for the latter, the compute-use-uncompute circuit `G; T†₁; G`.
 
 The witnesses are unitaries: `alphaGammaC` contains only unitaries while `γ` ranges over all
 operators, so a non-unitary operator such as `0 ∈ γ(α(C))` would separate them trivially. -/

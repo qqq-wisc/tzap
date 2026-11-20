@@ -705,6 +705,24 @@ theorem cuts :
     Zq 1 ∈ (alphaRel (T 1 ⨾ mid)).F := by
   decide
 
+/-- Paper, Figure 1 (table): at cut 2, the transition constraints are exactly those of `H₁`
+(Lean qubit `0`), and the only axis is `Z₂`. -/
+theorem cut2_table :
+    (alphaRel (T (1 : Fin 2) ⨾ mid)).cons = (alphaRel (gate (gH (0 : Fin 2)))).cons ∧
+      (alphaRel (T (1 : Fin 2) ⨾ mid)).axes = [Zq 1] := by
+  decide
+
+/-- Paper, Sections 2.3 and 6.2: the Clifford gates between the two `T` gates amount to a
+single Hadamard gate on `q₁`: their semantics is a scalar multiple of `H₁`. -/
+theorem mid_eq_H : ∃ c : ℂ, sem mid = c • (gH (0 : Fin 2)).mat := by
+  have hα : alpha mid = alpha (gate (gH (0 : Fin 2))) := by
+    rw [alpha_eq_rel, alpha_eq_rel]
+    congr 1
+    decide
+  have h := soundness mid
+  rw [hα, gamma_alpha_H] at h
+  exact h
+
 /-- Figure 1, via Theorem 5.1: the second `T` merges into the first. -/
 theorem before_eq : sem before = sem (rz 1 (Real.pi / 4 + Real.pi / 4) ⨾ mid) := by
   have h := fold_sem mid 1 1 1 (Or.inl rfl) (Real.pi / 4) _ (alpha_eq_rel _)

@@ -7,20 +7,20 @@ sequential composition
 
 One type serves Sections 4 and 6:
 
-* `Cons n`: constraints `Γ`, one left-hand side `Γ(W)` for each generator `W = X_q, Z_q`, each known
-  (`some P`) or unknown (`none`, the paper's `⋆`, Definition 6.4). The relations of Section 4
-  (Definition 4.2) are those with every constraint known (`Cons.AllKnown`).
+* `Cons n`: a partial tableau `Γ` (Definition 4.1): for each generator `W = X_q, Z_q`, a left-hand
+  side `Γ(W)` (`some P`) or no constraint (`none`). The tableaux of Section 4 (Definition 4.1) are
+  those with every constraint (`Cons.AllKnown`).
 * `ARel n`: a pair `(Γ, 𝒜)` with a list of axes (the paper's finite set).
 * `Dom n`: an abstract relation or `⊤` (Definition 6.4).
 
-A *model* (Definitions 4.1 and 6.4) is a unitary `V` with `Γ(X_q) = Vᴴ X_q V` and
-`Γ(Z_q) = Vᴴ Z_q V` for every *known* constraint. The paper requires every abstract relation to
+A *model* (Definition 4.1) is a unitary `V` with `Γ(X_q) = Vᴴ X_q V` and
+`Γ(Z_q) = Vᴴ Z_q V` for every constraint that `Γ` has. The paper requires every abstract relation to
 have a model; here this is the predicate `Cons.Sat` (`Dom.Sat`), and the abstraction is shown to
 produce only relations with a model.
 
-The weakest precondition (Definition 4.4, Section 6.2) is the syntactic computation
-`wp(i^k P₁ ⋯ Pₙ) = i^k w₁(P₁) ⋯ wₙ(Pₙ)`, unknown as soon as a needed constraint is; it is
-`PTab.back`. Lemma 4.5: for every model `V`, a known `wp(P)` is `Vᴴ P V`.
+The weakest precondition (Definition 4.4) is the syntactic computation
+`wp(i^k P₁ ⋯ Pₙ) = i^k w₁(P₁) ⋯ wₙ(Pₙ)`, undefined as soon as a needed constraint is dropped; it
+is `PTab.back`. Lemma 4.5: for every model `V`, a defined `wp(P)` is `Vᴴ P V`.
 -/
 
 namespace PauliFold.Paper
@@ -31,10 +31,10 @@ noncomputable section
 
 variable {n : ℕ}
 
-/-! ## Constraints and models (Definitions 4.1 and 6.4) -/
+/-! ## Partial tableaux and models (Definition 4.1) -/
 
-/-- Constraints `Γ`: the left-hand sides of the constraints `Γ(X_q) ↦ X_q` and `Γ(Z_q) ↦ Z_q` for every qubit `q`; `none` is the
-unknown `⋆` of Definition 6.4. -/
+/-- A partial tableau `Γ`: the left-hand sides of the constraints `Γ(X_q) ↦ X_q` and `Γ(Z_q) ↦ Z_q`
+for every qubit `q`; `none` means the constraint is dropped (Definition 4.1). -/
 @[ext] structure Cons (n : ℕ) where
   /-- `Γ(X_q)`, the left-hand side of the constraint on `X_q`. -/
   x : Fin n → Option (PP n)
@@ -65,7 +65,7 @@ theorem ofTables_allKnown (xs zs : Fin n → PP n) : (ofTables xs zs).AllKnown :
 
 end Cons
 
-/-- Paper, Definitions 4.1 and 6.4: `V` is a *model* of `Γ`, `V ⊨ Γ`, when `V` is unitary and
+/-- Paper, Definition 4.1: `V` is a *model* of `Γ`, `V ⊨ Γ`, when `V` is unitary and
 `Γ(X_q) = Vᴴ X_q V`, `Γ(Z_q) = Vᴴ Z_q V` for every known constraint. -/
 structure Models (V : Density n) (Γ : Cons n) : Prop where
   unitary : V ∈ Unitaries n
@@ -94,12 +94,12 @@ theorem CliffordGate.models (G : CliffordGate n) : Models G.mat (Cons.ofTables G
 namespace Cons
 
 /-- `w_q(L)` of Definition 4.4: `w_q(I) = I`, `w_q(X) = Γ(X_q)`, `w_q(Z) = Γ(Z_q)`,
-`w_q(Y) = i Γ(X_q) Γ(Z_q)`; unknown if a needed constraint is. -/
+`w_q(Y) = i Γ(X_q) Γ(Z_q)`; undefined if a needed constraint is dropped. -/
 def w (Γ : Cons n) (q : Fin n) (L : Letter) : Option (PP n) := Γ.toPTab.rowOf q L
 
 /-- Paper, Definition 4.4 (Weakest precondition):
-`wp_Γ(i^k P₁ ⊗ ⋯ ⊗ Pₙ) = i^k w₁(P₁) ⋯ wₙ(Pₙ)`, unknown (`none`) as soon as a factor is
-(Section 6.2). This is `PTab.back`. -/
+`wp_Γ(i^k P₁ ⊗ ⋯ ⊗ Pₙ) = i^k w₁(P₁) ⋯ wₙ(Pₙ)`, undefined (`none`) as soon as a factor is
+(Definition 4.4). This is `PTab.back`. -/
 def wp (Γ : Cons n) (P : PP n) : Option (PP n) := Γ.toPTab.back P
 
 /-- Definition 4.4, unfolded. -/
@@ -466,9 +466,9 @@ theorem Models.unique {Γ : Cons n} (hk : Γ.AllKnown) {V W : Density n} (hV : M
 
 /-! ## Abstract relations (Definitions 4.2 and 6.4) -/
 
-/-- Paper, Definition 4.2 (Abstract relations), with the unknowns of Definition 6.4: a pair
-`(Γ, 𝒜)` of constraints and axes. The axes are a list (the paper's finite set). Having a model
-is the separate predicate `Cons.Sat`. -/
+/-- Paper, Definition 4.2 (Abstract relations): a pair `(Γ, 𝒜)` of a partial tableau and axes.
+The axes are a list (the paper's finite set). Having a model is the separate predicate
+`Cons.Sat`. -/
 structure ARel (n : ℕ) where
   /-- The constraints `Γ`. -/
   cons : Cons n
@@ -494,7 +494,7 @@ instance : Top (Dom n) := ⟨.top⟩
 
 @[simp] theorem Dom.top_def : (⊤ : Dom n) = .top := rfl
 
-/-! ## Concretization (Definitions 4.6 and 6.5) -/
+/-! ## Concretization (Definitions 4.6 and 6.4) -/
 
 namespace ARel
 
@@ -508,8 +508,8 @@ instance (σ : ARel n) (P : PP n) : Decidable (σ.Tracked P) :=
   | some B => decidable_of_iff (∀ A ∈ σ.axes, PP.Comm B A)
       ⟨fun hc => ⟨B, h, hc⟩, fun ⟨B', hB', hc⟩ => by rw [h] at hB'; cases hB'; exact hc⟩
 
-/-- Paper, Definitions 4.6 and 6.5: the tracked Pauli strings
-`𝓕(σ) = {P | wp(P) ≠ ⋆ ∧ [wp(P), A] = 0 for all A ∈ 𝒜}`. -/
+/-- Paper, Definition 4.6: the tracked Pauli strings
+`𝓕(σ) = {P | wp(P) is defined ∧ [wp(P), A] = 0 for all A ∈ 𝒜}`. -/
 def F (σ : ARel n) : Set (PP n) := {P | σ.Tracked P}
 
 instance (σ : ARel n) : DecidablePred (· ∈ σ.F) := fun P =>
@@ -521,7 +521,7 @@ theorem mem_F_iff (σ : ARel n) (P : PP n) :
       ∀ A ∈ σ.axes, B.toMatrix * A.toMatrix - A.toMatrix * B.toMatrix = 0 := by
   simp only [F, Set.mem_ofPred_eq, Tracked, PP.comm_iff, sub_eq_zero]
 
-/-- Paper, Definitions 4.6 and 6.5 (Concretization):
+/-- Paper, Definition 4.6 (Concretization):
 `γ(σ) = {K ∈ 𝒪_n | K wp(P) = P K for all P ∈ 𝓕(σ)}`, over **all** matrices. -/
 def gamma (σ : ARel n) : Set (Density n) :=
   {K | ∀ P B, σ.cons.wp P = some B → (∀ A ∈ σ.axes, PP.Comm B A) →
@@ -554,7 +554,7 @@ end ARel
 
 namespace Dom
 
-/-- Paper, Definition 6.5: `γ(⊤) = 𝒪_n`, and `γ(σ)` as in Definition 4.6 otherwise. -/
+/-- Paper, Definition 6.4: `γ(⊤) = 𝒪_n`, and `γ(σ)` as in Definition 4.6 otherwise. -/
 def gamma : Dom n → Set (Density n)
   | top => Set.univ
   | rel σ => σ.gamma
@@ -588,12 +588,13 @@ theorem add_mem_gamma {σ : Dom n} {K L : Density n} (hK : K ∈ σ.gamma) (hL :
 
 end Dom
 
-/-! ## Sequential composition (Definition 4.11, Section 6.2) -/
+/-! ## Sequential composition (Definitions 4.11 and 6.5) -/
 
 namespace Cons
 
-/-- Paper, Definition 4.11: `(Γ₂ ∘ Γ₁)(W) = wp_{Γ₁}(Γ₂(W))`, unknown if `Γ₂(W)` is
-(Section 6.2: `wp(⋆) = ⋆`). -/
+/-- Paper, Figure 2: `(Γ₂ ∘ Γ₁)(W) = wp_{Γ₁}(Γ₂(W))`, which the paper writes left to right as
+`Γ₁ ⨟ Γ₂`. The constraint on `W` is dropped if `Γ₂` has none on `W` or the weakest precondition
+is undefined (paper, Section 5.2). -/
 def comp (Γ₂ Γ₁ : Cons n) : Cons n :=
   ⟨fun q => (Γ₂.x q).bind Γ₁.wp, fun q => (Γ₂.z q).bind Γ₁.wp⟩
 
@@ -700,8 +701,8 @@ end Cons
 
 namespace ARel
 
-/-- Paper, Definition 4.11 with Section 6.2:
-`σ₂ ∘ σ₁ = (Γ₂ ∘ Γ₁, 𝒜₁ ∪ wp_{Γ₁}(𝒜₂))`, and `⊤` if some `wp_{Γ₁}(A)`, `A ∈ 𝒜₂`, is unknown. -/
+/-- Paper, Definitions 4.11 and 6.5:
+`σ₂ ∘ σ₁ = (Γ₂ ∘ Γ₁, 𝒜₁ ∪ wp_{Γ₁}(𝒜₂))`, and `⊤` if some `wp_{Γ₁}(A)`, `A ∈ 𝒜₂`, is undefined. -/
 def comp (σ₂ σ₁ : ARel n) : Dom n :=
   if ∀ A ∈ σ₂.axes, (σ₁.cons.wp A).isSome then
     .rel ⟨σ₂.cons.comp σ₁.cons, σ₁.axes ++ σ₂.axes.filterMap σ₁.cons.wp⟩
@@ -713,7 +714,7 @@ theorem comp_of_allKnown {σ₁ : ARel n} (h : σ₁.cons.AllKnown) (σ₂ : ARe
 
 end ARel
 
-/-- Paper, Definition 4.11 and Section 6.2: sequential composition `σ₂ ∘ σ₁` of abstract
+/-- Paper, Definitions 4.11 and 6.5: sequential composition `σ₂ ∘ σ₁` of abstract
 relations, with `⊤ ∘ σ = σ ∘ ⊤ = ⊤`. -/
 def Dom.comp : Dom n → Dom n → Dom n
   | .rel σ₂, .rel σ₁ => σ₂.comp σ₁

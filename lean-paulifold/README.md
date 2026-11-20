@@ -7,28 +7,38 @@ it. There is no `sorry` or `native_decide`; the results depend only on `propext`
 Conventions:
 
 - Qubits are 0-indexed: the paper's qubits 1 and 2 are Lean `0` and `1`.
-- `Γ.x q` and `Γ.z q` are the left-hand sides of the constraints `Γ(X_q) ↦ X_q` and
-  `Γ(Z_q) ↦ Z_q`; `none` is `⋆`. Axes are lists.
-- `T` is `R_Z(π/4)`.
+- A `Cons` `Γ` is a set of transition constraints, possibly partial: `Γ.x q` and `Γ.z q` are the
+  left-hand sides of the constraints `Γ(X_q) ↦ X_q` and `Γ(Z_q) ↦ Z_q`; `none` means the
+  constraint is dropped. Section 3 of the paper uses full tableaux, which are the case
+  `Cons.AllKnown` (`Cons.AllKnown.comp`, `Cons.wp_isSome_of_allKnown`, `Circuit.alpha_spec`).
+- The paper writes composition left to right, `σ₁ ⨟ σ₂`; Lean writes the same operation right
+  to left, `σ₂ ⊚ σ₁` (`Cons.comp Γ₂ Γ₁`, `ARel.comp σ₂ σ₁`), with the same meaning.
+- Commutation constraints (axes) are lists; the concretization depends only on their elements.
+- `T` is `R_Z(π/4)`, which differs from `diag(1, e^{iπ/4})` by a global phase.
 - The polynomial abstraction (`alphaGammaC`) is the most precise result of any sequence of
   degree-`d` HH and ω rewrites, over unitaries.
+- Docstrings in the Lean files cite an earlier numbering of the paper; the table below gives
+  the current numbering.
 
 | paper | Lean |
 |---|---|
-| Defs 3.1–3.7 | `PP`, `Paulis`, `Takes`, `Cliffords`, `rzMat`, `Circuit`, `Circuit.sem`, `Circuit.Equiv` |
-| Defs 4.1, 4.2 | `Models`, `ARel`, `Dom` |
-| Def 4.4, Lemma 4.5 | `Cons.wp`, `Cons.wp_toMatrix` |
-| Def 4.6 | `ARel.F`, `ARel.gamma` |
-| Defs 4.8, 4.10, 4.11, 4.13 | `CliffordGate.cons`, `Circuit.alpha`, `Cons.comp`, `ARel.comp` |
-| Lemma 4.14, Thm 4.15 | `lemma_4_14_*`, `Circuit.soundness` |
-| Thm 5.1, Alg 1, Thm 5.2 | `phase_folding`, `phaseFold`, `phaseFold_correct` |
-| Def 6.1, Lemma 6.2 | `alphaMeas`, `alphaReset`, `lemma_6_2` |
-| Defs 6.4–6.6, Lemma 6.7 | `Dom`, `ARel.gamma`, `Dom.join`, `lemma_6_7` |
-| Defs 6.9–6.11, Lemma 6.12, Thm 6.14 | `Program`, `Program.psem`, `Program.alpha`, `lemma_6_12`, `theorem_6_14` |
-| §8.4, bounded disjunction | `Disj.program_sound_impl` |
-| Defs 7.1–7.3, Thm 7.4 | `LinState`, `supp`, `gammaL`, `pauli_refines_linear`, `pauli_refines_linear_strict` |
-| §7.2, incomparability | `pauli_polynomial_incomparable` |
+| §3.1, Defs 3.1–3.5 | `PP`, `Paulis`, `Takes`, `PP.comm_or_anticomm`, `Cliffords`, `CliffordGate`, `rzMat`, `Circuit`, `Circuit.sem`, `EquivP`, `Circuit.Equiv` |
+| Def 3.6 | `Cons`, `Cons.AllKnown`, `Models` |
+| Def 3.7, Ex 3.8 | `ARel`, `Cons.Sat`; `Examples.example_4_3`, `example_4_3_model` |
+| Def 3.9, Lemma 3.10 | `Cons.wp`, `Cons.wp_isSome_of_allKnown`; `Cons.wp_toMatrix`, `Cons.wp_conj`, `Cons.wp_mul` |
+| Def 3.11, Ex 3.12 | `ARel.F`, `ARel.gamma`, `ARel.mem_F_iff`; `Examples.example_4_7*` |
+| Def 3.13 (Fig. 2), Ex 3.14 | `CliffordGate.cons`, `Cons.id`, `Circuit.alpha`, `Cons.comp`, `ARel.comp`, `Models.comp`; `Examples.example_4_9_H`, `example_4_9_CX`, `example_4_12`, `example_4_12_T` |
+| Fig. 3 | `lemma_4_14_H`, `_S`, `_X`, `_Z`, `_CX`, `_rz` |
+| Thm 3.15 | `Circuit.soundness`, `Circuit.takes_of_tracked` |
+| Thm 4.1, Alg. 1, Thm 4.2 | `phase_folding`, `phaseFold`, `phaseFold_correct` |
+| Fig. 1 | `Figure1.cuts`, `Figure1.cut2_table`, `Figure1.mid_eq_H`, `Figure1.figure1` |
+| Def 5.1, Lemma 5.2, Ex 5.3 | `alphaMeas`, `alphaReset`, `lemma_6_2`; `Examples.example_6_3*` |
+| Def 5.4, §5.2 (dropped constraints, ⊤), Lemma 5.5, Ex 5.6 | `Cons.join`, `ARel.join`, `Dom.join`, `Dom`, `comp_eq_top`, `Dom.top_join`, `Dom.join_top`; `lemma_6_7`; `Examples.example_6_8*` |
+| Defs 5.7–5.9, Lemma 5.10, Ex 5.11, Thm 5.12 | `Program`, `Program.psem`, `Program.alpha`, `lemma_6_12`, `Examples.example_6_13*`, `theorem_6_14` |
+| §7.3, bounded disjunction | `Disj.program_sound_impl` |
+| Defs 6.1–6.3, Thm 6.4 | `LinState`, `supp`, `gammaL`, `pauli_refines_linear`, `pauli_refines_linear_strict` |
+| §6.2, incomparability | `pauli_polynomial_incomparable`, `polynomial_more_precise`, `polynomial_more_precise_deg2`, `pauli_more_precise` |
 
-Examples are `example_<section>_<number>`; the claims of Section 2 are in `Paper/Claims.lean`
-and `Paper/Extras.lean`. The rest of `PauliFold/` is an earlier development that `Paper/` builds
-on.
+Examples are `example_<section>_<number>` in the earlier numbering; the claims of Section 2 are
+in `Paper/Claims.lean` and `Paper/Extras.lean`. The rest of `PauliFold/` is an earlier
+development that `Paper/` builds on.
