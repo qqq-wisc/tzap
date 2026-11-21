@@ -24,6 +24,7 @@ import PauliFold.Paper.Relation
 import PauliFold.Paper.Circuits
 import PauliFold.Paper.Programs
 import PauliFold.Paper.PhaseFolding
+import PauliFold.Paper.ProgramFolding
 import PauliFold.Paper.Extras
 import PauliFold.Paper.Comparison
 import PauliFold.Paper.Claims

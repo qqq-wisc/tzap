@@ -35,7 +35,8 @@ Conventions:
 | Def 5.1, Lemma 5.2, Ex 5.3 | `alphaMeas`, `alphaReset`, `lemma_6_2`; `Examples.example_6_3*` |
 | Def 5.4, §5.2 (dropped constraints, ⊤), Lemma 5.5, Ex 5.6 | `Cons.join`, `ARel.join`, `Dom.join`, `Dom`, `comp_eq_top`, `Dom.top_join`, `Dom.join_top`; `lemma_6_7`; `Examples.example_6_8*` |
 | Defs 5.7–5.9, Lemma 5.10, Ex 5.11, Thm 5.12 | `Program`, `Program.psem`, `Program.alpha`, `lemma_6_12`, `Examples.example_6_13*`, `theorem_6_14` |
-| §7.3, bounded disjunction | `Disj.program_sound_impl` |
+| Cor 5.13 (phase folding for programs) | `program_folding`, `psem_seq_congr`, `psem_choice_congr`, `psem_loop_congr`, `loopSimple_folds` (in `Paper/ProgramFolding.lean`) |
+| §7.3, bounded disjunction | `Disj.program_sound_impl`, `program_folding_disj` |
 | Defs 6.1–6.3, Thm 6.4 | `LinState`, `supp`, `gammaL`, `pauli_refines_linear`, `pauli_refines_linear_strict` |
 | §6.2, incomparability | `pauli_polynomial_incomparable`, `polynomial_more_precise`, `polynomial_more_precise_deg2`, `pauli_more_precise` |
 
